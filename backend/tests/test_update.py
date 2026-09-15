@@ -256,6 +256,74 @@ def test_cached_result_keeps_local_state():
     assert "installKind" in out
 
 
+def _with_probe(results: list, calls: list):
+    """替换 update_service._probe，按顺序返回预设结果，并记录 direct 标志。"""
+
+    async def fake_probe(url: str, *, direct: bool):  # noqa: ANN202
+        calls.append(direct)
+        idx = min(len(calls) - 1, len(results) - 1)
+        return results[idx]
+
+    return fake_probe
+
+
+def _run_fetch(results: list):
+    calls: list[bool] = []
+    orig = update_service._probe
+    update_service._probe = _with_probe(results, calls)  # type: ignore[assignment]
+    try:
+        return asyncio.run(update_service._fetch_release("github", "me/repo")), calls
+    finally:
+        update_service._probe = orig  # type: ignore[assignment]
+
+
+def test_fetch_release_tries_direct_before_proxy():
+    """直连优先：机场共享 IP 常被 GitHub 限流，能直连就别绕。"""
+    (data, err), calls = _run_fetch([(200, {"tag_name": "v9.9.9"}, "")])
+    assert data == {"tag_name": "v9.9.9"}
+    assert err == ""
+    assert calls == [True], calls
+
+
+def test_fetch_release_falls_back_to_proxy_on_rate_limit():
+    """直连被限流（403）→ 换系统代理再试一次。"""
+    (data, err), calls = _run_fetch(
+        [(403, None, ""), (200, {"tag_name": "v9.9.9"}, "")]
+    )
+    assert data == {"tag_name": "v9.9.9"}, err
+    assert err == ""
+    assert calls == [True, False], calls
+
+
+def test_fetch_release_does_not_retry_on_404():
+    """仓库不存在是确定结论，不必再走代理试一遍。"""
+    (data, err), calls = _run_fetch([(404, None, "")])
+    assert data is None
+    assert "没有仓库" in err
+    assert calls == [True], calls
+
+
+def test_fetch_release_reports_both_paths():
+    """两条路都失败时，错误里要能看出分别发生了什么。"""
+    (data, err), calls = _run_fetch([(0, None, "ConnectError"), (0, None, "ConnectError")])
+    assert data is None
+    assert "直连" in err and "系统代理" in err, err
+    assert calls == [True, False], calls
+
+
+def test_probe_direct_does_not_leak_through_system_proxy():
+    """直连探测不能被系统代理劫持。
+
+    背景：httpx 在 Windows 上会读注册表代理（trust_env=True 的默认行为），
+    用户一开 VPN，更新检查就被导向共享出口 IP 从而被 GitHub 限流 403。
+    网络不可达时跳过；但只要拿到了 403/429 就说明代理又漏进来了。
+    """
+    code, _data, err = asyncio.run(
+        update_service._probe("https://api.github.com/rate_limit", direct=True)
+    )
+    assert code not in (403, 429), f"直连却拿到 {code}，疑似又走了系统代理：{err}"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -180,19 +180,58 @@ def _release_url(source: str, repo: str) -> str:
     return f"{source.rstrip('/')}/{repo}/releases/latest"
 
 
-async def _fetch_release(source: str, repo: str) -> tuple[dict | None, str]:
-    """取最新 Release。返回 (数据, 错误消息)；成功时错误为空串。"""
-    url = _release_url(source, repo)
+async def _probe(url: str, *, direct: bool) -> tuple[int, dict | None, str]:
+    """发一次 GET，返回 (状态码, JSON 或 None, 错误说明)。
+
+    `direct=True` 表示**忽略系统代理**。这一点必须显式控制：httpx 默认
+    `trust_env=True`，而它在 Windows 上是走 `urllib.request.getproxies()`，
+    **会读注册表里的 IE/WinINET 代理设置**。用户一开 VPN，请求就会被静默
+    导向代理出口；共享的机场 IP 常被 GitHub 限流（403），于是本机直连明明
+    能通、应用内却报错。所以两条路都要试，而不是听天由命。
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "xiaoma-ai-studio",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
     try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"Accept": "application/vnd.github+json"})
+        async with httpx.AsyncClient(
+            timeout=20.0, follow_redirects=True, trust_env=not direct
+        ) as client:
+            resp = await client.get(url, headers=headers)
     except httpx.HTTPError as e:
-        return None, f"{source} 连不上（{e.__class__.__name__}）"
-    if resp.status_code == 200:
-        return resp.json() or {}, ""
-    if resp.status_code == 404:
-        return None, f"{source} 上没有仓库「{repo}」或它还没发布 Release"
-    return None, f"{source} 返回 HTTP {resp.status_code}"
+        return 0, None, f"{e.__class__.__name__}：{e}"[:200]
+    if resp.status_code != 200:
+        return resp.status_code, None, ""
+    try:
+        return 200, resp.json() or {}, ""
+    except ValueError:
+        return 200, None, "响应不是合法 JSON"
+
+
+async def _fetch_release(source: str, repo: str) -> tuple[dict | None, str]:
+    """取最新 Release。返回 (数据, 错误消息)；成功时错误为空串。
+
+    先直连、失败再走系统代理：
+    - 直连优先是为了避开「机场共享 IP 被 GitHub 限流」；
+    - 代理兜底是为了照顾 GitHub API 本身被墙的网络环境。
+    """
+    url = _release_url(source, repo)
+    errors: list[str] = []
+    for label, direct in (("直连", True), ("系统代理", False)):
+        code, data, err = await _probe(url, direct=direct)
+        if code == 200 and data is not None:
+            return data, ""
+        if code == 404:
+            return None, f"{source} 上没有仓库「{repo}」或它还没发布 Release"
+        if code == 0:
+            errors.append(f"{source} {label}连不上（{err}）")
+            continue
+        if code in (403, 429):
+            errors.append(f"{source} {label}被限流（HTTP {code}）")
+            continue
+        errors.append(f"{source} {label}返回 HTTP {code}")
+    return None, "；".join(errors) or f"{source} 检查失败"
 
 
 async def check_update(force: bool = False) -> dict[str, Any]:
