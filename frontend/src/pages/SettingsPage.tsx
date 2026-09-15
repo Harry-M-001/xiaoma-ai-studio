@@ -546,7 +546,9 @@ function AboutPanel() {
             {status.hasUpdate ? (
               <>
                 发现新版本 <strong>v{status.latest.replace(/^v/i, "")}</strong>
-                {status.usedSource && status.usedSource !== status.source ? `（来自 ${status.usedSource}）` : ""}
+                {status.usedSource && status.usedSource !== status.source
+                  ? `（来自 ${status.usedSource} · ${status.usedRepo}）`
+                  : ""}
                 {status.publishedAt ? ` · 发布于 ${status.publishedAt.slice(0, 10)}` : ""}
               </>
             ) : (

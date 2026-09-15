@@ -198,27 +198,32 @@ async def _fetch_release(source: str, repo: str) -> tuple[dict | None, str]:
 async def check_update(force: bool = False) -> dict[str, Any]:
     """检查更新。未配置仓库地址时返回可读提示，不报错。
 
-    配置的更新源不通时自动退到另一个源（国内 GitHub API 常被挡，
-    所以默认按配置优先、另一源兜底）。
+    GitHub 与 Gitee 的**账号名往往不同**（GitHub: 用户名，Gitee: 另一个用户名），
+    所以两个源各支持一个仓库路径：`update.repo` 给 GitHub，`update.repo_gitee`
+    给 Gitee（留空则复用前者）。配置的源不通时自动退到另一个源。
     """
     state = await local_state()
     source = str(runtime_value("update.source", "github") or "github").strip()
-    repo = str(runtime_value("update.repo", "") or "").strip()
+    github_repo = str(runtime_value("update.repo", "") or "").strip()
+    gitee_repo = str(runtime_value("update.repo_gitee", "") or "").strip()
+    repos: dict[str, str] = {"github": github_repo, "gitee": gitee_repo or github_repo}
+    primary_repo = repos.get(source) or github_repo or gitee_repo
     state["source"] = source
-    state["repo"] = repo
+    state["repo"] = primary_repo
+    state["repoGitee"] = repos.get("gitee", "")
 
-    if not repo:
+    if not primary_repo:
         state.update(
             {
                 "hasUpdate": False,
                 "error": "尚未配置更新源仓库，请到「系统设置 → 系统配置」填写 update.repo"
-                "（形如 用户名/仓库名）",
+                "（GitHub 用 用户名/仓库名；Gitee 账号名不同时另填 update.repo_gitee）",
             }
         )
         return state
 
     now = time.time()
-    cache_key = f"{source}:{repo}"
+    cache_key = f"{source}:{primary_repo}"
     if not force and _cache.get("key") == cache_key and now - float(_cache.get("at", 0)) < _CHECK_TTL:
         # 缓存里只有 Release 信息，本地状态（版本 / commit / 安装方式 / 仓库）每次都要取最新
         merged = dict(state)
@@ -233,15 +238,20 @@ async def check_update(force: bool = False) -> dict[str, Any]:
         "publishedAt": "",
         "checkedAt": "",
         "usedSource": "",
+        "usedRepo": "",
     }
 
     data: dict | None = None
     errors: list[str] = []
     order = [source, *[s for s in _SOURCES if s != source]]
     for candidate in order:
-        data, err = await _fetch_release(candidate, repo)
+        cand_repo = repos.get(candidate, "")
+        if not cand_repo:
+            continue
+        data, err = await _fetch_release(candidate, cand_repo)
         if data is not None:
             result["usedSource"] = candidate
+            result["usedRepo"] = cand_repo
             break
         errors.append(err)
 

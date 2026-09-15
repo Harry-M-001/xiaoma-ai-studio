@@ -329,17 +329,20 @@ export interface UpdateStatus {
   dirty: boolean | null;
   repoRoot: string;
   gitAvailable: boolean;
-  /** 配置的更新源与仓库（owner/repo） */
+  /** 配置的更新源与仓库（owner/repo）；repo 是当前配置源对应的那个 */
   source: string;
   repo: string;
+  /** Gitee 专用仓库路径（两个平台账号名不同时单独配） */
+  repoGitee: string;
   hasUpdate: boolean;
   latest: string;
   notes: string;
   url: string;
   publishedAt: string;
   checkedAt: string;
-  /** 实际取到数据的源（配置源不通时会回退到另一个） */
+  /** 实际取到数据的源与仓库（配置源不通时会回退到另一个） */
   usedSource: string;
+  usedRepo: string;
   error?: string;
 }
 

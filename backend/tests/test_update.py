@@ -127,6 +127,88 @@ def _with_repo(repo: str):
     return fake
 
 
+def _with_cfg(values: dict):
+    def fake(key, default=None):
+        return values.get(key, default)
+
+    return fake
+
+
+def _patched(values: dict, fetch):  # noqa: ANN001
+    """装好配置与假的 Release 抓取，返回 (恢复函数, 抓取记录)。"""
+    from app.services import config_center_service
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_fetch(source: str, repo: str):  # noqa: ANN202
+        calls.append((source, repo))
+        return fetch(source, repo)
+
+    orig_mod_rv = update_service.runtime_value
+    orig_cc_rv = config_center_service.runtime_value
+    orig_fetch = update_service._fetch_release
+    update_service.runtime_value = _with_cfg(values)  # type: ignore[assignment]
+    update_service._fetch_release = fake_fetch  # type: ignore[assignment]
+    update_service._cache.clear()
+
+    def restore() -> None:
+        update_service.runtime_value = orig_mod_rv  # type: ignore[assignment]
+        config_center_service.runtime_value = orig_cc_rv  # type: ignore[assignment]
+        update_service._fetch_release = orig_fetch  # type: ignore[assignment]
+        update_service._cache.clear()
+
+    return restore, calls
+
+
+def test_per_source_repo_each_uses_own_path():
+    """GitHub 与 Gitee 账号名不同：两个源必须各查自己的仓库路径。"""
+    # gitee 先失败，回退到 github
+    restore, calls = _patched(
+        {
+            "update.source": "gitee",
+            "update.repo": "Harry-M-001/xiaoma-ai-studio",
+            "update.repo_gitee": "haoruiM/xiaoma-ai-studio",
+        },
+        lambda source, repo: (None, "no") if source == "gitee" else ({"tag_name": "v9.9.9"}, ""),
+    )
+    try:
+        out = asyncio.run(update_service.check_update(force=True))
+    finally:
+        restore()
+    assert calls[0] == ("gitee", "haoruiM/xiaoma-ai-studio"), calls
+    assert calls[1] == ("github", "Harry-M-001/xiaoma-ai-studio"), calls
+    assert out["usedSource"] == "github"
+    assert out["usedRepo"] == "Harry-M-001/xiaoma-ai-studio"
+    assert out["hasUpdate"] is True
+
+
+def test_gitee_repo_falls_back_to_github_path_when_unset():
+    """没单独填 Gitee 仓库时，两个源复用同一个路径（同名仓库的常见情况）。"""
+    restore, calls = _patched(
+        {"update.source": "gitee", "update.repo": "me/repo", "update.repo_gitee": ""},
+        lambda source, repo: ({"tag_name": "v9.9.9"}, ""),
+    )
+    try:
+        asyncio.run(update_service.check_update(force=True))
+    finally:
+        restore()
+    assert calls == [("gitee", "me/repo")], calls
+
+
+def test_missing_source_repo_is_skipped_not_fatal():
+    """只配了 Gitee 仓库、源却是 github 时，应直接查 Gitee 而不是报「未配置」。"""
+    restore, calls = _patched(
+        {"update.source": "github", "update.repo": "", "update.repo_gitee": "haoruiM/repo"},
+        lambda source, repo: ({"tag_name": "v9.9.9"}, ""),
+    )
+    try:
+        out = asyncio.run(update_service.check_update(force=True))
+    finally:
+        restore()
+    assert calls == [("gitee", "haoruiM/repo")], calls
+    assert out.get("error") in (None, ""), out
+
+
 def test_cached_result_keeps_local_state():
     """走缓存路径时必须仍带上 source/repo/version 等本地字段。
 
