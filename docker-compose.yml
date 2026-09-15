@@ -1,0 +1,14 @@
+services:
+  xiaoma-ai-studio:
+    build: .
+    image: xiaoma-ai-studio:latest
+    container_name: xiaoma-ai-studio
+    restart: unless-stopped
+    ports:
+      # 仅映射到本机；需要局域网访问时把 127.0.0.1 改为 0.0.0.0
+      - "127.0.0.1:8787:8787"
+    environment:
+      # 留空免登录；设置口令后网页需要输入口令
+      APP_PASSWORD: ""
+    volumes:
+      - ./data:/app/data

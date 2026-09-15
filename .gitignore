@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+backend/venv/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/webroot/
+dist/
+
+# Runtime data (SQLite database, local media storage, secrets)
+data/
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+secret.key
+.env
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

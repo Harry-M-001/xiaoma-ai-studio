@@ -1,0 +1,137 @@
+"""小马AI工坊 后端入口。
+
+启动：uvicorn app.main:app --host 127.0.0.1 --port 8787
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from app.providers.base import AdapterError
+
+from app import APP_NAME, __version__
+from app.config import settings
+from app.database import SessionLocal, init_db
+from app.routers import (
+    admin,
+    canvas,
+    chat,
+    comfy,
+    director,
+    generation,
+    meta,
+    projects,
+    providers,
+    system,
+    update,
+)
+from app.services import config_center_service
+from app.services.runner import runner
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("xiaoma")
+
+
+async def _seed_config() -> None:
+    """补齐配置种子数据（幂等：已存在的不覆盖），并加载运行期配置缓存。"""
+    async with SessionLocal() as db:
+        await config_center_service.ensure_seed(db)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    await _seed_config()
+    await runner.recover()
+    name = config_center_service.runtime_value("app.name", APP_NAME)
+    logger.info("%s v%s 启动完成：http://%s:%s", name, __version__, settings.HOST, settings.PORT)
+    yield
+    runner.shutdown()
+
+
+app = FastAPI(title=APP_NAME, version=__version__, lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(system.router)
+app.include_router(meta.router)
+app.include_router(providers.router)
+app.include_router(chat.router)
+app.include_router(generation.router)
+app.include_router(director.router)
+app.include_router(projects.router)
+app.include_router(canvas.router)
+app.include_router(comfy.router)
+app.include_router(update.router)
+app.include_router(admin.router)
+
+
+@app.exception_handler(AdapterError)
+async def adapter_error_handler(request: Request, exc: AdapterError) -> JSONResponse:
+    """模型服务配置/调用类错误统一返回 400，消息可直接展示。"""
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
+# ---------- 静态资源：媒体文件 + 前端构建产物 ----------
+
+app.mount("/media", StaticFiles(directory=settings.storage_dir), name="media")
+
+_dist: Path = settings.frontend_dist
+if _dist.exists():
+    class SPAStaticFiles(StaticFiles):
+        """找不到文件时回退 index.html，交给前端处理路由。"""
+
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            # Windows 下 Mount 传来的 path 可能用反斜杠分隔
+            rel = path.replace("\\", "/").lstrip("/")
+            try:
+                response = await super().get_response(path, scope)
+            except StarletteHTTPException:
+                # StaticFiles 对缺失路径直接抛 404 异常
+                if rel.startswith("assets/"):
+                    # 旧 hash 产物 404 就让它 404，不能拿 HTML 冒充 JS
+                    raise
+                return FileResponse(_dist / "index.html", headers={"Cache-Control": "no-cache"})
+            if response.status_code == 404:
+                if rel.startswith("assets/"):
+                    return response
+                response = FileResponse(_dist / "index.html")
+            # index.html 永远不走缓存，保证发版后浏览器立即拿到新 bundle 引用
+            if str(getattr(response, "path", "")).endswith("index.html"):
+                response.headers["Cache-Control"] = "no-cache"
+            return response
+
+    app.mount("/", SPAStaticFiles(directory=str(_dist), html=True), name="spa")
+else:
+    @app.get("/")
+    async def no_frontend() -> dict:
+        return {
+            "app": APP_NAME,
+            "hint": "前端尚未构建：开发模式请运行 frontend 的 npm run dev；或执行 start.bat 一键启动",
+        }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=os.getenv("HOST", settings.HOST),
+        port=int(os.getenv("PORT", settings.PORT)),
+        reload=False,
+    )
