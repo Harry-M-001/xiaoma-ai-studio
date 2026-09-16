@@ -47,6 +47,14 @@ _SOURCES: dict[str, str] = {
     "gitee": "https://gitee.com/api/v5/repos/{repo}/releases/latest",
 }
 
+# 人类可读的 Release 页面地址。API 里的 html_url 并非每个平台都给：
+# 实测 Gitee 的 /releases/latest 返回的 html_url 恒为 null，只能自己拼，
+# 否则界面上「查看 Release 说明」的链接在有新版本时会凭空消失。
+_SOURCE_PAGES: dict[str, str] = {
+    "github": "https://github.com/{repo}/releases/tag/{tag}",
+    "gitee": "https://gitee.com/{repo}/releases/tag/{tag}",
+}
+
 _cache: dict[str, Any] = {}
 
 
@@ -180,6 +188,16 @@ def _release_url(source: str, repo: str) -> str:
     return f"{source.rstrip('/')}/{repo}/releases/latest"
 
 
+def _release_page_url(source: str, repo: str, tag: str, given: str = "") -> str:
+    """Release 页面地址：API 给就用 API 的，没给就按平台规则拼一个。"""
+    if given:
+        return given
+    template = _SOURCE_PAGES.get(source)
+    if not template or not repo or not tag:
+        return ""
+    return template.format(repo=repo, tag=tag)
+
+
 async def _probe(url: str, *, direct: bool) -> tuple[int, dict | None, str]:
     """发一次 GET，返回 (状态码, JSON 或 None, 错误说明)。
 
@@ -303,7 +321,12 @@ async def check_update(force: bool = False) -> dict[str, Any]:
                 "hasUpdate": _is_newer(latest, __version__),
                 "latest": latest,
                 "notes": str(data.get("body") or "")[:4000],
-                "url": str(data.get("html_url") or ""),
+                "url": _release_page_url(
+                    str(result.get("usedSource") or ""),
+                    str(result.get("usedRepo") or ""),
+                    latest,
+                    str(data.get("html_url") or ""),
+                ),
                 "publishedAt": str(data.get("published_at") or data.get("created_at") or ""),
             }
         )

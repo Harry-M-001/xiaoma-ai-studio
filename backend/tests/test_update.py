@@ -50,6 +50,46 @@ def test_release_url():
     )
 
 
+def test_release_page_url_falls_back_when_api_omits_it():
+    """Gitee 的 Release API 不返回 html_url（恒为 null），必须自己拼出页面地址。
+
+    回归背景：v1.1.0 验收时发现源是 Gitee 的情况下 url 是空串，
+    界面上「查看 Release 说明」的链接在有新版本时会凭空消失。
+    """
+    # API 给了就用 API 的（GitHub 会给）
+    assert (
+        update_service._release_page_url("github", "me/repo", "v1.2.0", "https://x/y")
+        == "https://x/y"
+    )
+    # 没给就按平台规则拼
+    assert (
+        update_service._release_page_url("gitee", "haoruiM/xiaoma-ai-studio", "v1.1.0")
+        == "https://gitee.com/haoruiM/xiaoma-ai-studio/releases/tag/v1.1.0"
+    )
+    assert (
+        update_service._release_page_url("github", "me/repo", "v1.1.0")
+        == "https://github.com/me/repo/releases/tag/v1.1.0"
+    )
+    # 信息不足时宁可留空，也不要拼出一个打不开的网址
+    assert update_service._release_page_url("gitee", "me/repo", "") == ""
+    assert update_service._release_page_url("gitee", "", "v1.0.0") == ""
+    assert update_service._release_page_url("gitea", "me/repo", "v1.0.0") == ""
+
+
+def test_check_update_fills_url_for_gitee():
+    """Gitee 源没有 html_url 时，check_update 也要给出可点的 Release 页面。"""
+    restore, _calls = _patched(
+        {"update.source": "gitee", "update.repo": "haoruiM/xiaoma-ai-studio"},
+        lambda source, repo: ({"tag_name": "v9.9.9", "body": "说明", "html_url": None}, ""),
+    )
+    try:
+        out = asyncio.run(update_service.check_update(force=True))
+    finally:
+        restore()
+    assert out["usedSource"] == "gitee"
+    assert out["url"] == "https://gitee.com/haoruiM/xiaoma-ai-studio/releases/tag/v9.9.9", out
+
+
 def test_changed_files_ignores_blank_lines():
     diff = "backend/app/main.py\n\nfrontend/src/api.ts\n  \nREADME.md\n"
     assert update_service._changed_files(diff) == [
