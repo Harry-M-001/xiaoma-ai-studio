@@ -216,10 +216,17 @@ export const api = {
       body: JSON.stringify({ nodes: doc.nodes, edges: doc.edges, viewport: doc.viewport }),
     }),
   runCanvas: (projectId: number, nodeId?: string) =>
-    request<{ mode: string; nodeId: string | null; taskId: number | null }>(
-      `/api/canvas/${projectId}/run`,
-      { method: "POST", body: JSON.stringify({ node_id: nodeId ?? null }) }
-    ),
+    request<{
+      mode: string;
+      nodeId: string | null;
+      taskId: number | null;
+      /** 资产设定图一次会派发多个任务（一行资产一个） */
+      taskIds?: number[];
+      taskCount?: number;
+    }>(`/api/canvas/${projectId}/run`, {
+      method: "POST",
+      body: JSON.stringify({ node_id: nodeId ?? null }),
+    }),
   canvasStatus: (projectId: number) =>
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),

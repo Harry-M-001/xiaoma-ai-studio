@@ -97,18 +97,21 @@ def test_progress_monotonic_within_range():
 
 
 def test_seed_agents_are_complete():
-    """四个阶段种子必须齐备，且模板占位符与 chunk_param 自洽。"""
+    """各阶段种子必须齐备，且模板占位符与 chunk_param 自洽。"""
     from app.registry.schema_registry import SCHEMA_REGISTRY
 
     spec = SCHEMA_REGISTRY.get("agent_prompts")
     assert spec is not None, "agent_prompts 未注册到配置注册表"
     keys = [row["key"] for row in spec.seed]
-    assert keys == ["idea", "novel", "script", "storyboard"], keys
+    assert keys == ["idea", "novel", "script", "storyboard", "assetSheet"], keys
 
     by_key = {row["key"]: row for row in spec.seed}
-    # idea 单次成文，不该有分块配置
+    # idea 与 assetSheet 单次成文，不该有分块配置
+    # （资产表被拆成两半既难读也难解析）
     assert not by_key["idea"]["chunk_prompt"]
     assert not by_key["idea"]["chunk_param"]
+    assert not by_key["assetSheet"]["chunk_prompt"]
+    assert not by_key["assetSheet"]["chunk_param"]
     # 其余三个阶段必须配齐「大纲 + 分块 + 块数参数」
     for key in ("novel", "script", "storyboard"):
         row = by_key[key]

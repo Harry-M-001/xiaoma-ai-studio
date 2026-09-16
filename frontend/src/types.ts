@@ -93,6 +93,9 @@ export interface Asset {
   content_type: string;
   size: number;
   source: string;
+  /** 资产链身份：资产名（角色/场景/道具名）与类型；非资产链产物为空串 */
+  name?: string;
+  category?: string;
   prompt: string | null;
   width: number | null;
   height: number | null;
@@ -175,6 +178,10 @@ export interface CanvasNodeData {
   chapterCount?: number;
   sceneCount?: number;
   shotCount?: number;
+  /** 资产设定图：生成范围（"" 全部 / character 角色 / scene 场景 / prop 道具） */
+  assetScope?: string;
+  /** 是否自动挂载提示词里提到的资产设定图（false = 关闭，默认开） */
+  mentionRefs?: boolean;
   [k: string]: unknown;
 }
 
@@ -209,6 +216,12 @@ export interface CanvasNodeStatus {
   assetName?: string;
   /** 文档节点（自动链）产物正文预览 */
   text?: string;
+  /** 资产设定图一次运行产出的任务数 */
+  taskCount?: number;
+  /** 命中的角色提及注入资产名（后端自动挂的参考图） */
+  injectedNames?: string[];
+  /** 一次运行的全部产物（资产链节点会有多张） */
+  assets?: { id: number; url: string; kind: string; name: string; category: string }[];
   progress?: number;
   error?: string | null;
 }

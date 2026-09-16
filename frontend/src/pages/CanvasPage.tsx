@@ -59,10 +59,37 @@ import { ModelSelect, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
 /** 自动链文档节点类型（需要调 LLM 写正文） */
-const DOC_KINDS = new Set(["idea", "novel", "script", "storyboard"]);
+const DOC_KINDS = new Set(["idea", "novel", "script", "storyboard", "assetSheet"]);
 
-/** 自动链默认顺序：创意 → 小说 → 剧本 → 分镜 */
-const AUTO_CHAIN = ["idea", "novel", "script", "storyboard"] as const;
+/** 资产链节点：逐行批量出图，产物自动进资产库供下游按名引用 */
+const ASSET_IMAGE_KIND = "assetImage";
+
+/**
+ * 自动链档位：一次铺多长的链。
+ * 越往后越贵（资产设定图会一行生成一张图），所以默认只铺 L1。
+ */
+const CHAIN_LEVELS = [
+  {
+    key: "L1",
+    label: "L1 文本链",
+    nodes: ["idea", "novel", "script", "storyboard"],
+    hint: "创意 → 小说 → 剧本 → 分镜（只出一份 Markdown，最省钱）",
+  },
+  {
+    key: "L2",
+    label: "L2 +资产链",
+    nodes: ["idea", "novel", "script", "storyboard", "assetSheet", "assetImage"],
+    hint: "文本链之后再铺 资产表 → 资产设定图，下游提示词提到角色名会自动挂设定图",
+  },
+] as const;
+
+/** 资产设定图的生成范围档位 */
+const ASSET_SCOPES: [string, string][] = [
+  ["", "全部"],
+  ["character", "仅角色"],
+  ["scene", "仅场景"],
+  ["prop", "仅道具"],
+];
 
 /** 契约驱动的类别图标 */
 const CATEGORY_ICON: Record<string, React.ReactNode> = {
@@ -434,6 +461,27 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
+      {features.includes("assetScope") && (
+        <div className="field">
+          <label className="field-label">生成范围</label>
+          <div className="canvas-modetabs">
+            {ASSET_SCOPES.map(([value, label]) => (
+              <button
+                key={value || "all"}
+                type="button"
+                className={`canvas-modetab ${String(data.assetScope ?? "") === value ? "active" : ""}`}
+                onClick={() => patch({ assetScope: value })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="field-hint">
+            按上游资产表的「类型」列筛选：一行资产 = 一张设定图，先只出角色能省不少钱
+          </div>
+        </div>
+      )}
+
       {features.includes("videoMode") && (
         <div className="field">
           <label className="field-label">模式</label>
@@ -541,6 +589,20 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
+      {features.includes("imageUpload") && (
+        <label className="canvas-check">
+          <input
+            type="checkbox"
+            checked={data.mentionRefs !== false}
+            onChange={(e) => patch({ mentionRefs: e.target.checked })}
+          />
+          <span>
+            自动挂载提示词里提到的资产
+            <em className="canvas-check-hint">（角色 / 场景设定图，最多 3 张）</em>
+          </span>
+        </label>
+      )}
+
       <div className="canvas-float-grid">
         {features.includes("imageSize") && (
           <div className="field">
@@ -637,6 +699,37 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       ) : null}
 
+      {status?.assets && status.assets.length > 0 && String(data.nodeType) === ASSET_IMAGE_KIND && (
+        <div className="field">
+          <label className="field-label">
+            已生成资产<em className="canvas-doc-count">（{status.assets.length} 张）</em>
+          </label>
+          <div className="canvas-refstrip">
+            {status.assets.map((a) => (
+              <a
+                key={a.id}
+                className="canvas-refthumb"
+                href={a.url}
+                target="_blank"
+                rel="noreferrer"
+                title={`${a.name}${a.category ? ` · ${a.category}` : ""}`}
+              >
+                <img src={a.url} alt={a.name} loading="lazy" />
+              </a>
+            ))}
+          </div>
+          <div className="field-hint">
+            资产名已写入资产库，下游节点提示词里提到名字就会自动挂上对应设定图
+          </div>
+        </div>
+      )}
+
+      {status?.injectedNames && status.injectedNames.length > 0 && (
+        <div className="canvas-float-hint">
+          已自动挂载参考图：{status.injectedNames.join("、")}
+        </div>
+      )}
+
       {String(data.nodeType) === "text" ? (
         <div className="canvas-float-hint">文本节点无需运行，保存后直接供下游使用</div>
       ) : (
@@ -700,6 +793,16 @@ function ContractNode({ id, data, selected }: NodeProps) {
         {status?.assetKind === "document" ? (
           <div className="canvas-node-doc">
             {(status.text ?? "").split("\n").filter((l) => l.trim()).slice(0, 3).join("\n")}
+          </div>
+        ) : status?.assets && status.assets.length > 1 ? (
+          // 资产链节点一次产出多张：铺三张 + 剩余数量
+          <div className="canvas-node-thumbs">
+            {status.assets.slice(0, 3).map((a) => (
+              <img key={a.id} src={a.url} alt={a.name} title={a.name} loading="lazy" />
+            ))}
+            {status.assets.length > 3 && (
+              <span className="canvas-node-thumbs-more">+{status.assets.length - 3}</span>
+            )}
           </div>
         ) : status?.assetUrl ? (
           <img
@@ -981,6 +1084,23 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       return true;
     }
   });
+  // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）
+  const [chainLevel, setChainLevel] = useState<string>(() => {
+    try {
+      return localStorage.getItem("xm_canvas_chain_level") || CHAIN_LEVELS[0].key;
+    } catch {
+      return CHAIN_LEVELS[0].key;
+    }
+  });
+
+  const pickChainLevel = useCallback((key: string) => {
+    setChainLevel(key);
+    try {
+      localStorage.setItem("xm_canvas_chain_level", key);
+    } catch {
+      /* localStorage 不可用忽略 */
+    }
+  }, []);
 
   const togglePalette = useCallback((open: boolean) => {
     setPaletteOpen(open);
@@ -1119,45 +1239,56 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [schemas, screenToFlowPosition, setNodes]
   );
 
-  // 一键铺自动链：创意 → 小说 → 剧本 → 分镜（拓扑是固定模板，不需要 LLM 生成）
-  const buildAutoChain = useCallback(() => {
-    const missing = AUTO_CHAIN.filter((t) => !schemas[t]);
-    if (missing.length > 0) {
-      toast.error("自动链节点未就绪，请检查后端是否已升级");
-      return;
-    }
-    const textModelKey = models.find((m) => m.modality === "text")?.key ?? "";
-    if (!textModelKey) {
-      toast.error("还没有可用的文本模型，请先在「模型服务」里添加");
-      return;
-    }
-    const stamp = Date.now().toString(36);
-    const originX = 80;
-    const originY = 140;
-    const created = AUTO_CHAIN.map((t, i) => ({
-      id: `chain_${t}_${stamp}`,
-      type: "contract",
-      position: { x: originX + i * 300, y: originY },
-      data: {
-        prompt: "",
-        model_key: textModelKey,
-        schema: schemas[t],
-        nodeType: t,
-      } as CanvasNodeData,
-    }));
-    const newEdges: Edge[] = AUTO_CHAIN.slice(0, -1).map((t, i) => ({
-      id: `chain_e_${t}_${stamp}`,
-      source: created[i].id,
-      sourceHandle: "out-text",
-      target: created[i + 1].id,
-      targetHandle: "in-text",
-    }));
-    setNodes((prev) => [...prev, ...created]);
-    setEdges((prev) => [...prev, ...newEdges]);
-    setSelectedId(created[0].id);
-    setDirty(true);
-    toast.success("已铺好自动链：创意 → 小说 → 剧本 → 分镜");
-  }, [schemas, models, setNodes, setEdges, toast]);
+  // 一键铺自动链：拓扑是固定模板，不需要 LLM 生成
+  // L1 = 创意 → 小说 → 剧本 → 分镜；L2 再往后接 资产表 → 资产设定图
+  const buildAutoChain = useCallback(
+    (levelKey: string) => {
+      const level = CHAIN_LEVELS.find((l) => l.key === levelKey) ?? CHAIN_LEVELS[0];
+      const types: string[] = [...level.nodes];
+      const missing = types.filter((t) => !schemas[t]);
+      if (missing.length > 0) {
+        toast.error("自动链节点未就绪，请检查后端是否已升级");
+        return;
+      }
+      const textModelKey = models.find((m) => m.modality === "text")?.key ?? "";
+      if (!textModelKey) {
+        toast.error("还没有可用的文本模型，请先在「模型服务」里添加");
+        return;
+      }
+      const imageModelKey = models.find((m) => m.modality === "image")?.key ?? "";
+      if (types.includes(ASSET_IMAGE_KIND) && !imageModelKey) {
+        toast.error("资产设定图需要图片模型，请先在「模型服务」里添加");
+        return;
+      }
+      const stamp = Date.now().toString(36);
+      const originX = 80;
+      const originY = 140;
+      const created = types.map((t, i) => ({
+        id: `chain_${t}_${stamp}`,
+        type: "contract",
+        position: { x: originX + i * 300, y: originY },
+        data: {
+          prompt: "",
+          model_key: t === ASSET_IMAGE_KIND ? imageModelKey : textModelKey,
+          schema: schemas[t],
+          nodeType: t,
+        } as CanvasNodeData,
+      }));
+      const newEdges: Edge[] = types.slice(0, -1).map((t, i) => ({
+        id: `chain_e_${t}_${stamp}`,
+        source: created[i].id,
+        sourceHandle: schemas[t].handles.sources?.[0]?.id ?? "out-text",
+        target: created[i + 1].id,
+        targetHandle: schemas[types[i + 1]].handles.targets?.[0]?.id ?? "in-text",
+      }));
+      setNodes((prev) => [...prev, ...created]);
+      setEdges((prev) => [...prev, ...newEdges]);
+      setSelectedId(created[0].id);
+      setDirty(true);
+      toast.success(`已铺好自动链（${level.label}）：${types.map((t) => schemas[t].label).join(" → ")}`);
+    },
+    [schemas, models, setNodes, setEdges, toast]
+  );
 
   // 双击空白画布弹添加菜单（dola-v2 交互）；双击节点不弹
   const onPaneDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -1278,7 +1409,11 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       setRunning(true);
       try {
         const r = await api.runCanvas(projectId, nodeId);
-        toast.success(`节点已运行（任务 #${r.taskId}）`);
+        toast.success(
+          (r.taskCount ?? 1) > 1
+            ? `已按资产表派发 ${r.taskCount} 个任务`
+            : `节点已运行（任务 #${r.taskId}）`
+        );
         await refreshStatus();
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "运行失败");
@@ -1403,10 +1538,22 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             ) : null}
           </div>
           <div className="canvas-toolbar-actions">
+            <select
+              className="select canvas-chain-level"
+              value={chainLevel}
+              onChange={(e) => pickChainLevel(e.target.value)}
+              title={CHAIN_LEVELS.find((l) => l.key === chainLevel)?.hint}
+            >
+              {CHAIN_LEVELS.map((l) => (
+                <option key={l.key} value={l.key}>
+                  {l.label}
+                </option>
+              ))}
+            </select>
             <button
               className="btn btn-ghost btn-sm"
-              onClick={buildAutoChain}
-              title="一键铺好 创意 → 小说 → 剧本 → 分镜 四个文档节点"
+              onClick={() => buildAutoChain(chainLevel)}
+              title={CHAIN_LEVELS.find((l) => l.key === chainLevel)?.hint}
             >
               <Sparkles size={14} />
               自动链

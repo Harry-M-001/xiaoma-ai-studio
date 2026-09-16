@@ -96,6 +96,8 @@ def _asset_to_out(a: Asset) -> AssetOut:
         content_type=a.content_type,
         size=a.size,
         source=a.source,
+        name=a.name or "",
+        category=a.category or "",
         prompt=a.prompt,
         width=a.width,
         height=a.height,

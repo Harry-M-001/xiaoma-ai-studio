@@ -136,6 +136,9 @@ class TaskRunner:
                     await db.commit()
                     model_name = resolved.model_name
                     adapter = resolved.adapter
+                    # 资产链：资产名/类型随任务带下来，落库后下游才能按名自动引用
+                    asset_name = str(params.get("asset_name") or "")[:80]
+                    asset_category = str(params.get("asset_category") or "")[:20]
 
                 images = await adapter.generate_image(
                     model=model_name,
@@ -161,6 +164,8 @@ class TaskRunner:
                                 size=len(blob),
                                 source="generated",
                                 task_id=task_id,
+                                name=asset_name,
+                                category=asset_category,
                                 prompt=task.prompt,
                             )
                         )

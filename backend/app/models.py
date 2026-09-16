@@ -96,6 +96,10 @@ class Asset(Base):
     size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="generated")
     task_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # 资产链身份：资产名（如「暮光闪闪」）与类型（角色/场景/道具）。
+    # 有了稳定业务名，下游提示词提到即可自动挂参考图（见 canvas_runner._inject_asset_refs）。
+    name: Mapped[str] = mapped_column(String(80), nullable=False, default="", index=True)
+    category: Mapped[str] = mapped_column(String(20), nullable=False, default="")
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)

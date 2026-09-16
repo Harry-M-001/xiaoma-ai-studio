@@ -96,6 +96,19 @@ NODE_SCHEMAS: dict[str, dict] = {
             "sources": [{"id": "out-text", "type": "text"}],
         },
     },
+    "assetSheet": {
+        "kind": "assetSheet",
+        "category": "document",
+        "label": "资产表",
+        "description": "剧本/分镜 → 资产表（角色/场景/道具 + 英文视觉描述 + 出现场次），供下游生成设定图",
+        "features": ["prompt", "modelSelect"],
+        "promptLabel": "补充要求",
+        "promptPlaceholder": "可选：统一画风词、必须保留的角色、道具细节要求",
+        "handles": {
+            "targets": [{"id": "in-text", "type": "text"}],
+            "sources": [{"id": "out-text", "type": "text"}],
+        },
+    },
     "image": {
         "kind": "image",
         "category": "image",
@@ -104,6 +117,21 @@ NODE_SCHEMAS: dict[str, dict] = {
         "features": ["prompt", "modelSelect", "imageUpload", "imageSize", "sampleCount"],
         "handles": {
             "targets": [{"id": "in-any", "type": "any"}],
+            "sources": [{"id": "out-image", "type": "image"}],
+        },
+    },
+    # ---- 资产链：资产表 → 资产设定图（B 期） ----
+    # 资产名落进资产库后，下游节点提示词里提到名字就自动挂参考图（角色提及注入）
+    "assetImage": {
+        "kind": "assetImage",
+        "category": "image",
+        "label": "资产设定图",
+        "description": "读上游资产表逐行生成设定图（角色=三视图+特写；场景=广角空镜），存入资产库供下游按名自动引用",
+        "features": ["prompt", "modelSelect", "assetScope", "imageSize", "sampleCount"],
+        "promptLabel": "统一风格（可选）",
+        "promptPlaceholder": "可选：统一画风词，如 anime style, cel shading, bright colors",
+        "handles": {
+            "targets": [{"id": "in-text", "type": "text"}],
             "sources": [{"id": "out-image", "type": "image"}],
         },
     },
@@ -134,14 +162,21 @@ NODE_SCHEMAS: dict[str, dict] = {
 CANVAS_SCHEMA_VERSION = 1
 
 # 文档生成节点（自动链）：需要调用 LLM 写正文，产物是 Markdown 文档
-DOC_NODE_KINDS = ("idea", "novel", "script", "storyboard")
+DOC_NODE_KINDS = ("idea", "novel", "script", "storyboard", "assetSheet")
 
 # 纯素材节点：不执行、不产生任务，只承载文本供下游取用
 PASSIVE_NODE_KINDS = ("text",)
 
+# 资产链节点：逐行批量产生图片任务（一个节点 → N 个任务）
+ASSET_IMAGE_KINDS = ("assetImage",)
+
 
 def is_doc_kind(ntype: str) -> bool:
     return normalize_type(ntype) in DOC_NODE_KINDS
+
+
+def is_asset_image(ntype: str) -> bool:
+    return normalize_type(ntype) in ASSET_IMAGE_KINDS
 
 
 def is_runnable(ntype: str) -> bool:

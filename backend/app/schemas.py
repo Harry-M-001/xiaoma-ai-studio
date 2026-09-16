@@ -180,6 +180,9 @@ class AssetOut(BaseModel):
     content_type: str
     size: int
     source: str
+    # 资产链身份：资产名（角色/场景/道具名）与类型；非资产链产物为空串
+    name: str = ""
+    category: str = ""
     prompt: str | None = None
     width: int | None = None
     height: int | None = None
