@@ -58,6 +58,7 @@ xiaoma-ai-studio/
 │   │   ├── providers/      模型适配器实现（OpenAI 兼容 / 火山方舟 / DashScope / ComfyUI）
 │   │   ├── routers/        API 路由（含 meta 元数据、admin 通用管理、canvas 画布）
 │   │   └── services/       配置中心、参数校验、任务执行器、画布编排、资产表/分镜表解析、风格注入、本地存储
+│   ├── tools/             环境体检与诊断报告（装不上、起不来时先跑它）
 │   ├── alembic/           数据库迁移脚本
 │   └── requirements.txt
 ├── frontend/           React 前端
@@ -73,7 +74,63 @@ xiaoma-ai-studio/
 └── .env.example
 ```
 
+## 下载项目
+
+**推荐用 `git clone`**。不是为了赶时髦：应用内的「一键更新」只在 git 安装下可用（走 `git pull --ff-only`，依赖或前端有变化才重装重建）；压缩包安装只能自己在设置页看到「有新版本」，然后手动去 Releases 重新下载覆盖。
+
+### 方式 A：git clone（推荐）
+
+GitHub：
+
+```bash
+git clone https://github.com/Harry-M-001/xiaoma-ai-studio.git
+```
+
+Gitee（国内访问更快）：
+
+```bash
+git clone https://gitee.com/haoruiM/xiaoma-ai-studio.git
+```
+
+已经配了 SSH 密钥的话，可以换成更短的：
+
+```bash
+git clone git@github.com:Harry-M-001/xiaoma-ai-studio.git
+git clone git@gitee.com:haoruiM/xiaoma-ai-studio.git
+```
+
+只想拿某一个发行版、不想拉完整历史（体积小很多）：
+
+```bash
+git clone -b v1.1.2 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
+```
+
+### 方式 B：下载压缩包（不用装 git）
+
+GitHub 的直链可以匿名下载：
+
+```bash
+curl -L -o xiaoma-ai-studio.zip https://github.com/Harry-M-001/xiaoma-ai-studio/archive/refs/heads/main.zip
+```
+
+Windows PowerShell：
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/Harry-M-001/xiaoma-ai-studio/archive/refs/heads/main.zip -OutFile xiaoma-ai-studio.zip
+```
+
+要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.2`。
+
+> **注意**：Gitee 的「下载 ZIP / 下载压缩包」**需要先登录 Gitee 账号**，匿名访问只会跳到一个登录页，拿不到文件。所以要给不特定的人一个能直接下的地址，请用上面 GitHub 的直链。
+
+### ⚠️ 放在哪个目录（重要）
+
+- **不要**把本项目放进 ComfyUI 的 `custom_nodes` 目录。那不是插件，是一个独立的 Web 服务：放进去之后 ComfyUI 会把它当插件加载，而且 ComfyUI 整合包带的是**嵌入式 Python**（没有 `venv` 模块），会导致一键启动脚本在「创建虚拟环境 / 安装后端依赖」这一步反复失败。
+- 正确做法是放在任意普通目录，例如 `D:\xiaoma-ai-studio`，让它自己起一个 8787 端口的服务；ComfyUI 通过「本机工作流」的方式单独接入即可，**两边各自独立运行**。
+
 ## 快速开始
+
+下面三种启动方式都假设你已经按上一节把代码拿到本地了。
 
 ### 方式一：一键脚本（推荐）
 
@@ -307,6 +364,21 @@ A：备份数据目录（默认 `backend/data`，Docker 为根目录 `./data`）
 
 **Q：点了「一键更新」但按钮是灰的？**
 A：三种情况：① 不是 `git clone` 安装（README 里的压缩包/Docker 方式），请按界面提示手动升级；② 本地有未提交改动，先 `git commit` 或 `git stash`；③ 还没配 `update.repo`，去「系统设置 → 系统配置」填上 `用户名/仓库名`。更新完成后记得重启服务。
+
+**Q：start.bat / start.sh 某一步一直失败，怎么办？**
+A：先跑一次环境体检，它会照着「哪一步不行、为什么不行、下一步做什么」给出结论：
+
+```bash
+python backend/tools/env_report.py
+```
+
+最常见的一类是**用错了 Python**：如果 `python` 指向的是精简版 / 嵌入式 Python（ComfyUI 整合包里自带的那种，没有 `venv` 模块），虚拟环境根本创建不出来，于是「安装后端依赖」这一步会反复失败。体检会把这种情况直接点出来（会打印「当前 Python 缺少标准库模块：venv、ensurepip」）。处理办法是从 python.org 装一个官方 Python 3.11 或 3.12，并确认 `where python` 的第一个是它。
+
+如果看不懂体检结果，跑下面这条，把整段输出发给作者即可——**报告里只有环境信息，不含任何 API Key、密钥或数据库内容**：
+
+```bash
+python backend/tools/env_report.py --report
+```
 
 ---
 
