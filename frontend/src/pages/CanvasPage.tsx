@@ -54,6 +54,7 @@ import type {
   CanvasNodeStatus,
   ComfyWorkflow,
   ModelOption,
+  StyleOption,
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -64,24 +65,86 @@ const DOC_KINDS = new Set(["idea", "novel", "script", "storyboard", "assetSheet"
 /** 资产链节点：逐行批量出图，产物自动进资产库供下游按名引用 */
 const ASSET_IMAGE_KIND = "assetImage";
 
+/** 分镜图节点：逐镜批量出图 */
+const STORYBOARD_IMAGE_KIND = "storyboardImage";
+
 /**
  * 自动链档位：一次铺多长的链。
- * 越往后越贵（资产设定图会一行生成一张图），所以默认只铺 L1。
+ * 越往后越贵（资产设定图一行一张图、分镜图一镜一张图），所以默认只铺 L1。
+ *
+ * L3 起拓扑不再是直线（分镜图要同时吃分镜表和资产图），所以连线和落位都显式写出来，
+ * 不靠「数组相邻即相连」推。
  */
-const CHAIN_LEVELS = [
+interface ChainLevel {
+  key: string;
+  label: string;
+  hint: string;
+  nodes: { type: string; col: number; row: number }[];
+  edges: [string, string][];
+}
+
+const CHAIN_LEVELS: ChainLevel[] = [
   {
     key: "L1",
     label: "L1 文本链",
-    nodes: ["idea", "novel", "script", "storyboard"],
     hint: "创意 → 小说 → 剧本 → 分镜（只出一份 Markdown，最省钱）",
+    nodes: [
+      { type: "idea", col: 0, row: 0 },
+      { type: "novel", col: 1, row: 0 },
+      { type: "script", col: 2, row: 0 },
+      { type: "storyboard", col: 3, row: 0 },
+    ],
+    edges: [
+      ["idea", "novel"],
+      ["novel", "script"],
+      ["script", "storyboard"],
+    ],
   },
   {
     key: "L2",
     label: "L2 +资产链",
-    nodes: ["idea", "novel", "script", "storyboard", "assetSheet", "assetImage"],
     hint: "文本链之后再铺 资产表 → 资产设定图，下游提示词提到角色名会自动挂设定图",
+    nodes: [
+      { type: "idea", col: 0, row: 0 },
+      { type: "novel", col: 1, row: 0 },
+      { type: "script", col: 2, row: 0 },
+      { type: "storyboard", col: 3, row: 0 },
+      { type: "assetSheet", col: 4, row: 0 },
+      { type: "assetImage", col: 5, row: 0 },
+    ],
+    edges: [
+      ["idea", "novel"],
+      ["novel", "script"],
+      ["script", "storyboard"],
+      ["storyboard", "assetSheet"],
+      ["assetSheet", "assetImage"],
+    ],
   },
-] as const;
+  {
+    key: "L3",
+    label: "L3 +分镜图",
+    hint: "再加「分镜图」：按镜头表逐镜出图，每镜自动挂它提到的角色设定图",
+    nodes: [
+      { type: "idea", col: 0, row: 0 },
+      { type: "novel", col: 1, row: 0 },
+      { type: "script", col: 2, row: 0 },
+      { type: "storyboard", col: 3, row: 0 },
+      { type: "assetSheet", col: 4, row: 0 },
+      { type: "assetImage", col: 5, row: 0 },
+      { type: "storyboardImage", col: 4, row: 1 },
+    ],
+    edges: [
+      ["idea", "novel"],
+      ["novel", "script"],
+      ["script", "storyboard"],
+      ["storyboard", "assetSheet"],
+      ["assetSheet", "assetImage"],
+      // 分镜图要两个上游：分镜（镜头表）+ 资产图（等它先跑完，提及注入才有图可挂）
+      ["storyboard", "storyboardImage"],
+      ["assetImage", "storyboardImage"],
+    ],
+  },
+];
 
 /** 资产设定图的生成范围档位 */
 const ASSET_SCOPES: [string, string][] = [
@@ -126,8 +189,12 @@ interface NodePanelCtx {
   models: ModelOption[];
   workflows: ComfyWorkflow[];
   agents: AgentMeta[];
+  /** 导演风格卡（风格下拉用；只有 key 与名称，实际内容在后端） */
+  styles: StyleOption[];
   running: boolean;
   updateNode: (id: string, patch: Partial<CanvasNodeData>) => void;
+  /** 把同一个风格套到画布上所有支持风格的节点（省得七八个节点逐个选） */
+  applyStyleToAll: (key: string) => void;
   runNode: (id: string) => void;
   openPicker: (nodeId: string, slot?: "first" | "last") => void;
   reloadWorkflows: () => Promise<ComfyWorkflow[]>;
@@ -461,6 +528,40 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
+      {features.includes("styleSelect") && (
+        <div className="field">
+          <label className="field-label">风格</label>
+          <select
+            className="select"
+            value={String(data.styleKey ?? "")}
+            onChange={(e) => patch({ styleKey: e.target.value })}
+          >
+            <option value="">无（不注入风格）</option>
+            {ctx.styles.map((s) => (
+              <option key={s.key} value={s.key}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <div className="canvas-refbar">
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs"
+              onClick={() => ctx.applyStyleToAll(String(data.styleKey ?? ""))}
+              title="把当前风格套用到画布上所有支持风格的节点"
+            >
+              <Sparkles size={12} />
+              同步到全链
+            </button>
+          </div>
+          <div className="field-hint">
+            {isDoc
+              ? "风格卡会追加到这个阶段 Agent 的系统提示词里"
+              : "只取风格卡里的技法与约束词；导演名不会写进生图 / 生视频提示词"}
+          </div>
+        </div>
+      )}
+
       {features.includes("assetScope") && (
         <div className="field">
           <label className="field-label">生成范围</label>
@@ -662,6 +763,21 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
             </select>
           </div>
         )}
+        {features.includes("shotLimit") && (
+          <div className="field">
+            <label className="field-label">生成镜数</label>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              max={24}
+              value={Number(data.shotLimit ?? 6)}
+              onChange={(e) =>
+                patch({ shotLimit: Math.max(0, Math.min(24, Number(e.target.value) || 0)) })
+              }
+            />
+          </div>
+        )}
         {chunkParam && (
           <div className="field">
             <label className="field-label">{agent?.chunkLabel || chunkParam}</label>
@@ -682,6 +798,13 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
       {isDoc && agent?.chunked && (
         <div className="canvas-float-hint">
           长文会自动分块续写：先出大纲，再逐{CHUNK_UNIT[chunkParam] ?? "块"}生成，避免被截断
+        </div>
+      )}
+
+      {features.includes("shotLimit") && (
+        <div className="canvas-float-hint">
+          会按镜头表逐镜出图（填 0 = 全部，上限 24 镜）；每一镜只挂它自己提到的资产设定图，
+          上游整批图片不会带进来
         </div>
       )}
 
@@ -760,9 +883,14 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
 
 /** 自定义节点：契约端口渲染 + 状态角标 + 参考计数 + 选中时下方浮框 */
 function ContractNode({ id, data, selected }: NodeProps) {
+  const ctx = useContext(PanelCtx);
   const schema = data.schema as CanvasNodeSchema;
   const status = data.status as CanvasNodeStatus | undefined;
   const refCount = ((data.refImages as NodeRefImage[] | undefined) ?? []).length;
+  // 节点上选了风格就在卡片上标出来：一条链上七八个节点，一眼能看出谁在用哪套风格
+  const styleName = data.styleKey
+    ? ctx?.styles.find((s) => s.key === data.styleKey)?.name ?? ""
+    : "";
   if (!schema) return null;
   return (
     <>
@@ -790,6 +918,7 @@ function ContractNode({ id, data, selected }: NodeProps) {
             </span>
           )}
         </div>
+        {styleName && <div className="canvas-node-style">风格 · {styleName}</div>}
         {status?.assetKind === "document" ? (
           <div className="canvas-node-doc">
             {(status.text ?? "").split("\n").filter((l) => l.trim()).slice(0, 3).join("\n")}
@@ -1065,6 +1194,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [statusMap, setStatusMap] = useState<Record<string, CanvasNodeStatus>>({});
   const [models, setModels] = useState<ModelOption[]>([]);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
+  const [styles, setStyles] = useState<StyleOption[]>([]);
   const [workflows, setWorkflows] = useState<ComfyWorkflow[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [assetKind, setAssetKind] = useState<AssetKind>("all");
@@ -1145,17 +1275,20 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
   useEffect(() => {
     (async () => {
-      const [contract, doc, imageModels, videoModels, textModels, agentList] = await Promise.all([
-        api.canvasContract(),
-        api.getCanvas(projectId),
-        api.listModels("image").catch(() => []),
-        api.listModels("video").catch(() => []),
-        api.listModels("text").catch(() => []),
-        api.getAgentPrompts().catch(() => []),
-      ]);
+      const [contract, doc, imageModels, videoModels, textModels, agentList, styleList] =
+        await Promise.all([
+          api.canvasContract(),
+          api.getCanvas(projectId),
+          api.listModels("image").catch(() => []),
+          api.listModels("video").catch(() => []),
+          api.listModels("text").catch(() => []),
+          api.getAgentPrompts().catch(() => []),
+          api.listDirectorStyles().catch(() => []),
+        ]);
       setSchemas(contract.nodeSchemas);
       setModels([...imageModels, ...videoModels, ...textModels]);
       setAgents(agentList);
+      setStyles(styleList);
       if (doc.nodes?.length) {
         setNodes(
           doc.nodes.map((n) => ({
@@ -1240,11 +1373,11 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   );
 
   // 一键铺自动链：拓扑是固定模板，不需要 LLM 生成
-  // L1 = 创意 → 小说 → 剧本 → 分镜；L2 再往后接 资产表 → 资产设定图
+  // L1 = 创意 → 小说 → 剧本 → 分镜；L2 接资产表 → 资产设定图；L3 再接分镜图（有分叉）
   const buildAutoChain = useCallback(
     (levelKey: string) => {
       const level = CHAIN_LEVELS.find((l) => l.key === levelKey) ?? CHAIN_LEVELS[0];
-      const types: string[] = [...level.nodes];
+      const types = level.nodes.map((n) => n.type);
       const missing = types.filter((t) => !schemas[t]);
       if (missing.length > 0) {
         toast.error("自动链节点未就绪，请检查后端是否已升级");
@@ -1260,26 +1393,33 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
         toast.error("资产设定图需要图片模型，请先在「模型服务」里添加");
         return;
       }
+      if (types.includes(STORYBOARD_IMAGE_KIND) && !imageModelKey) {
+        toast.error("分镜图需要图片模型，请先在「模型服务」里添加");
+        return;
+      }
       const stamp = Date.now().toString(36);
       const originX = 80;
       const originY = 140;
-      const created = types.map((t, i) => ({
-        id: `chain_${t}_${stamp}`,
+      const stepX = 300;
+      const stepY = 240;
+      const idOf = (t: string) => `chain_${t}_${stamp}`;
+      const created = level.nodes.map(({ type, col, row }) => ({
+        id: idOf(type),
         type: "contract",
-        position: { x: originX + i * 300, y: originY },
+        position: { x: originX + col * stepX, y: originY + row * stepY },
         data: {
           prompt: "",
-          model_key: t === ASSET_IMAGE_KIND ? imageModelKey : textModelKey,
-          schema: schemas[t],
-          nodeType: t,
+          model_key: type === ASSET_IMAGE_KIND || type === STORYBOARD_IMAGE_KIND ? imageModelKey : textModelKey,
+          schema: schemas[type],
+          nodeType: type,
         } as CanvasNodeData,
       }));
-      const newEdges: Edge[] = types.slice(0, -1).map((t, i) => ({
-        id: `chain_e_${t}_${stamp}`,
-        source: created[i].id,
-        sourceHandle: schemas[t].handles.sources?.[0]?.id ?? "out-text",
-        target: created[i + 1].id,
-        targetHandle: schemas[types[i + 1]].handles.targets?.[0]?.id ?? "in-text",
+      const newEdges: Edge[] = level.edges.map(([from, to], i) => ({
+        id: `chain_e_${i}_${stamp}`,
+        source: idOf(from),
+        sourceHandle: schemas[from].handles.sources?.[0]?.id ?? "out-text",
+        target: idOf(to),
+        targetHandle: schemas[to].handles.targets?.[0]?.id ?? "in-text",
       }));
       setNodes((prev) => [...prev, ...created]);
       setEdges((prev) => [...prev, ...newEdges]);
@@ -1451,6 +1591,22 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     setDirty(true);
   }, []);
 
+  // 一个风格套全链：只改支持 styleSelect 的节点，其余节点不动
+  const applyStyleToAll = useCallback(
+    (key: string) => {
+      setNodes((prev) =>
+        prev.map((n) => {
+          const features = (n.data.schema as CanvasNodeSchema | undefined)?.features ?? [];
+          return features.includes("styleSelect")
+            ? { ...n, data: { ...n.data, styleKey: key } }
+            : n;
+        })
+      );
+      setDirty(true);
+    },
+    [setNodes]
+  );
+
   const openPicker = useCallback(
     (nodeId: string, slot?: "first" | "last") => setPickerFor({ nodeId, slot }),
     []
@@ -1491,8 +1647,30 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   );
 
   const panelCtx = useMemo<NodePanelCtx>(
-    () => ({ models, workflows, agents, running, updateNode: updateNodeData, runNode, openPicker, reloadWorkflows }),
-    [models, workflows, agents, running, updateNodeData, runNode, openPicker, reloadWorkflows]
+    () => ({
+      models,
+      workflows,
+      agents,
+      styles,
+      running,
+      updateNode: updateNodeData,
+      applyStyleToAll,
+      runNode,
+      openPicker,
+      reloadWorkflows,
+    }),
+    [
+      models,
+      workflows,
+      agents,
+      styles,
+      running,
+      updateNodeData,
+      applyStyleToAll,
+      runNode,
+      openPicker,
+      reloadWorkflows,
+    ]
   );
 
   const elements = useMemo(

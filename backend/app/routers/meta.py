@@ -144,6 +144,23 @@ async def list_provider_kinds() -> list[dict[str, str]]:
     return adapters.list_kinds()
 
 
+@router.get("/director-styles")
+async def list_director_styles(db: AsyncSession = Depends(get_db)) -> list[dict]:
+    """导演风格卡（画布上每个节点的「风格」下拉用）。
+
+    只下发 key 与名称：agent_prompt 是给 LLM 的、生图片段是给模型的，
+    都属于后端配置，前端不需要也不应该拿到。
+    """
+    from app.models import DirectorStyle
+
+    rows = await db.execute(
+        select(DirectorStyle)
+        .where(DirectorStyle.enabled.is_(True))
+        .order_by(DirectorStyle.sort_order, DirectorStyle.id)
+    )
+    return [{"key": s.key, "name": s.name} for s in rows.scalars().all()]
+
+
 @router.get("/provider-presets")
 async def list_provider_presets(db: AsyncSession = Depends(get_db)) -> list[dict]:
     """服务商预设。新增预设 = 配置表插一行，界面按钮自动出现。"""

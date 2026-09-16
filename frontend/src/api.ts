@@ -21,6 +21,7 @@ import type {
   CanvasNodeSchema,
   CanvasNodeStatus,
   SchemaRow,
+  StyleOption,
   TableSpecMeta,
   Task,
   UpdateRunResult,
@@ -230,6 +231,7 @@ export const api = {
   canvasStatus: (projectId: number) =>
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),
+  listDirectorStyles: () => request<StyleOption[]>("/api/meta/director-styles"),
 
   // ---- 在线更新 ----
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),

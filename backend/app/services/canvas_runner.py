@@ -30,10 +30,12 @@ from app.models import Asset, ComfyWorkflow, Project, ProviderService, Task
 from app.registry.canvas_nodes import (
     NODE_SCHEMAS,
     is_asset_image,
+    is_batch_image,
     is_doc_kind,
     is_runnable,
+    is_storyboard_image,
 )
-from app.services import asset_sheet, provider_store, storage
+from app.services import asset_sheet, provider_store, storage, storyboard_sheet, style_service
 from app.services.config_center_service import runtime_value
 from app.services.runner import runner
 
@@ -74,6 +76,15 @@ def read_task_params(task: Task) -> dict:
     except (TypeError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _new_batch_id(node: dict) -> str:
+    """一批任务的批次标记。
+
+    批量节点（资产设定图 / 分镜图）一次运行会派发 N 个任务，它们共享这个标记，
+    节点状态因此能把整批产物一次收齐（见 `_latest_task_assets` 与画布 /status）。
+    """
+    return f"{int(time.time() * 1000):x}-{node['id']}"
 
 
 async def _latest_task_assets(db: AsyncSession, project_id: int, node_id: int | str) -> list[Asset]:
@@ -284,7 +295,7 @@ async def _create_asset_image_tasks(
     size = str(data.get("size") or runtime_value("defaults.image_size", "1024x1024") or "1024x1024")
     per_row = max(1, min(4, int(data.get("n") or 1)))
     style = str(data.get("prompt") or "").strip()
-    batch = f"{int(time.time() * 1000):x}-{node['id']}"
+    batch = _new_batch_id(node)
     ref_ids = [a.id for a in images]
 
     tasks: list[Task] = []
@@ -316,6 +327,88 @@ async def _create_asset_image_tasks(
     for t in tasks:
         await db.refresh(t)
     logger.info("画布 %s 资产设定图：%s 行 → %s 个任务", project_id, len(rows), len(tasks))
+    return tasks
+
+
+async def _create_storyboard_image_tasks(
+    db: AsyncSession,
+    project_id: int,
+    node: dict,
+    upstream_text: str,
+    manual: list[Asset],
+    card: style_service.StyleCard | None,
+) -> list[Task]:
+    """分镜图节点：解析上游分镜表 → 逐镜建一个图片任务。
+
+    与资产设定图的关键差别：**每一镜的参考图是单独挑的**。
+    分镜的「画面」行里通常写着角色中文名，所以逐镜做一次角色提及注入，
+    就能把"这一镜该长什么样"的设定图挂上去，而不是把整批设定图全塞进去。
+    """
+    data = node.get("data") or {}
+    label = NODE_SCHEMAS["storyboardImage"]["label"]
+
+    shots = storyboard_sheet.parse_storyboard(upstream_text)
+    if not shots:
+        raise ValueError(
+            f"「{label}」没能从上游内容里解析出分镜表："
+            "请先运行上游「分镜」节点，并确认它产出的是镜头表"
+            "（`### 镜头N | 景别 | 运镜 | 时长s` + `- 画面：` / `- 首帧提示词：`）"
+        )
+    total_found = len(shots)
+    shots = storyboard_sheet.limit_shots(shots, int(data.get("shotLimit") or 0))
+
+    model_key = str(data.get("model_key") or "")
+    if not model_key:
+        raise ValueError(f"节点「{label}」未选择模型")
+    resolved = await provider_store.resolve_model(db, model_key, "image")
+
+    size = str(data.get("size") or runtime_value("defaults.image_size", "1024x1024") or "1024x1024")
+    per_shot = max(1, min(4, int(data.get("n") or 1)))
+    extra = str(data.get("prompt") or "").strip()
+    style_suffix = style_service.image_suffix(card)
+    mention_on = data.get("mentionRefs") is not False
+    batch = _new_batch_id(node)
+
+    tasks: list[Task] = []
+    for shot in shots:
+        refs = list(manual)
+        injected: list[str] = []
+        if mention_on:
+            refs, injected = await _inject_asset_refs(db, project_id, shot.scan_text, refs)
+        prompt = style_service.append_style(shot.image_prompt, extra)
+        prompt = style_service.append_style(prompt, style_suffix)
+        params: dict = {
+            "size": size,
+            "n": per_shot,
+            "shot_no": shot.no,
+            "shot_label": shot.label,
+            "asset_batch": batch,
+        }
+        if refs:
+            params["ref_asset_ids"] = [a.id for a in refs]
+        if injected:
+            params["injected_names"] = injected
+        tasks.append(
+            Task(
+                kind="image",
+                status="pending",
+                service_id=resolved.service.id,
+                model=model_key,
+                prompt=prompt,
+                params_json=json.dumps(params, ensure_ascii=False),
+                canvas_project_id=project_id,
+                canvas_node_id=str(node["id"]),
+            )
+        )
+        db.add(tasks[-1])
+
+    await db.commit()
+    for t in tasks:
+        await db.refresh(t)
+    logger.info(
+        "画布 %s 分镜图：解析出 %s 镜，本次生成 %s 镜 → %s 个任务",
+        project_id, total_found, len(shots), len(tasks),
+    )
     return tasks
 
 
@@ -374,7 +467,13 @@ async def _create_node_task(
             model=model_key,
             prompt=upstream_text,
             params_json=json.dumps(
-                {"agent_key": ntype, "extra": own_prompt, "node_params": node_params},
+                {
+                    "agent_key": ntype,
+                    "extra": own_prompt,
+                    "node_params": node_params,
+                    # 风格卡：由 runner._run_text 追加到系统提示词（这里可以出现导演名）
+                    "style_key": str(data.get("styleKey") or ""),
+                },
                 ensure_ascii=False,
             ),
             canvas_project_id=project_id,
@@ -419,6 +518,15 @@ async def _create_node_task(
     if not model_key:
         raise ValueError(f"节点「{NODE_SCHEMAS[ntype]['label']}」未选择模型")
     resolved = await provider_store.resolve_model(db, model_key, modality)
+
+    # 风格注入：给模型的只有技法片段与约束词，导演名不出现在这里（合规）
+    card = await style_service.load_card(db, str(data.get("styleKey") or ""))
+    if card is not None:
+        suffix = (
+            style_service.video_suffix(card) if modality == "video"
+            else style_service.image_suffix(card)
+        )
+        prompt = style_service.append_style(prompt, suffix)
 
     params = {}
     if ntype == "image":
@@ -504,14 +612,14 @@ def _has_input(node: dict, prompt: str, upstream_text: str) -> bool:
     """节点是否有可执行输入。
 
     - 工作流节点：提示词可空（参数与工作流本身足够）
+    - 批量图片节点（资产设定图 / 分镜图）：输入完全来自上游文档，节点自己的输入框可选
     - 文档节点：上游正文或本节点的「补充要求」有其一即可
-    - 资产设定图：输入完全来自上游资产表，节点自己的「统一风格」可留空
     - 其余节点：必须有提示词
     """
     ntype = node["type"]
     if ntype == "workflow":
         return True
-    if is_asset_image(ntype):
+    if is_batch_image(ntype):
         return bool(upstream_text.strip())
     if is_doc_kind(ntype):
         own = str((node.get("data") or {}).get("prompt") or "").strip()
@@ -544,6 +652,15 @@ async def _build_node_tasks(
     if is_asset_image(ntype):
         return await _create_asset_image_tasks(
             db, project_id, node, upstream_text, await _apply_manual_refs(db, data, images)
+        )
+
+    if is_storyboard_image(ntype):
+        # 上游图片一律不带进来：每一镜要的是"这一镜提到的那几个角色"，
+        # 把整批设定图全塞进去只会稀释主体（改由逐镜的提及注入来挑）。
+        manual = await _apply_manual_refs(db, data, [])
+        card = await style_service.load_card(db, str(data.get("styleKey") or ""))
+        return await _create_storyboard_image_tasks(
+            db, project_id, node, upstream_text, manual, card
         )
 
     injected: list[str] = []

@@ -519,6 +519,14 @@ input, textarea, select { font-family: inherit; }
 /* 工具栏上的自动链档位选择 */
 .canvas-chain-level { width: auto; padding: 4px 8px; font-size: 12px; }
 
+/* 节点卡上的风格标签（一眼看出这条链用了哪套风格） */
+.canvas-node-style {
+  margin-top: 6px; display: inline-block; max-width: 100%;
+  padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 600;
+  color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .canvas-doc-preview {
   margin: 0; max-height: 220px; overflow: auto; padding: 9px 10px;
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);

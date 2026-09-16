@@ -296,6 +296,37 @@ class ProviderPreset(Base):
     )
 
 
+class DirectorStyle(Base):
+    """导演风格卡（风格库）。
+
+    本质是「一套可复用的镜头语言 + 光影色调 + 提示词片段」，分三个注入点：
+
+    - `agent_prompt`：给**创作 Agent**（分镜/剧本/小说）的风格要求，中文，**可以出现导演名**
+      （它的作用是帮 LLM 理解技法）；
+    - `image_prompt` / `video_prompt`：拼进**生图 / 生视频提示词**的英文片段，
+      **一律只写技法特征，不出现导演名字**——规避肖像与版权风险，也避免平台审核误伤；
+    - `negative_prompt`：约束词，同样只给模型侧用。
+
+    拆成不同字段就是为了让这条合规边界在数据层就固定下来，改内容时不会越界。
+    """
+
+    __tablename__ = "director_styles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    key: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    agent_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    image_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    video_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    negative_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class Project(Base):
     """创作项目：一次完整作品的容器（画布 / 素材 / 任务的归属单位）。
 

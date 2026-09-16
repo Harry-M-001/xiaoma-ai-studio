@@ -62,7 +62,7 @@ NODE_SCHEMAS: dict[str, dict] = {
         "category": "document",
         "label": "小说",
         "description": "创意简报 → 小说正文（先出章节大纲，再逐章续写）",
-        "features": ["prompt", "modelSelect", "chapterCount"],
+        "features": ["prompt", "modelSelect", "chapterCount", "styleSelect"],
         "promptLabel": "补充要求",
         "promptPlaceholder": "可选：人称、文风、必须出现的情节",
         "handles": {
@@ -75,7 +75,7 @@ NODE_SCHEMAS: dict[str, dict] = {
         "category": "document",
         "label": "剧本",
         "description": "小说 → 场次剧本（只写戏不写镜头，镜头语言留给分镜）",
-        "features": ["prompt", "modelSelect", "sceneCount"],
+        "features": ["prompt", "modelSelect", "sceneCount", "styleSelect"],
         "promptLabel": "补充要求",
         "promptPlaceholder": "可选：目标集数、必须保留的台词、删减方向",
         "handles": {
@@ -88,7 +88,7 @@ NODE_SCHEMAS: dict[str, dict] = {
         "category": "document",
         "label": "分镜",
         "description": "剧本 → 镜头表（景别/运镜/情绪外化/首帧英文提示词）",
-        "features": ["prompt", "modelSelect", "shotCount"],
+        "features": ["prompt", "modelSelect", "shotCount", "styleSelect"],
         "promptLabel": "补充要求",
         "promptPlaceholder": "可选：整体影调、必须出现的画面、参考片风格",
         "handles": {
@@ -140,10 +140,26 @@ NODE_SCHEMAS: dict[str, dict] = {
         "category": "video",
         "label": "视频生成",
         "description": "按模式工作：文生视频 / 首尾帧 / 全能参考（视频编辑）",
-        "features": ["prompt", "modelSelect", "videoMode", "imageUpload", "duration", "ratio"],
+        "features": ["prompt", "modelSelect", "videoMode", "imageUpload", "duration", "ratio", "styleSelect"],
         "handles": {
             "targets": [{"id": "in-any", "type": "any"}],
             "sources": [{"id": "out-video", "type": "video"}],
+        },
+    },
+    # ---- 分镜图：读分镜表逐镜出图（C 期） ----
+    # 每镜用它自己的首帧提示词，上游纯图片不参与（要的是"这一镜的角色"），
+    # 参考图 = 节点上手动选的 + 该镜文本里提到的资产设定图。
+    "storyboardImage": {
+        "kind": "storyboardImage",
+        "category": "image",
+        "label": "分镜图",
+        "description": "读上游分镜表逐镜出图（用每镜的首帧提示词，自动追加风格词）；提到资产名会自动挂设定图",
+        "features": ["prompt", "modelSelect", "styleSelect", "imageSize", "sampleCount", "shotLimit"],
+        "promptLabel": "补充要求",
+        "promptPlaceholder": "可选：每镜都必须出现的元素、统一的画面要求（风格请用上面的风格卡）",
+        "handles": {
+            "targets": [{"id": "in-any", "type": "any"}],
+            "sources": [{"id": "out-image", "type": "image"}],
         },
     },
     "workflow": {
@@ -170,6 +186,9 @@ PASSIVE_NODE_KINDS = ("text",)
 # 资产链节点：逐行批量产生图片任务（一个节点 → N 个任务）
 ASSET_IMAGE_KINDS = ("assetImage",)
 
+# 分镜图节点：逐镜批量产生图片任务（同样是 1 个节点 → N 个任务）
+STORYBOARD_IMAGE_KINDS = ("storyboardImage",)
+
 
 def is_doc_kind(ntype: str) -> bool:
     return normalize_type(ntype) in DOC_NODE_KINDS
@@ -177,6 +196,15 @@ def is_doc_kind(ntype: str) -> bool:
 
 def is_asset_image(ntype: str) -> bool:
     return normalize_type(ntype) in ASSET_IMAGE_KINDS
+
+
+def is_storyboard_image(ntype: str) -> bool:
+    return normalize_type(ntype) in STORYBOARD_IMAGE_KINDS
+
+
+def is_batch_image(ntype: str) -> bool:
+    """会「一个节点派发 N 个任务」的节点类型。"""
+    return is_asset_image(ntype) or is_storyboard_image(ntype)
 
 
 def is_runnable(ntype: str) -> bool:

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
 from app.providers.base import AdapterError
 from app.providers.comfyui import ComfyUIAdapter, ComfyOutputFile
-from app.services import doc_service, provider_store, storage
+from app.services import doc_service, provider_store, storage, style_service
 from app.services.comfy_workflow_service import apply_params
 
 logger = logging.getLogger("xiaoma.runner")
@@ -507,6 +508,13 @@ class TaskRunner:
                         raise AdapterError(
                             f"创作 Agent「{spec.label}」的用户消息模板为空，请先补全"
                         )
+                    # 风格注入：风格卡的「给 Agent 的风格要求」追加到系统提示词末尾
+                    # （这里可以出现导演名，它是给 LLM 理解技法用的；给生图模型的那份在别处）
+                    card = await style_service.load_card(db, str(params.get("style_key") or ""))
+                    block = style_service.agent_block(card)
+                    if block:
+                        spec = replace(spec, system_prompt=f"{spec.system_prompt.rstrip()}\n\n{block}")
+                        logger.info("文本任务 %s 注入风格：%s", task_id, card.name if card else "")
                     # Agent 上指定了模型就用它，否则用节点上选的
                     resolved = await provider_store.resolve_model(
                         db, spec.model_key or task.model, "text"

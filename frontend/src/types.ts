@@ -180,9 +180,19 @@ export interface CanvasNodeData {
   shotCount?: number;
   /** 资产设定图：生成范围（"" 全部 / character 角色 / scene 场景 / prop 道具） */
   assetScope?: string;
+  /** 分镜图：本次最多生成几个镜头（0 = 全部） */
+  shotLimit?: number;
+  /** 导演风格卡标识（空 = 不注入风格） */
+  styleKey?: string;
   /** 是否自动挂载提示词里提到的资产设定图（false = 关闭，默认开） */
   mentionRefs?: boolean;
   [k: string]: unknown;
+}
+
+/** 导演风格卡（画布节点的风格下拉用；具体内容存在后端配置表里） */
+export interface StyleOption {
+  key: string;
+  name: string;
 }
 
 export interface CanvasNode {

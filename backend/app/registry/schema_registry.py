@@ -20,6 +20,7 @@ from typing import Any
 from app.models import (
     AgentPrompt,
     ConfigItem,
+    DirectorStyle,
     Modality,
     NavItem,
     ParamOption,
@@ -708,6 +709,314 @@ register(
                 "user_template": "【上游内容】\n{content}\n\n【补充要求】\n{params}",
                 "plan_prompt": "",
                 "chunk_prompt": "",
+            },
+        ],
+    )
+)
+
+# ============================================================
+# 注册：导演风格库
+# ============================================================
+# 风格卡 = 一套可复用的「镜头语言 + 光影色调 + 提示词片段」，三个注入点：
+#   agent_prompt    → 给创作 Agent（分镜/剧本/小说）的风格要求，中文，**可以出现导演名**
+#   image_prompt    → 拼进生图提示词，英文，**只写技法特征，不出现导演名**
+#   video_prompt    → 拼进生视频提示词，英文，**只写技法特征，不出现导演名**
+#   negative_prompt → 模型侧约束词
+#
+# 这条边界是刻意的（合规 + 过审）：导演名只帮 LLM 理解技法，
+# 绝不把它甩给生图/生视频模型——既避开肖像与版权风险，也躲开平台关键词审核。
+# 种子内容只描述公开的镜头语言与影调特征，不引用任何具体作品。
+
+register(
+    TableSpec(
+        name="director_styles",
+        model=DirectorStyle,
+        label="导演风格",
+        description="画布节点上可选的风格卡。改这里 = 改全链的风格注入，前端下拉自动跟着变。",
+        group="system",
+        fields=[
+            FieldSpec("key", "标识", "string", required=True, help="英文小写，供画布节点引用"),
+            FieldSpec("name", "名称", "string", required=True, help="下拉里显示的名字"),
+            FieldSpec("agent_prompt", "给 Agent 的风格要求", "text",
+                      help="中文，注入分镜/剧本/小说的系统提示词；这里可以写导演名，帮模型理解技法"),
+            FieldSpec("image_prompt", "生图风格词", "text",
+                      help="英文，拼进生图提示词。只写技法特征，禁止出现导演人名（合规）"),
+            FieldSpec("video_prompt", "生视频风格词", "text",
+                      help="英文，拼进生视频提示词。同样禁止出现导演人名"),
+            FieldSpec("negative_prompt", "约束词", "text", help="英文负面词，拼在提示词末尾"),
+            FieldSpec("sort_order", "排序", "int", default=0),
+            FieldSpec("enabled", "启用", "bool", default=True),
+        ],
+        seed=[
+            {
+                "key": "spielberg_face", "name": "斯皮尔伯格·面孔", "sort_order": 1,
+                "agent_prompt": (
+                    "你按「斯皮尔伯格式」的镜头语言工作。\n"
+                    "- 镜头语言：主观视角与反应镜头优先；用人物面孔特写驱动情绪；平滑推轨与缓慢升降；"
+                    "大场面先给一个仰望视角交代体量。\n"
+                    "- 光影色调：自然光为主，暖调高饱和，逆光轮廓带柔和眩光；夜戏只用实用光源（灯、车灯、窗光）。\n"
+                    "- 节奏与剪辑：情绪累积后给一个释放点；让观众比角色先知道，用视线与画外空间制造悬念。\n"
+                    "- 代表技法：面孔特写、仰望视角、窗光斜射进室内。"
+                ),
+                "image_prompt": (
+                    "subjective eye-level framing, expressive face close-up as the emotional anchor, "
+                    "warm natural light, high saturation, soft backlight rim with gentle lens flare, "
+                    "practical light sources at night, cinematic 35mm look"
+                ),
+                "video_prompt": (
+                    "smooth dolly-in toward a face, slow crane rise revealing scale, "
+                    "one continuous movement per shot, wonder-and-reveal pacing, warm natural color"
+                ),
+                "negative_prompt": "no text, no subtitle, no watermark, no logo, no distorted face",
+            },
+            {
+                "key": "cameron_spectacle", "name": "卡梅隆·奇观", "sort_order": 2,
+                "agent_prompt": (
+                    "你按「卡梅隆式」的镜头语言工作。\n"
+                    "- 镜头语言：先用大尺度建立镜头交代体量与空间，再切到人的尺度做情感锚点；"
+                    "机械与载具给完整运动轨迹；水下或悬浮场景用低角度平视。\n"
+                    "- 光影色调：体积光与光柱，冷暖对比（青蓝环境 + 橙红光源），金属与湿润表面高光。\n"
+                    "- 节奏与剪辑：情感优先于特效——每个奇观镜头之后必须给人物的反应镜头；段落内部镜头逐渐加速。\n"
+                    "- 代表技法：大尺度建立镜头、机械完整轨迹、水下低角度。"
+                ),
+                "image_prompt": (
+                    "epic establishing wide shot showing full scale, volumetric light beams, "
+                    "cold blue ambience with warm orange practical light, wet metallic surfaces with "
+                    "specular highlights, deep focus, high detail"
+                ),
+                "video_prompt": (
+                    "slow low-angle push through a vast space, full mechanical trajectory in one shot, "
+                    "gradual acceleration across the sequence, scale-first then human-scale beat"
+                ),
+                "negative_prompt": "no text, no subtitle, no watermark, no logo, no flat even lighting",
+            },
+            {
+                "key": "nolan_realism", "name": "诺兰·实感", "sort_order": 3,
+                "agent_prompt": (
+                    "你按「诺兰式」的镜头语言工作。\n"
+                    "- 镜头语言：大画幅实景质感（天地占比大、人物偏小），肩扛跟拍与固定机位交替；"
+                    "对话戏用正反打，机位贴近人脸高度。\n"
+                    "- 光影色调：硬光、低饱和、大反差；以剪影和逆光为主，夜景几乎不补光，让暗部真的暗下去。\n"
+                    "- 节奏与剪辑：多线交叉剪辑，用动作与声音做转场；同一事件的不同视角并置。\n"
+                    "- 代表技法：大画幅实景、交叉剪辑、剪影。"
+                ),
+                "image_prompt": (
+                    "large-format realistic cinematography, hard directional light, low saturation, "
+                    "deep contrast, silhouette against a bright background, practical real locations, "
+                    "natural film grain, wide composition with small human figures"
+                ),
+                "video_prompt": (
+                    "handheld tracking shot at human eye level, static wide framing on the same subject, "
+                    "cross-cut parallel action, hard-light contrast, deliberately unpolished look"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no oversaturated color, no glossy plastic look"
+                ),
+            },
+            {
+                "key": "wong_kar_wai", "name": "王家卫·暧昧", "sort_order": 4,
+                "agent_prompt": (
+                    "你按「王家卫式」的镜头语言工作。\n"
+                    "- 镜头语言：手持微晃与抽帧慢门制造暧昧感；大量用门框、窗框、镜子做前景遮挡；"
+                    "用局部特写（手、烟、鞋、背影）替代正脸；主体常常不在画面中心。\n"
+                    "- 光影色调：霓虹夜色、高对比，绿与粉撞色，暖黄钨丝灯；潮湿反光的地面与玻璃。\n"
+                    "- 节奏与剪辑：慢门拖影 + 突兀跳切；画外音旁白承担时间跳跃；重复同一动作表现时间流逝。\n"
+                    "- 代表技法：前景遮挡、局部特写、霓虹潮湿夜。"
+                ),
+                "image_prompt": (
+                    "stepped motion-blur look, neon night ambience, high contrast, teal-green and magenta "
+                    "color clash, warm tungsten practical light, wet reflective street and glass, "
+                    "foreground obstruction, shallow depth of field, moody haze"
+                ),
+                "video_prompt": (
+                    "handheld subtle sway, stepped slow-shutter look, foreground obstruction framing, "
+                    "jump-cut rhythm, neon night color, quiet intimate pacing"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no clean bright daylight, "
+                    "no centered symmetrical composition"
+                ),
+            },
+            {
+                "key": "wes_anderson", "name": "韦斯·安德森·对称", "sort_order": 5,
+                "agent_prompt": (
+                    "你按「韦斯·安德森式」的镜头语言工作。\n"
+                    "- 镜头语言：严格正面平视、居中对称构图；90 度横摇与快速甩镜做转场；章节卡片直接进画面。\n"
+                    "- 光影色调：高饱和糖果色（粉、芥末黄、湖蓝），均匀柔光，几乎无阴影；美术道具整齐排列。\n"
+                    "- 节奏与剪辑：节拍规整，动作与配乐卡点；段落切换干脆利落。\n"
+                    "- 代表技法：绝对对称、平移横摇、章节卡片。"
+                ),
+                "image_prompt": (
+                    "perfectly centered symmetrical composition, front-facing flat framing, pastel candy "
+                    "palette, even soft light with minimal shadow, meticulously arranged props, "
+                    "dollhouse-like production design, crisp detail"
+                ),
+                "video_prompt": (
+                    "locked-off symmetrical shot, precise 90-degree whip pan, lateral tracking with a "
+                    "centered subject, beat-matched cuts, chapter card transition"
+                ),
+                "negative_prompt": (
+                    "no watermark, no logo, no subtitle bar, no handheld shake, no harsh shadow, "
+                    "no off-center cluttered framing"
+                ),
+            },
+            {
+                "key": "miyazaki_nature", "name": "宫崎骏·自然", "sort_order": 6,
+                "agent_prompt": (
+                    "你按「宫崎骏式」的镜头语言工作。\n"
+                    "- 镜头语言：广阔自然远景与俯瞰全景；飞行、奔跑用追随镜头；"
+                    "安排大量「无台词的空镜时刻」（风、云、草、水）。\n"
+                    "- 光影色调：手绘水彩质感，晨昏金光，通透的蓝天白云，柔和高光，色彩干净不脏。\n"
+                    "- 节奏与剪辑：呼吸感强，情绪段落留白，日常细节（吃饭、洗衣、走路）与奇观交替出现。\n"
+                    "- 代表技法：自然远景、飞行追随、留白空镜。"
+                ),
+                "image_prompt": (
+                    "hand-painted watercolor background art, vast natural landscape, golden morning or "
+                    "dusk light, clean bright blue sky with soft cumulus clouds, gentle highlights, "
+                    "detailed grass and foliage, nostalgic warm palette"
+                ),
+                "video_prompt": (
+                    "slow aerial following shot over a landscape, gentle pan across nature, "
+                    "wind-blown grass and drifting clouds, quiet contemplative pacing with held moments"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no photorealistic 3D render, no gritty dark tone"
+                ),
+            },
+            {
+                "key": "tarantino_tension", "name": "昆汀·张力", "sort_order": 7,
+                "agent_prompt": (
+                    "你按「昆汀式」的镜头语言工作。\n"
+                    "- 镜头语言：长镜头对峙（低机位、环绕）、极端特写（脚、眼睛、枪口、食物）、突然的推近；"
+                    "章节式叙事分隔。\n"
+                    "- 光影色调：顶光与硬阴影，暖黄室内色调，高对比，胶片颗粒质感。\n"
+                    "- 节奏与剪辑：长对话蓄势 → 瞬间爆发；配乐与场景情绪故意错位；非线性章节。\n"
+                    "- 代表技法：低机位对峙、极端特写、章节分隔。"
+                ),
+                "image_prompt": (
+                    "low-angle standoff framing, extreme close-up detail inserts, top light with hard "
+                    "shadows, warm amber interior, high contrast, coarse film grain, 70s exploitation "
+                    "cinema look"
+                ),
+                "video_prompt": (
+                    "slow low-angle circular dolly around a standoff, sudden snap zoom to an extreme "
+                    "close-up, held long take, stillness that builds tension then abrupt motion"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no soft flat lighting, no clean modern digital look"
+                ),
+            },
+            {
+                "key": "villeneuve_silence", "name": "维伦纽瓦·静默", "sort_order": 8,
+                "agent_prompt": (
+                    "你按「维伦纽瓦式」的镜头语言工作。\n"
+                    "- 镜头语言：大尺度静默空镜、剪影群像、缓慢推近；人物常被巨大的环境或结构压住；极简构图。\n"
+                    "- 光影色调：单色低饱和（沙金、灰蓝、雾白），沙尘与雾气弥漫，逆光剪影，几乎不用暖色点缀。\n"
+                    "- 节奏与剪辑：极慢节奏，声音承担叙事；长时间静止之后只给一次移动。\n"
+                    "- 代表技法：静默空镜、剪影、缓慢推近。"
+                ),
+                "image_prompt": (
+                    "monumental silent wide shot, monolithic structure dwarfing tiny human silhouettes, "
+                    "monochrome low saturation, sand-dust or fog haze, backlit silhouette, minimal "
+                    "composition, heavy atmosphere"
+                ),
+                "video_prompt": (
+                    "very slow push-in on a vast landscape, silhouetted figures held in long shot, "
+                    "dust haze drifting, minimal movement, sound-driven stillness"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no bright saturated color, no fast-cut energy"
+                ),
+            },
+            {
+                "key": "guoman", "name": "国漫", "sort_order": 9,
+                "agent_prompt": (
+                    "你按「国漫」的镜头语言工作。\n"
+                    "- 镜头语言：写意的大幅度运动镜头（冲天而上、横扫千军）；打斗讲究招式连贯与留白；"
+                    "人物登场给仰拍。\n"
+                    "- 光影色调：明亮的赛璐璐上色，边缘描边高光，冷暖对比强，法术与灵力用发光渐变。\n"
+                    "- 节奏与剪辑：快慢交替，命中的一击用慢镜，收势用定帧。\n"
+                    "- 代表技法：写意大幅运镜、发光特效、定帧收势。"
+                ),
+                "image_prompt": (
+                    "chinese animation cel-shaded style, crisp ink outline, bright saturated color, "
+                    "glowing energy effects, dynamic action pose, clean painted background, dramatic rim light"
+                ),
+                "video_prompt": (
+                    "large sweeping camera move, dynamic action with clear pose-to-pose flow, "
+                    "slow motion on impact then a snap freeze, glowing energy trails"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no photorealistic skin, no western cartoon proportions"
+                ),
+            },
+            {
+                "key": "cyberpunk", "name": "赛博朋克", "sort_order": 10,
+                "agent_prompt": (
+                    "你按「赛博朋克」的镜头语言工作。\n"
+                    "- 镜头语言：低角度仰拍高楼与广告牌，穿过雨幕和蒸汽的推轨，第一人称穿行；"
+                    "镜头允许轻微畸变。\n"
+                    "- 光影色调：青蓝与洋红霓虹，雨夜湿地反光，全息广告投影，暗部浓重。\n"
+                    "- 节奏与剪辑：电子节拍驱动剪辑，信息密集的蒙太奇，偶尔来一次突然静音。\n"
+                    "- 代表技法：霓虹雨夜、全息投影、低角度仰拍。"
+                ),
+                "image_prompt": (
+                    "cyberpunk city on a rainy night, cyan and magenta neon signage, holographic "
+                    "advertisements, wet asphalt reflections, steam vents, dense dark shadow, "
+                    "slight lens distortion, retro-futuristic dystopian production design"
+                ),
+                "video_prompt": (
+                    "low-angle push along a neon street, rain and steam drifting, first-person traversal, "
+                    "electronic beat-matched cuts, one sudden silence pause"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no daylight rural scene, no pastel color"
+                ),
+            },
+            {
+                "key": "ink_wash", "name": "水墨", "sort_order": 11,
+                "agent_prompt": (
+                    "你按「水墨」的镜头语言工作。\n"
+                    "- 镜头语言：横向长卷式横移，大面积留白，主体偏安一隅；用雾与水的流动代替运镜。\n"
+                    "- 光影色调：黑白灰墨阶，朱红或石青单点设色；宣纸纹理，墨色晕染边缘。\n"
+                    "- 节奏与剪辑：呼吸般的缓慢节拍，笔画落下对应一次镜头切换。\n"
+                    "- 代表技法：长卷横移、大面积留白、单点设色。"
+                ),
+                "image_prompt": (
+                    "chinese ink wash painting, sumi-e brush texture, rice paper grain, vast negative "
+                    "space, sparse composition, black and grey ink with a single vermilion accent, "
+                    "ink bleed edges, misty mountain"
+                ),
+                "video_prompt": (
+                    "slow lateral scroll like unrolling a handscroll, ink bleeding into water, "
+                    "drifting mist, minimal movement, brush-stroke cut transitions"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no photographic texture, no heavy saturated color"
+                ),
+            },
+            {
+                "key": "handheld_doc", "name": "纪实手持", "sort_order": 12,
+                "agent_prompt": (
+                    "你按「纪实」的镜头语言工作。\n"
+                    "- 镜头语言：手持跟拍，允许偶尔脱焦再对焦，越过肩膀的观察视角；"
+                    "不做精致构图，抓拍感优先。\n"
+                    "- 光影色调：自然可用光，不补光；轻微欠曝与噪点，白平衡不追求精准。\n"
+                    "- 节奏与剪辑：长镜头跟随，保留真实的停顿与口误；剪辑不做卡点。\n"
+                    "- 代表技法：手持跟拍、抓拍构图、自然光。"
+                ),
+                "image_prompt": (
+                    "documentary handheld look, available natural light, slightly underexposed with "
+                    "sensor noise, imperfect candid framing, realistic skin texture, no studio lighting"
+                ),
+                "video_prompt": (
+                    "handheld follow shot with a breathing camera, occasional focus hunting, "
+                    "long uninterrupted take, no music-video pacing"
+                ),
+                "negative_prompt": (
+                    "no text, no subtitle, no watermark, no logo, no studio lighting, "
+                    "no glossy color grading, no perfect symmetry"
+                ),
             },
         ],
     )
