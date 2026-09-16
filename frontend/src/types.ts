@@ -243,8 +243,18 @@ export interface CanvasNodeStatus {
   taskCount?: number;
   /** 命中的角色提及注入资产名（后端自动挂的参考图） */
   injectedNames?: string[];
-  /** 一次运行的全部产物（资产链节点会有多张） */
-  assets?: { id: number; url: string; kind: string; name: string; category: string }[];
+  /** 一次运行的全部产物（资产链 / 分镜图节点会有多张） */
+  assets?: {
+    id: number;
+    url: string;
+    kind: string;
+    name: string;
+    category: string;
+    /** 网格上的短标签：分镜图是镜号「镜头3」，资产图是资产名；其余产物为空 */
+    label?: string;
+    /** 悬停说明：镜号+景别运镜+自动挂的参考图，或资产名+类型 */
+    title?: string;
+  }[];
   progress?: number;
   error?: string | null;
 }

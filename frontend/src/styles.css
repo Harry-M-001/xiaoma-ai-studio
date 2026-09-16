@@ -518,19 +518,46 @@ input, textarea, select { font-family: inherit; }
 }
 .canvas-doc-count { font-style: normal; font-weight: 500; font-size: 11.5px; color: var(--text-3); }
 
-/* 资产链：节点上的多产物缩略图（三张 + 剩余数量） */
+/* 资产链 / 分镜图：节点上的多产物缩略图（三张 + 剩余数量 + 角标） */
 .canvas-node-thumbs {
   position: relative; margin-top: 8px;
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
 }
-.canvas-node-thumbs img {
+.canvas-node-thumbcell { position: relative; display: block; }
+.canvas-node-thumbcell img {
   width: 100%; height: 52px; object-fit: cover; border-radius: 5px;
   border: 1px solid var(--border); display: block; background: var(--surface-2);
+}
+.canvas-node-thumbcell em {
+  position: absolute; left: 2px; bottom: 2px; max-width: calc(100% - 4px);
+  padding: 0 4px; border-radius: 3px; font-size: 9px; font-style: normal; font-weight: 600;
+  color: #fff; background: rgba(0, 0, 0, 0.6);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .canvas-node-thumbs-more {
   position: absolute; right: 4px; bottom: 4px; padding: 1px 6px; border-radius: 999px;
   background: rgba(0, 0, 0, 0.62); color: #fff; font-size: 10px; font-weight: 600;
 }
+
+/* 浮框里的产物网格：列宽跟着「缩略图大小」走，格子角上标镜号 / 资产名 */
+.canvas-prodgrid {
+  display: grid; gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(var(--thumb, 88px), 1fr));
+}
+.canvas-prodcell {
+  position: relative; padding: 0; aspect-ratio: 1; cursor: zoom-in;
+  border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  background: var(--surface-2); display: block;
+}
+.canvas-prodcell:hover { border-color: var(--primary); }
+.canvas-prodcell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.canvas-prodlabel {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 5px 3px;
+  font-size: 10px; font-weight: 600; color: #fff; text-align: left;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.canvas-zoom { width: 96px; flex-shrink: 0; accent-color: var(--primary); }
 
 /* 浮框里的「自动挂载资产」开关 */
 .canvas-check {

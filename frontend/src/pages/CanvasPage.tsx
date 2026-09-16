@@ -184,6 +184,14 @@ interface NodeRefImage {
   url: string;
 }
 
+/** 灯箱展示项：图库资产与节点产物共用同一个预览层 */
+interface LightboxItem {
+  url: string;
+  kind: string;
+  title: string;
+  meta?: string;
+}
+
 /** 节点浮框与页面通信（避免把全局态塞进 node.data 被持久化） */
 interface NodePanelCtx {
   models: ModelOption[];
@@ -197,6 +205,11 @@ interface NodePanelCtx {
   applyStyleToAll: (key: string) => void;
   /** 按屏幕像素平移动画布（浮框超出可视区时用来自动让位） */
   nudgeViewport: (dxScreen: number, dyScreen: number) => void;
+  /** 放大查看某个产物（浮框里的产物网格用） */
+  preview: (url: string, title?: string, kind?: string) => void;
+  /** 产物缩略图大小（像素）与修改入口，全局记忆 */
+  thumb: number;
+  pickThumb: (v: number) => void;
   runNode: (id: string) => void;
   openPicker: (nodeId: string, slot?: "first" | "last") => void;
   reloadWorkflows: () => Promise<ComfyWorkflow[]>;
@@ -505,6 +518,8 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
 
   if (!ctx || !schema) return null;
   const features = schema.features ?? [];
+  // 图片产物（文档 / 视频不走这个网格）
+  const imageProducts = (status?.assets ?? []).filter((a) => a.kind === "image");
   const nodeType = String(data.nodeType);
   const isVideo = nodeType === "video";
   const isDoc = DOC_KINDS.has(nodeType);
@@ -866,26 +881,45 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       ) : null}
 
-      {status?.assets && status.assets.length > 0 && String(data.nodeType) === ASSET_IMAGE_KIND && (
+      {imageProducts.length > 0 && (
         <div className="field">
-          <label className="field-label">
-            已生成资产<em className="canvas-doc-count">（{status.assets.length} 张）</em>
-          </label>
-          <div className="canvas-refstrip">
-            {status.assets.map((a) => (
-              <a
+          <div className="canvas-inline canvas-refhead">
+            <label className="field-label">
+              产物<em className="canvas-doc-count">（{imageProducts.length} 张）</em>
+            </label>
+            {imageProducts.length > 1 && (
+              <input
+                className="canvas-zoom"
+                type="range"
+                min={56}
+                max={176}
+                step={8}
+                value={ctx.thumb}
+                onChange={(e) => ctx.pickThumb(Number(e.target.value))}
+                title="缩略图大小"
+                aria-label="缩略图大小"
+              />
+            )}
+          </div>
+          <div className="canvas-prodgrid" style={{ "--thumb": `${ctx.thumb}px` } as React.CSSProperties}>
+            {imageProducts.map((a, i) => (
+              <button
                 key={a.id}
-                className="canvas-refthumb"
-                href={a.url}
-                target="_blank"
-                rel="noreferrer"
-                title={`${a.name}${a.category ? ` · ${a.category}` : ""}`}
+                type="button"
+                className="canvas-prodcell"
+                onClick={() => ctx.preview(a.url, a.title || a.name)}
+                title={a.title || a.name}
               >
-                <img src={a.url} alt={a.name} loading="lazy" />
-              </a>
+                <img src={a.url} alt={a.label || a.name} loading="lazy" />
+                <span className="canvas-prodlabel">{a.label || `#${i + 1}`}</span>
+              </button>
             ))}
           </div>
-          <div className="field-hint">资产名已入库：下游提示词里提到名字会自动挂图</div>
+          <div className="field-hint">
+            {String(data.nodeType) === ASSET_IMAGE_KIND
+              ? "点开可放大；资产名已入库，下游提到名字会自动挂图"
+              : "点开可放大；格子上的标签就是镜号"}
+          </div>
         </div>
       )}
 
@@ -933,6 +967,7 @@ function ContractNode({ id, data, selected }: NodeProps) {
   const schema = data.schema as CanvasNodeSchema;
   const status = data.status as CanvasNodeStatus | undefined;
   const refCount = ((data.refImages as NodeRefImage[] | undefined) ?? []).length;
+  const nodeImages = (status?.assets ?? []).filter((a) => a.kind === "image");
   // 节点上选了风格就在卡片上标出来：一条链上七八个节点，一眼能看出谁在用哪套风格
   const styleName = data.styleKey
     ? ctx?.styles.find((s) => s.key === data.styleKey)?.name ?? ""
@@ -969,14 +1004,17 @@ function ContractNode({ id, data, selected }: NodeProps) {
           <div className="canvas-node-doc">
             {(status.text ?? "").split("\n").filter((l) => l.trim()).slice(0, 3).join("\n")}
           </div>
-        ) : status?.assets && status.assets.length > 1 ? (
-          // 资产链节点一次产出多张：铺三张 + 剩余数量
+        ) : nodeImages.length > 1 ? (
+          // 批量节点一次产出多张：铺三张 + 剩余数量，每格角上标镜号 / 资产名
           <div className="canvas-node-thumbs">
-            {status.assets.slice(0, 3).map((a) => (
-              <img key={a.id} src={a.url} alt={a.name} title={a.name} loading="lazy" />
+            {nodeImages.slice(0, 3).map((a, i) => (
+              <span key={a.id} className="canvas-node-thumbcell">
+                <img src={a.url} alt={a.label || a.name} title={a.title || a.name} loading="lazy" />
+                <em>{a.label || `#${i + 1}`}</em>
+              </span>
             ))}
-            {status.assets.length > 3 && (
-              <span className="canvas-node-thumbs-more">+{status.assets.length - 3}</span>
+            {nodeImages.length > 3 && (
+              <span className="canvas-node-thumbs-more">+{nodeImages.length - 3}</span>
             )}
           </div>
         ) : status?.assetUrl ? (
@@ -1248,7 +1286,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [railTab, setRailTab] = useState<"elements" | "assets">("elements");
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const [pickerFor, setPickerFor] = useState<{ nodeId: string; slot?: "first" | "last" } | null>(null);
-  const [lightbox, setLightbox] = useState<Asset | null>(null);
+  const [lightbox, setLightbox] = useState<LightboxItem | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
@@ -1691,6 +1729,43 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [getViewport, setViewport]
   );
 
+  // 图库资产的预览（带尺寸与体积信息）
+  const previewAsset = useCallback(
+    (a: Asset) =>
+      setLightbox({
+        url: a.url,
+        kind: a.kind,
+        title: a.original_name,
+        meta: `${a.width && a.height ? `${a.width}×${a.height} · ` : ""}${(a.size / 1024).toFixed(0)} KB`,
+      }),
+    []
+  );
+
+  // 节点产物的预览（浮框网格里点开）
+  const previewProduct = useCallback(
+    (url: string, title?: string, kind = "image") => setLightbox({ url, kind, title: title || "产物" }),
+    []
+  );
+
+  // 产物缩略图大小（用户拖一次就记住，跟 Toonflow 的分镜网格一个思路）
+  // 默认值要落在滑杆的步进网格上（56 + n*8），否则滑杆显示会与初值不一致
+  const [thumb, setThumb] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem("xm_canvas_thumb"));
+      return v >= 56 && v <= 176 ? v : 88;
+    } catch {
+      return 88;
+    }
+  });
+  const pickThumb = useCallback((v: number) => {
+    setThumb(v);
+    try {
+      localStorage.setItem("xm_canvas_thumb", String(v));
+    } catch {
+      /* localStorage 不可用忽略 */
+    }
+  }, []);
+
   const openPicker = useCallback(
     (nodeId: string, slot?: "first" | "last") => setPickerFor({ nodeId, slot }),
     []
@@ -1740,6 +1815,9 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       updateNode: updateNodeData,
       applyStyleToAll,
       nudgeViewport,
+      preview: previewProduct,
+      thumb,
+      pickThumb,
       runNode,
       openPicker,
       reloadWorkflows,
@@ -1753,6 +1831,9 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       updateNodeData,
       applyStyleToAll,
       nudgeViewport,
+      previewProduct,
+      thumb,
+      pickThumb,
       runNode,
       openPicker,
       reloadWorkflows,
@@ -1915,7 +1996,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                     {drawerAssets.length === 0 && (
                       <div className="canvas-palette-hint">暂无资产，生成的图片/视频会自动归档</div>
                     )}
-                    <AssetGrid assets={drawerAssets} onPreview={setLightbox} />
+                    <AssetGrid assets={drawerAssets} onPreview={previewAsset} />
                   </div>
                 </div>
               )}
@@ -2011,14 +2092,13 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
               {lightbox.kind === "video" ? (
                 <video src={lightbox.url} controls autoPlay />
               ) : (
-                <img src={lightbox.url} alt={lightbox.original_name} />
+                <img src={lightbox.url} alt={lightbox.title} />
               )}
               <div className="canvas-lightbox-meta">
-                <span className="canvas-lightbox-name">{lightbox.original_name}</span>
+                <span className="canvas-lightbox-name">{lightbox.title}</span>
                 <span>
-                  {lightbox.kind === "video" ? "视频" : "图片"} ·{" "}
-                  {lightbox.width && lightbox.height ? `${lightbox.width}×${lightbox.height} · ` : ""}
-                  {(lightbox.size / 1024).toFixed(0)} KB
+                  {lightbox.kind === "video" ? "视频" : "图片"}
+                  {lightbox.meta ? ` · ${lightbox.meta}` : ""}
                 </span>
               </div>
               <button type="button" className="canvas-dialog-close" onClick={() => setLightbox(null)}>

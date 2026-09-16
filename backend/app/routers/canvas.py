@@ -184,29 +184,26 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
             asset_by_task.setdefault(a.task_id, []).append(a)
 
     for nid, st in node_status.items():
-        # 按任务顺序铺平产物（同一批任务是按资产表行序建的）
-        assets: list[Asset] = []
+        # 按任务顺序铺平产物（同一批任务是按资产表行序 / 镜号建的），
+        # 每个产物带上展示标签（镜号 / 资产名），前端网格才认得出哪张是哪张
+        views: list[dict] = []
+        doc_asset: Asset | None = None
         for t in sorted(node_batch[nid], key=lambda x: x.id):
-            assets.extend(asset_by_task.get(t.id, []))
-        if not assets:
+            tparams = canvas_runner.read_task_params(t)
+            for a in asset_by_task.get(t.id, []):
+                views.append(canvas_runner.asset_view(a, tparams))
+                if doc_asset is None and a.kind == "document":
+                    doc_asset = a
+        if not views:
             continue
-        first = assets[0]
-        st["assetId"] = first.id
-        st["assetKind"] = first.kind
-        st["assetUrl"] = f"/media/{first.filename}"
-        st["assetName"] = first.name or first.original_name
-        st["assets"] = [
-            {
-                "id": a.id,
-                "url": f"/media/{a.filename}",
-                "kind": a.kind,
-                "name": a.name or a.original_name,
-                "category": a.category,
-            }
-            for a in assets
-        ]
-        if first.kind == "document" and st["status"] == "completed":
-            st["text"] = _read_text_preview(first.filename)
+        first = views[0]
+        st["assetId"] = first["id"]
+        st["assetKind"] = first["kind"]
+        st["assetUrl"] = first["url"]
+        st["assetName"] = first["name"]
+        st["assets"] = views
+        if doc_asset is not None and st["status"] == "completed":
+            st["text"] = _read_text_preview(doc_asset.filename)
     return {"nodes": node_status}
 
 

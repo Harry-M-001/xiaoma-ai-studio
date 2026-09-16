@@ -163,6 +163,50 @@ def test_style_extra_appended_and_negative_kept():
     assert "no watermark" in p
 
 
+# ---------- 产物展示视图（画布网格里的标签） ----------
+
+
+def _asset(name: str = "", category: str = "", filename: str = "a.png") -> Asset:
+    return Asset(
+        kind="image", filename=filename, original_name=filename,
+        content_type="image/png", size=1, name=name, category=category,
+    )
+
+
+def test_asset_view_labels_shot_number():
+    """分镜图：标签是镜号，悬停说明补景别运镜与自动挂的参考图。"""
+    view = canvas_runner.asset_view(
+        _asset(),
+        {"shot_no": "3", "shot_label": "镜头3（中景 · 缓慢推近 · 4s）", "injected_names": ["暮光闪闪", "云宝"]},
+    )
+    assert view["label"] == "镜头3"
+    assert view["title"] == "镜头3（中景 · 缓慢推近 · 4s） · 参考：暮光闪闪、云宝"
+    assert view["url"] == "/media/a.png"
+
+
+def test_asset_view_labels_asset_name_and_category():
+    """资产设定图：标签是资产名，悬停说明补类型。"""
+    view = canvas_runner.asset_view(_asset("暮光闪闪", "角色"))
+    assert view["label"] == "暮光闪闪"
+    assert view["title"] == "暮光闪闪 · 角色"
+    assert view["name"] == "暮光闪闪"
+
+
+def test_asset_view_falls_back_to_filename():
+    """文档 / 视频 / 单图等没有业务名的产物退回文件名，标签留空。"""
+    view = canvas_runner.asset_view(_asset(filename="2026-09/abc.md"))
+    assert view["label"] == ""
+    assert view["title"] == "2026-09/abc.md"
+    assert view["name"] == "2026-09/abc.md"
+
+
+def test_asset_view_shot_without_extra_params():
+    """只有镜号、没有景别说明时，标签与说明都用镜号，不能出现空串说明。"""
+    view = canvas_runner.asset_view(_asset(), {"shot_no": "1A"})
+    assert view["label"] == "镜头1A"
+    assert view["title"] == "镜头1A"
+
+
 # ---------- 节点契约与 Agent 种子 ----------
 
 

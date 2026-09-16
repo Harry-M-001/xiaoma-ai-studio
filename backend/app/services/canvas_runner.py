@@ -87,6 +87,39 @@ def _new_batch_id(node: dict) -> str:
     return f"{int(time.time() * 1000):x}-{node['id']}"
 
 
+def asset_view(asset: Asset, params: dict | None = None) -> dict:
+    """产物在画布上的展示视图：短标签 + 悬停说明。
+
+    批量节点一次出很多张图，用户得一眼看出"哪张是哪一镜 / 哪个资产"：
+    - 分镜图：标签用镜号（`镜头3`），说明里补景别运镜与自动挂的参考图；
+    - 资产设定图：标签用资产名，说明里补类型；
+    - 其余产物（文档 / 视频 / 单图）：退回文件名。
+    """
+    data = params or {}
+    shot = str(data.get("shot_no") or "").strip()
+    if shot:
+        label = f"镜头{shot}"
+        title = str(data.get("shot_label") or label).strip() or label
+        injected = data.get("injected_names") or []
+        if injected:
+            title = f"{title} · 参考：{'、'.join(str(n) for n in injected)}"
+    else:
+        name = (asset.name or "").strip()
+        label = name
+        title = name or asset.original_name
+        if name and asset.category:
+            title = f"{name} · {asset.category}"
+    return {
+        "id": asset.id,
+        "url": f"/media/{asset.filename}",
+        "kind": asset.kind,
+        "name": asset.name or asset.original_name,
+        "category": asset.category,
+        "label": label,
+        "title": title,
+    }
+
+
 async def _latest_task_assets(db: AsyncSession, project_id: int, node_id: int | str) -> list[Asset]:
     """取某画布节点最近一次成功任务的全部产物（按生成顺序）。
 
