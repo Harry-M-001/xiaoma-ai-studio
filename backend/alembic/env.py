@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import logging
 from logging.config import fileConfig
 
 from alembic import context
@@ -23,7 +24,14 @@ from app import models  # noqa: E402,F401  确保所有模型完成注册
 
 config = context.config
 
-if config.config_file_name is not None:
+# 只在「直接跑 alembic CLI」时接管日志配置。
+#
+# alembic 的 fileConfig 会**替换掉根 logger 的全部 handler**。而应用启动时
+# （lifespan → init_db → 这里）根 logger 已经装配好了控制台与脱敏文件 handler，
+# 再调一次 fileConfig 会把它们全冲掉——症状是应用日志一条都不落盘、
+# 连「启动完成」那行都看不到，而且完全不报错。
+# 所以已经有 handler 时就不动它。
+if config.config_file_name is not None and not logging.getLogger().handlers:
     try:
         fileConfig(config.config_file_name)
     except Exception:  # noqa: BLE001  日志配置缺失不应中断迁移

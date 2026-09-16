@@ -25,9 +25,11 @@ from app.providers.base import (
     AdapterError,
     BaseAdapter,
     VideoStatus,
+    network_error_detail,
     unsupported,
+    url_host,
 )
-from app.providers.openai_compat import _extract_error
+from app.providers.openai_compat import raise_upstream_error
 
 _POLL_INTERVAL = 3.0
 _POLL_MAX_WAIT = 300.0
@@ -57,17 +59,17 @@ class DashScopeAdapter(BaseAdapter):
 
     async def test_connection(self, model: str | None = None) -> None:
         if not self.base_url:
-            raise AdapterError("Base URL 为空")
+            raise AdapterError("Base URL 为空", log_detail="config_invalid base_url_empty")
         client = await self.client()
         try:
             resp = await client.get(
                 f"{self.base_url}/tasks/0", headers={"Authorization": f"Bearer {self.api_key}"}
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         # 404/400 = 鉴权通过但任务不存在；401/403 = Key 无效
         if resp.status_code in (401, 403):
-            raise AdapterError(f"API Key 校验失败：HTTP {resp.status_code}")
+            raise AdapterError(f"API Key 校验失败：HTTP {resp.status_code}", log_detail=f"HTTP {resp.status_code} auth_failed host={url_host(self.base_url)}")
         return
 
     async def chat_stream(
@@ -92,7 +94,7 @@ class DashScopeAdapter(BaseAdapter):
         ref_images: list[bytes] | None = None,
     ) -> list[bytes]:
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         content: list[dict[str, Any]] = [{"text": prompt}]
         for img in ref_images or []:
             content.append({"image": _data_uri(img, _sniff_image_mime(img))})
@@ -119,12 +121,12 @@ class DashScopeAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code not in (200, 201):
-            raise AdapterError(_extract_error(resp))
+            raise_upstream_error(resp)
         task_id = (resp.json() or {}).get("output", {}).get("task_id")
         if not task_id:
-            raise AdapterError(f"提交图片任务失败：{str(resp.json())[:200]}")
+            raise AdapterError(f"提交图片任务失败：{str(resp.json())[:200]}", log_detail=f"submit_image status=200 body={len(resp.content)}B")
 
         # 内部轮询直到出图
         waited = 0.0
@@ -138,7 +140,7 @@ class DashScopeAdapter(BaseAdapter):
             if status in ("FAILED", "CANCELED", "UNKNOWN"):
                 msg = (data.get("message") or data.get("code") or "图片生成失败")[:300]
                 raise AdapterError(str(msg))
-        raise AdapterError("图片生成超时，请稍后在任务中心查看")
+        raise AdapterError("图片生成超时，请稍后在任务中心查看", log_detail="timeout image_generation")
 
     async def _download_images(self, client: httpx.AsyncClient, task: dict) -> list[bytes]:
         output = task.get("output") or {}
@@ -157,10 +159,10 @@ class DashScopeAdapter(BaseAdapter):
         for u in urls:
             dl = await client.get(u)
             if dl.status_code != 200:
-                raise AdapterError(f"下载结果图片失败：HTTP {dl.status_code}")
+                raise AdapterError(f"下载结果图片失败：HTTP {dl.status_code}", log_detail=f"download HTTP {dl.status_code}")
             results.append(dl.content)
         if not results:
-            raise AdapterError(f"任务完成但未解析到图片地址：{str(task)[:200]}")
+            raise AdapterError(f"任务完成但未解析到图片地址：{str(task)[:200]}", log_detail=f"missing_image_url status=200 body={len(str(task))}B")
         return results
 
     async def _get_task(self, client: httpx.AsyncClient, task_id: str) -> dict:
@@ -169,9 +171,9 @@ class DashScopeAdapter(BaseAdapter):
                 f"{self.base_url}/tasks/{task_id}", headers=self.headers()
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"查询任务失败：{e}") from e
+            raise AdapterError(f"查询任务失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code != 200:
-            raise AdapterError(_extract_error(resp))
+            raise_upstream_error(resp)
         return (resp.json() or {}).get("output") or {}
 
     # ---------- 视频（Kling v3 系列 / wan2.7 系列） ----------
@@ -194,7 +196,7 @@ class DashScopeAdapter(BaseAdapter):
         ref_videos: list[bytes] | None = None,
     ) -> str:
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         kling = self._is_kling(model)
         media: list[dict[str, str]] = []
         if first_frame:
@@ -233,12 +235,12 @@ class DashScopeAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code not in (200, 201):
-            raise AdapterError(_extract_error(resp))
+            raise_upstream_error(resp)
         task_id = (resp.json() or {}).get("output", {}).get("task_id")
         if not task_id:
-            raise AdapterError(f"提交视频任务失败：{str(resp.json())[:200]}")
+            raise AdapterError(f"提交视频任务失败：{str(resp.json())[:200]}", log_detail=f"submit_video status=200 body={len(resp.content)}B")
         return str(task_id)
 
     async def poll_video(self, remote_id: str) -> VideoStatus:

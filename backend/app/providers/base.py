@@ -16,7 +16,74 @@ from app.config import settings
 
 
 class AdapterError(Exception):
-    """对上游接口错误的统一包装，消息可直接展示给用户。"""
+    """对上游接口错误的统一包装，消息可直接展示给用户。
+
+    `message` 是给**用户**看的，为了让他能自己排查，会把上游返回的错误正文带上。
+    但这份正文不能进日志：上游收到 400 时经常把整个请求体回显回来，而请求体里
+    就是用户的提示词（真实踩过的坑，见 `docs/` 与 MEMORY 的记录）。
+
+    所以另给一个 `log_detail`：只有枚举化的安全信息（HTTP 状态、上游错误类型、
+    响应体大小）。日志侧优先用它，并且不再打印完整堆栈。
+    没给 `log_detail` 的异常仍会打完整堆栈，属于「这段代码还没改造到」。
+    """
+
+    def __init__(self, message: str, *, log_detail: str = "") -> None:
+        super().__init__(message)
+        self.log_detail = log_detail
+
+
+def summarize_upstream_error(resp: httpx.Response) -> tuple[str, str]:
+    """把一次失败的上游响应拆成 (给用户看的详细消息, 只用于日志的安全摘要)。
+
+    安全摘要里没有任何上游正文，只有状态码、枚举类型与响应体字节数——这三样足够
+    做聚类（是鉴权挂了还是参数不对、是空响应还是一大段报错），又不带用户内容。
+    """
+    status = resp.status_code
+    hint = ""
+    if status in (401, 403):
+        hint = "（API Key 无效或无权限）"
+    elif status == 404:
+        hint = "（接口地址不存在，请检查 Base URL 是否填到 /v1 一级）"
+
+    err_type = ""
+    err_code = ""
+    text = ""
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001
+        data = None
+
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            err_type = str(err.get("type") or "")[:64]
+            err_code = str(err.get("code") or "")[:64]
+            text = str(err.get("message") or err)[:300]
+        elif err is not None:
+            text = str(err)[:300]
+        else:
+            text = str(data)[:300]
+    else:
+        try:
+            text = resp.text[:300]
+        except Exception:  # noqa: BLE001
+            text = ""
+
+    try:
+        body_bytes = len(resp.content)
+    except Exception:  # noqa: BLE001
+        body_bytes = 0
+
+    if text:
+        message = f"HTTP {status} {hint}：{text}"
+    else:
+        # 上游返回空体时别留一个孤零零的冒号（`HTTP 502 ：`），看着像 bug
+        message = f"HTTP {status} {hint}".strip()
+        message = f"{message}（响应体为空）"
+    log_detail = (
+        f"HTTP {status} type={err_type or '-'} code={err_code or '-'} body={body_bytes}B"
+    )
+    return message, log_detail
 
 
 @dataclass
@@ -134,5 +201,27 @@ class BaseAdapter(ABC):
         """查询视频任务状态。"""
 
 
+def url_host(url: str) -> str:
+    """只取 URL 的 host。日志里要从「打到哪个主机」判断问题，又不该带上 query。"""
+    try:
+        from urllib.parse import urlsplit
+
+        return urlsplit(url or "").hostname or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def network_error_detail(exc: Exception, url: str = "") -> str:
+    """网络类异常的安全日志摘要。
+
+    httpx 的异常字符串里带完整 URL——中转站常把 key 放在 query 上，用户也可能填了
+    内网网关地址。日志只要「哪种错 + 打到哪个主机」，所以这里把 host 单独取出来。
+    """
+    return f"{type(exc).__name__} host={url_host(url) or '-'}"
+
+
 def unsupported(modality: str) -> AdapterError:
-    return AdapterError(f"该类型的模型服务不支持{modality}能力，请检查模型服务类型与模型配置")
+    return AdapterError(
+        f"该类型的模型服务不支持{modality}能力，请检查模型服务类型与模型配置",
+        log_detail=f"unsupported modality={modality}",
+    )

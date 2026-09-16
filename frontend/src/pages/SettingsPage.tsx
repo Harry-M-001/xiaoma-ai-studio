@@ -1,7 +1,15 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Download, History, Inbox, RefreshCw, RotateCcw, Save, Table2 } from "lucide-react";
 import { api, ApiError } from "../api";
-import type { AuditLog, SchemaRow, TableSpecMeta, UpdateRunResult, UpdateStatus } from "../types";
+import type {
+  AuditLog,
+  LogExport,
+  LogsStatus,
+  SchemaRow,
+  TableSpecMeta,
+  UpdateRunResult,
+  UpdateStatus,
+} from "../types";
 import SchemaTable from "../components/SchemaTable";
 import { Empty, Modal, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -440,6 +448,49 @@ function AboutPanel() {
   const [updating, setUpdating] = useState(false);
   const [result, setResult] = useState<UpdateRunResult | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
+  const [logLoading, setLogLoading] = useState(false);
+  const [logData, setLogData] = useState<LogExport | null>(null);
+  const [logFilesInfo, setLogFilesInfo] = useState<LogsStatus | null>(null);
+
+  const openLogs = async () => {
+    setLogOpen(true);
+    setLogLoading(true);
+    setLogData(null);
+    try {
+      const [data, files] = await Promise.all([api.exportLogs(), api.logsStatus()]);
+      setLogData(data);
+      setLogFilesInfo(files);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "生成诊断报告失败");
+    } finally {
+      setLogLoading(false);
+    }
+  };
+
+  /** 走 Blob 下载，而不是 <a href>：设了口令时直链带不上 Authorization。 */
+  const downloadLogs = () => {
+    if (!logData) return;
+    const blob = new Blob([logData.text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `xiaoma-diagnostic-${logData.generatedAt.replace(/[:T]/g, "-")}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const copyLogs = async () => {
+    if (!logData) return;
+    try {
+      await navigator.clipboard.writeText(logData.text);
+      toast.success("已复制到剪贴板");
+    } catch {
+      toast.error("复制失败，请手动选中文本复制");
+    }
+  };
 
   const load = async (force: boolean) => {
     if (force) setChecking(true);
@@ -607,6 +658,60 @@ function AboutPanel() {
           </div>
         )}
       </div>
+
+      <div className="card" style={{ padding: 20, marginTop: 16 }}>
+        <div className="about-head">
+          <div className="about-title">日志与诊断</div>
+          <button className="btn btn-ghost" onClick={() => void openLogs()}>
+            导出日志
+          </button>
+        </div>
+        <div className="about-note">
+          遇到问题时把这份报告整段发给作者即可定位。报告里只有环境信息和错误的文字摘要，
+          不包含提示词、作品正文、图片或接口密钥。日志目录：
+          <code>{logFilesInfo?.dir ?? "backend/data/logs"}</code>
+          （单个文件上限 5 MB、保留 5 份，写盘时已脱敏）。
+        </div>
+      </div>
+
+      {logOpen && (
+        <Modal
+          title="诊断报告"
+          onClose={() => setLogOpen(false)}
+          footer={
+            <>
+              <button className="btn btn-ghost" onClick={() => setLogOpen(false)}>
+                关闭
+              </button>
+              <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!logData}>
+                复制全文
+              </button>
+              <button className="btn btn-primary" onClick={downloadLogs} disabled={!logData}>
+                下载 .txt
+              </button>
+            </>
+          }
+        >
+          {logLoading ? (
+            <div style={{ padding: 24, textAlign: "center" }}>
+              <Spinner />
+            </div>
+          ) : logData ? (
+            <>
+              <div className="about-note" style={{ marginBottom: 10 }}>
+                生成时间 {logData.generatedAt}　·　错误行 {logData.errorLines} 条　·　
+                {logData.files.length} 个日志文件
+                <br />
+                日志中的接口密钥、URL 查询参数、系统用户名与家目录路径已替换为占位符；
+                <strong>发出去之前建议自己先扫一眼</strong>。
+              </div>
+              <pre className="log-preview">{logData.text}</pre>
+            </>
+          ) : (
+            <div className="about-note">生成失败，请重试。</div>
+          )}
+        </Modal>
+      )}
 
       {confirmOpen && (
         <Modal

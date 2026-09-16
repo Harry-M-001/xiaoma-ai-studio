@@ -23,7 +23,7 @@ from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
 from app.providers.base import AdapterError
 from app.providers.comfyui import ComfyUIAdapter, ComfyOutputFile
-from app.services import doc_service, provider_store, storage, style_service
+from app.services import doc_service, log_service, provider_store, storage, style_service
 from app.services.comfy_workflow_service import apply_params
 
 logger = logging.getLogger("xiaoma.runner")
@@ -110,7 +110,16 @@ class TaskRunner:
         old = self._jobs.get(task_id)
         if old and not old.done():
             old.cancel()
-        self._jobs[task_id] = asyncio.create_task(coro)
+        self._jobs[task_id] = asyncio.create_task(self._with_task_logs(task_id, coro))
+
+    async def _with_task_logs(self, task_id: int, coro: Any) -> None:
+        """任务执行期间的日志额外留一份在内存，供任务中心展示「这个任务发生了什么」。
+
+        挂在 `_spawn` 这一个出口上，所有任务（图片/视频/文本/ComfyUI 以及重启后的
+        重新接管）都自动覆盖，不必在每个 `_run_*` 里各写一遍。
+        """
+        async with log_service.task_log_scope(task_id):
+            await coro
 
     def is_running(self, task_id: int) -> bool:
         job = self._jobs.get(task_id)

@@ -28,16 +28,19 @@ from app.routers import (
     comfy,
     director,
     generation,
+    logs,
     meta,
     projects,
     providers,
     system,
     update,
 )
-from app.services import config_center_service
+from app.services import config_center_service, log_service
 from app.services.runner import runner
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# 控制台保留完整信息（开发/本机排查用），文件那份会脱敏后再写，
+# 因为文件是可能被导出、被发出去的那一份。详见 services/log_service.py。
+log_service.setup_logging()
 logger = logging.getLogger("xiaoma")
 
 
@@ -50,6 +53,9 @@ async def _seed_config() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # 迁移（alembic）历史上会用自己的 fileConfig 重置根 logger 的 handler，
+    # 所以跑完迁移再强制装一次日志，避免「启动之后什么都不落盘」。
+    log_service.setup_logging(force=True)
     await _seed_config()
     await runner.recover()
     name = config_center_service.runtime_value("app.name", APP_NAME)
@@ -78,6 +84,7 @@ app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(comfy.router)
 app.include_router(update.router)
+app.include_router(logs.router)
 app.include_router(admin.router)
 
 

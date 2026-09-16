@@ -7,6 +7,8 @@ import type {
   ChatSession,
   ComfyWorkflow,
   ConfigMap,
+  LogExport,
+  LogsStatus,
   ModalityMeta,
   ModelOption,
   NavMeta,
@@ -24,6 +26,7 @@ import type {
   StyleOption,
   TableSpecMeta,
   Task,
+  TaskLogs,
   UpdateRunResult,
   UpdateStatus,
 } from "./types";
@@ -237,6 +240,11 @@ export const api = {
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),
   checkUpdate: () => request<UpdateStatus>("/api/update/check", { method: "POST" }),
   runUpdate: () => request<UpdateRunResult>("/api/update/run", { method: "POST" }),
+
+  // ---- 日志与诊断 ----
+  logsStatus: () => request<LogsStatus>("/api/logs/status"),
+  exportLogs: (errorLines = 200) => request<LogExport>(`/api/logs/export?errorLines=${errorLines}`),
+  taskLogs: (id: number) => request<TaskLogs>(`/api/tasks/${id}/logs`),
 
   // ---- ComfyUI 工作流 ----
   listComfyWorkflows: () => request<ComfyWorkflow[]>("/api/comfy/workflows"),

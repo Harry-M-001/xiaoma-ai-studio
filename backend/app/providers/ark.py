@@ -14,8 +14,15 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from app.providers.base import AdapterError, BaseAdapter, VideoStatus, unsupported
-from app.providers.openai_compat import _extract_error, iter_chat_sse
+from app.providers.base import (
+    AdapterError,
+    BaseAdapter,
+    VideoStatus,
+    network_error_detail,
+    unsupported,
+    url_host,
+)
+from app.providers.openai_compat import iter_chat_sse, raise_upstream_error
 
 DEFAULT_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
 
@@ -42,7 +49,7 @@ class ArkAdapter(BaseAdapter):
 
     async def test_connection(self, model: str | None = None) -> None:
         if not self.base_url:
-            raise AdapterError("Base URL 为空")
+            raise AdapterError("Base URL 为空", log_detail="config_invalid base_url_empty")
         client = await self.client()
         try:
             resp = await client.get(
@@ -51,12 +58,12 @@ class ArkAdapter(BaseAdapter):
                 params={"limit": 1} if model is None else None,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code == 200:
             return
         if resp.status_code in (401, 403):
-            raise AdapterError(f"API Key 校验失败：HTTP {resp.status_code}")
-        raise AdapterError(_extract_error(resp))
+            raise AdapterError(f"API Key 校验失败：HTTP {resp.status_code}", log_detail=f"HTTP {resp.status_code} auth_failed host={url_host(self.base_url)}")
+        raise_upstream_error(resp)
 
     async def chat_stream(
         self,
@@ -66,7 +73,7 @@ class ArkAdapter(BaseAdapter):
         max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         client = await self.client()
         body: dict[str, Any] = {
             "model": model,
@@ -94,7 +101,7 @@ class ArkAdapter(BaseAdapter):
         ref_images: list[bytes] | None = None,
     ) -> list[bytes]:
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         body: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
@@ -114,9 +121,9 @@ class ArkAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code != 200:
-            raise AdapterError(_extract_error(resp))
+            raise_upstream_error(resp)
         data = resp.json()
         items = data.get("data") or []
         results: list[bytes] = []
@@ -127,10 +134,10 @@ class ArkAdapter(BaseAdapter):
             elif item.get("url"):
                 dl = await client.get(item["url"])
                 if dl.status_code != 200:
-                    raise AdapterError(f"下载结果图片失败：HTTP {dl.status_code}")
+                    raise AdapterError(f"下载结果图片失败：HTTP {dl.status_code}", log_detail=f"download HTTP {dl.status_code}")
                 results.append(dl.content)
         if not results:
-            raise AdapterError(f"上游响应中没有图片：{str(data)[:200]}")
+            raise AdapterError(f"上游响应中没有图片：{str(data)[:200]}", log_detail=f"empty_result status=200 body={len(str(data))}B")
         return results
 
     async def submit_video(
@@ -147,7 +154,7 @@ class ArkAdapter(BaseAdapter):
         ref_videos: list[bytes] | None = None,
     ) -> str:
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         if first_frame:
             content.append(
@@ -197,13 +204,13 @@ class ArkAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code != 200:
-            raise AdapterError(_extract_error(resp))
+            raise_upstream_error(resp)
         data = resp.json()
         remote_id = data.get("id")
         if not remote_id:
-            raise AdapterError(f"提交视频任务失败，响应中没有任务 ID：{str(data)[:200]}")
+            raise AdapterError(f"提交视频任务失败，响应中没有任务 ID：{str(data)[:200]}", log_detail=f"missing_task_id status=200 body={len(str(data))}B")
         return str(remote_id)
 
     async def poll_video(self, remote_id: str) -> VideoStatus:

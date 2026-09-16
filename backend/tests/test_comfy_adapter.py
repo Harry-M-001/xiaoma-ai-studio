@@ -210,7 +210,7 @@ def test_submit_error_is_readable():
             },
         },
     )
-    msg = comfyui._describe_submit_error(resp)
+    msg, _detail = comfyui._describe_submit_error(resp)
     assert "校验未通过" in msg
     assert "节点 5" in msg and "KSampler" in msg
     assert "steps" in msg
@@ -224,14 +224,18 @@ def test_submit_error_without_json_falls_back():
         def json(self):
             raise ValueError("not json")
 
-    msg = comfyui._describe_submit_error(_Bad())  # type: ignore[arg-type]
+    msg, detail = comfyui._describe_submit_error(_Bad())  # type: ignore[arg-type]
     assert "HTTP 500" in msg
+    # 日志摘要里不能带上游正文
+    assert "gateway error" not in detail
+    assert "HTTP 500" in detail
 
 
 def test_submit_error_generic_when_only_type():
     resp = _FakeResp(400, {"error": {"type": "no_prompt"}, "node_errors": {}})
-    msg = comfyui._describe_submit_error(resp)
+    msg, detail = comfyui._describe_submit_error(resp)
     assert "no_prompt" in msg
+    assert "no_prompt" in detail
 
 
 if __name__ == "__main__":

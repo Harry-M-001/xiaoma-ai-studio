@@ -1,7 +1,18 @@
-import { Ban, Download, FileText, Maximize2, ImagePlus, AlertTriangle, RotateCcw, Trash2 } from "lucide-react";
+import { useState } from "react";
+import {
+  Ban,
+  Download,
+  FileText,
+  Maximize2,
+  ImagePlus,
+  AlertTriangle,
+  RotateCcw,
+  ScrollText,
+  Trash2,
+} from "lucide-react";
 import type { Task } from "../types";
-import { StatusBadge, formatTime, isRunning } from "./common";
-import { authToken } from "../api";
+import { Modal, Spinner, StatusBadge, formatTime, isRunning } from "./common";
+import { api, authToken } from "../api";
 
 /** 任务类型中文名（文档 = 自动链的 Markdown 产物） */
 const KIND_LABEL: Record<string, string> = {
@@ -32,8 +43,26 @@ export default function TaskCard({
   onDelete?: (task: Task) => void;
 }) {
   const running = isRunning(task.status);
-  const showActions = Boolean(onRetry || onCancel || onDelete);
   const retryable = !running;
+
+  const [logOpen, setLogOpen] = useState(false);
+  const [logLines, setLogLines] = useState<string[] | null>(null);
+  const [logLoading, setLogLoading] = useState(false);
+
+  /** 任务日志：先看这里，多半不用去问作者 */
+  const openLogs = async () => {
+    setLogOpen(true);
+    if (logLines !== null) return;
+    setLogLoading(true);
+    try {
+      const r = await api.taskLogs(task.id);
+      setLogLines(r.lines);
+    } catch {
+      setLogLines([]);
+    } finally {
+      setLogLoading(false);
+    }
+  };
 
   return (
     <div className="card task-card">
@@ -128,27 +157,51 @@ export default function TaskCard({
         </div>
       )}
 
-      {showActions && (
-        <div className="task-actions">
-          {onCancel && running && (
-            <button className="btn btn-ghost btn-sm" onClick={() => onCancel(task)}>
-              <Ban size={14} />
-              取消
-            </button>
+      <div className="task-actions">
+        <button className="btn btn-ghost btn-sm" onClick={() => void openLogs()}>
+          <ScrollText size={14} />
+          日志
+        </button>
+        {onCancel && running && (
+          <button className="btn btn-ghost btn-sm" onClick={() => onCancel(task)}>
+            <Ban size={14} />
+            取消
+          </button>
+        )}
+        {onRetry && retryable && (
+          <button className="btn btn-ghost btn-sm" onClick={() => onRetry(task)}>
+            <RotateCcw size={14} />
+            重新生成
+          </button>
+        )}
+        {onDelete && (
+          <button className="btn btn-ghost btn-sm task-delete" onClick={() => onDelete(task)}>
+            <Trash2 size={14} />
+            删除
+          </button>
+        )}
+      </div>
+
+      {logOpen && (
+        <Modal title={`任务 #${task.id} 的日志`} onClose={() => setLogOpen(false)}>
+          {logLoading ? (
+            <div style={{ padding: 24, textAlign: "center" }}>
+              <Spinner />
+            </div>
+          ) : logLines && logLines.length > 0 ? (
+            <>
+              <div className="about-note" style={{ marginBottom: 10 }}>
+                接口密钥、URL 查询参数与系统用户名已替换为占位符，可以直接复制。
+              </div>
+              <pre className="log-preview">{logLines.join("\n")}</pre>
+            </>
+          ) : (
+            <div className="about-note">
+              这个任务没有留下日志。服务重启之后内存里的任务日志会清空；
+              完整记录仍在日志文件里，「系统设置 → 关于与更新 → 导出日志」可以看到。
+            </div>
           )}
-          {onRetry && retryable && (
-            <button className="btn btn-ghost btn-sm" onClick={() => onRetry(task)}>
-              <RotateCcw size={14} />
-              重新生成
-            </button>
-          )}
-          {onDelete && (
-            <button className="btn btn-ghost btn-sm task-delete" onClick={() => onDelete(task)}>
-              <Trash2 size={14} />
-              删除
-            </button>
-          )}
-        </div>
+        </Modal>
       )}
     </div>
   );

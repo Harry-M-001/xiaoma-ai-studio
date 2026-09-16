@@ -389,7 +389,7 @@ def check_venv_deps_via_subprocess(vpy: Path) -> list[Finding]:
     return [Finding(WARN, "无法验证虚拟环境里的依赖", f"退出码 {code} {out}".strip())]
 
 
-def check_port(port: int) -> list[Finding]:
+def check_port_free(port: int) -> list[Finding]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1.0)
         busy = s.connect_ex(("127.0.0.1", port)) == 0
@@ -432,24 +432,58 @@ def check_data_dir(root: Path) -> list[Finding]:
 SYMBOL = {OK: "[OK]  ", WARN: "[警告]", ERR: "[错误]"}
 
 
-def render(findings: list[Finding], *, report: bool) -> None:
-    if report:
-        print("=" * 60)
-        print("小马AI工坊 · 环境诊断报告")
-        print("（本报告不含任何 API Key / 密钥 / 数据库内容，可直接贴出发送）")
-        print("=" * 60)
+def collect_findings(
+    root: Path, *, need_node: bool = True, check_port: bool = True, port: int = 8787
+) -> list[Finding]:
+    """跑一遍全部检查并返回结论。
+
+    `check_port=False` 用于「应用已经在跑、从应用内部导出报告」的场景——
+    那时端口必然被自己占着，报出来只是噪音。
+    """
+    findings: list[Finding] = []
+    findings += check_interpreter(root)
+    findings += check_location(root)
+    findings += check_tooling(root, need_node=need_node)
+    findings += check_venv_and_deps(root)
+    if check_port:
+        findings += check_port_free(port)
+    findings += check_data_dir(root)
+    return findings
+
+
+def build_report_text(
+    findings: list[Finding], *, heading: bool = True, footer: bool = True
+) -> str:
+    """把结论渲染成文本。拆出来是为了让应用侧的「导出日志」能直接复用同一份输出，
+    避免命令行与界面两处各写一套、慢慢跑偏。"""
+    lines: list[str] = []
+    if heading:
+        lines += [
+            "=" * 60,
+            "小马AI工坊 · 环境诊断报告",
+            "（本报告不含任何 API Key / 密钥 / 数据库内容，可直接贴出发送）",
+            "=" * 60,
+        ]
     for f in findings:
-        print(f"{SYMBOL[f.level]} {f.title}")
+        lines.append(f"{SYMBOL[f.level]} {f.title}")
         if f.detail:
-            print(f"        {f.detail}")
+            lines.append(f"        {f.detail}")
         if f.hint and f.level != OK:
-            print(f"      → {f.hint}")
-    if report:
-        print("-" * 60)
-        print(f"系统：{platform.system()} {platform.release()} ({platform.machine()})")
-        print(f"脚本解释器：{sys.executable}")
-        print(f"工作目录：{Path.cwd()}")
-        print("=" * 60)
+            lines.append(f"      → {f.hint}")
+    if footer:
+        lines += [
+            "-" * 60,
+            f"系统：{platform.system()} {platform.release()} ({platform.machine()})",
+            f"脚本解释器：{sys.executable}",
+            f"工作目录：{Path.cwd()}",
+        ]
+        if heading:
+            lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def render(findings: list[Finding], *, report: bool) -> None:
+    print(build_report_text(findings, heading=report, footer=report))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -490,13 +524,9 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
 
-    findings: list[Finding] = []
-    findings += check_interpreter(root)
-    findings += check_location(root)
-    findings += check_tooling(root, need_node=not args.skip_node)
-    findings += check_venv_and_deps(root)
-    findings += check_port(args.port)
-    findings += check_data_dir(root)
+    findings: list[Finding] = collect_findings(
+        root, need_node=not args.skip_node, port=args.port
+    )
 
     render(findings, report=args.report)
 

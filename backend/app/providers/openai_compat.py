@@ -14,7 +14,15 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from app.providers.base import AdapterError, BaseAdapter, VideoStatus, unsupported
+from app.providers.base import (
+    AdapterError,
+    BaseAdapter,
+    VideoStatus,
+    network_error_detail,
+    summarize_upstream_error,
+    unsupported,
+    url_host,
+)
 
 
 async def iter_chat_sse(
@@ -27,10 +35,12 @@ async def iter_chat_sse(
     try:
         resp = await client.post(url, headers=headers, json=body)
     except httpx.HTTPError as e:
-        raise AdapterError(f"网络请求失败：{e}") from e
+        raise AdapterError(
+            f"网络请求失败：{e}", log_detail=network_error_detail(e, url)
+        ) from e
 
     if resp.status_code != 200:
-        raise AdapterError(_extract_error(resp))
+        raise_upstream_error(resp)
 
     async for line in resp.aiter_lines():
         if not line or not line.startswith("data:"):
@@ -52,23 +62,19 @@ async def iter_chat_sse(
 
 
 def _extract_error(resp: httpx.Response) -> str:
-    """从上游响应里提取可读的错误信息。"""
-    text = ""
-    try:
-        data = resp.json()
-        err = data.get("error")
-        if isinstance(err, dict):
-            text = str(err.get("message") or err)
-        else:
-            text = str(data)[:300]
-    except Exception:  # noqa: BLE001
-        text = resp.text[:300]
-    hint = ""
-    if resp.status_code in (401, 403):
-        hint = "（API Key 无效或无权限）"
-    elif resp.status_code == 404:
-        hint = "（接口地址不存在，请检查 Base URL 是否填到 /v1 一级）"
-    return f"HTTP {resp.status_code} {hint}：{text}"
+    """从上游响应里提取可读的错误信息（给用户看的那一份）。"""
+    return summarize_upstream_error(resp)[0]
+
+
+def raise_upstream_error(resp: httpx.Response) -> None:
+    """抛出带安全日志摘要的上游错误。
+
+    统一走这里而不是 `raise AdapterError(_extract_error(resp))`，是为了保证
+    每条上游错误都带 `log_detail`——否则日志会退回打印完整堆栈，
+    而堆栈里的异常消息带着上游正文（可能含用户提示词）。
+    """
+    message, log_detail = summarize_upstream_error(resp)
+    raise AdapterError(message, log_detail=log_detail)
 
 
 class OpenAICompatAdapter(BaseAdapter):
@@ -76,17 +82,22 @@ class OpenAICompatAdapter(BaseAdapter):
 
     async def test_connection(self, model: str | None = None) -> None:
         if not self.base_url:
-            raise AdapterError("Base URL 为空")
+            raise AdapterError("Base URL 为空", log_detail="config_invalid base_url_empty")
         client = await self.client()
         url = f"{self.base_url}/models"
         try:
             resp = await client.get(url, headers=self.headers())
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(
+                f"网络请求失败：{e}", log_detail=network_error_detail(e, url)
+            ) from e
         if resp.status_code == 200:
             return
         if resp.status_code in (401, 403):
-            raise AdapterError(f"API Key 校验失败：HTTP {resp.status_code}")
+            raise AdapterError(
+                f"API Key 校验失败：HTTP {resp.status_code}",
+                log_detail=f"HTTP {resp.status_code} auth_failed host={url_host(url)}",
+            )
         # 部分中转站不开放 /models，用一次极简对话验证
         probe_model = model or "gpt-4o-mini"
         async for _ in iter_chat_sse(
@@ -111,7 +122,7 @@ class OpenAICompatAdapter(BaseAdapter):
         max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         client = await self.client()
         body: dict[str, Any] = {
             "model": model,
@@ -143,7 +154,7 @@ class OpenAICompatAdapter(BaseAdapter):
                 "OpenAI 兼容类型暂不支持参考图；参考图/改图请使用火山方舟类型的 Seedream 模型"
             )
         if not self.base_url or not self.api_key:
-            raise AdapterError("该服务尚未填写 Base URL 或 API Key")
+            raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         client = await self.client()
         body: dict[str, Any] = {
             "model": model,
@@ -159,9 +170,12 @@ class OpenAICompatAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}") from e
+            raise AdapterError(
+                f"网络请求失败：{e}",
+                log_detail=network_error_detail(e, f"{self.base_url}/images/generations"),
+            ) from e
         if resp.status_code != 200:
-            raise AdapterError(_extract_error(resp))
+            raise_upstream_error(resp)
         data = resp.json()
         items = data.get("data") or []
         results: list[bytes] = []
@@ -172,10 +186,16 @@ class OpenAICompatAdapter(BaseAdapter):
             elif item.get("url"):
                 dl = await client.get(item["url"])
                 if dl.status_code != 200:
-                    raise AdapterError(f"下载结果图片失败：HTTP {dl.status_code}")
+                    raise AdapterError(
+                        f"下载结果图片失败：HTTP {dl.status_code}",
+                        log_detail=f"download HTTP {dl.status_code}",
+                    )
                 results.append(dl.content)
         if not results:
-            raise AdapterError(f"上游响应中没有图片：{str(data)[:200]}")
+            raise AdapterError(
+                f"上游响应中没有图片：{str(data)[:200]}",
+                log_detail=f"empty_result status=200 body={len(str(data))}B",
+            )
         return results
 
     async def submit_video(self, **kwargs) -> str:  # type: ignore[override]

@@ -208,6 +208,35 @@ export interface CanvasNodeData {
   [k: string]: unknown;
 }
 
+/** 日志与诊断报告 */
+export interface LogFileInfo {
+  name: string;
+  size: number;
+  modifiedAt: string;
+}
+
+export interface LogsStatus {
+  dir: string;
+  files: LogFileInfo[];
+  totalBytes: number;
+  maxBytesPerFile: number;
+  backupCount: number;
+}
+
+export interface LogExport {
+  text: string;
+  generatedAt: string;
+  errorLines: number;
+  files: LogFileInfo[];
+  bytes: number;
+}
+
+export interface TaskLogs {
+  taskId: number;
+  count: number;
+  lines: string[];
+}
+
 /** 导演风格卡（画布节点的风格下拉用；具体内容存在后端配置表里） */
 export interface StyleOption {
   key: string;

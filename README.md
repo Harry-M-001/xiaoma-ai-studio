@@ -102,7 +102,7 @@ git clone git@gitee.com:haoruiM/xiaoma-ai-studio.git
 只想拿某一个发行版、不想拉完整历史（体积小很多）：
 
 ```bash
-git clone -b v1.1.2 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
+git clone -b v1.1.3 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
 ```
 
 ### 方式 B：下载压缩包（不用装 git）
@@ -119,7 +119,7 @@ Windows PowerShell：
 Invoke-WebRequest -Uri https://github.com/Harry-M-001/xiaoma-ai-studio/archive/refs/heads/main.zip -OutFile xiaoma-ai-studio.zip
 ```
 
-要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.2`。
+要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.3`。
 
 > **注意**：Gitee 的「下载 ZIP / 下载压缩包」**需要先登录 Gitee 账号**，匿名访问只会跳到一个登录页，拿不到文件。所以要给不特定的人一个能直接下的地址，请用上面 GitHub 的直链。
 
@@ -364,6 +364,11 @@ A：备份数据目录（默认 `backend/data`，Docker 为根目录 `./data`）
 
 **Q：点了「一键更新」但按钮是灰的？**
 A：三种情况：① 不是 `git clone` 安装（README 里的压缩包/Docker 方式），请按界面提示手动升级；② 本地有未提交改动，先 `git commit` 或 `git stash`；③ 还没配 `update.repo`，去「系统设置 → 系统配置」填上 `用户名/仓库名`。更新完成后记得重启服务。
+
+**Q：出了错想反馈，需要提供什么？**
+A：先自己看一眼，多数问题不用问别人：任务中心里每张任务卡片都有「日志」按钮，能看到这个任务执行期间发生了什么。如果还是看不懂，去「系统设置 → 关于与更新 → 日志与诊断」点「导出日志」，它会生成一份诊断报告（环境体检结论 + 最近 200 条错误与警告），可以先在界面上完整看一遍，再复制或下载成 `.txt` 发给作者。
+
+报告里的接口密钥、URL 查询参数、系统用户名与家目录路径都已经替换成占位符，**不包含提示词、作品正文、图片或数据库内容**。完整日志在 `backend/data/logs/app.log`（单个文件上限 5 MB、保留 5 份），备份 `data/` 时一并带走即可。
 
 **Q：start.bat / start.sh 某一步一直失败，怎么办？**
 A：先跑一次环境体检，它会照着「哪一步不行、为什么不行、下一步做什么」给出结论：

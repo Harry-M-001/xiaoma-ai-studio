@@ -22,7 +22,7 @@ from app.schemas import (
     TaskOut,
     VideoGenerateIn,
 )
-from app.services import option_service, storage
+from app.services import log_service, option_service, storage
 from app.services.runner import runner
 
 router = APIRouter(prefix="/api", tags=["generation"], dependencies=[Depends(require_auth)])
@@ -263,6 +263,18 @@ async def get_task(task_id: int, db: AsyncSession = Depends(get_db)) -> TaskOut:
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return await _task_to_out(db, task)
+
+
+@router.get("/tasks/{task_id}/logs")
+async def get_task_logs(task_id: int) -> dict:
+    """这个任务执行时产生的日志。
+
+    给用户一个「不用来问作者也能自己看清发生了什么」的入口。日志在写入文件时已经
+    脱敏，内存里留的这一份同源，所以可以直接展示。
+    只在服务运行期间保留（重启后内存里的会丢，文件里的还在）。
+    """
+    lines = log_service.task_logs(task_id)
+    return {"taskId": task_id, "count": len(lines), "lines": lines}
 
 
 @router.post("/tasks/{task_id}/cancel", response_model=TaskOut)
