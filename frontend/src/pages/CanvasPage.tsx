@@ -195,6 +195,8 @@ interface NodePanelCtx {
   updateNode: (id: string, patch: Partial<CanvasNodeData>) => void;
   /** 把同一个风格套到画布上所有支持风格的节点（省得七八个节点逐个选） */
   applyStyleToAll: (key: string) => void;
+  /** 按屏幕像素平移动画布（浮框超出可视区时用来自动让位） */
+  nudgeViewport: (dxScreen: number, dyScreen: number) => void;
   runNode: (id: string) => void;
   openPicker: (nodeId: string, slot?: "first" | "last") => void;
   reloadWorkflows: () => Promise<ComfyWorkflow[]>;
@@ -457,6 +459,50 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const schema = data.schema as CanvasNodeSchema;
   const status = data.status as CanvasNodeStatus | undefined;
+  const panelRef = useRef<HTMLDivElement>(null);
+  const statusKey = `${status?.taskId ?? ""}:${status?.status ?? ""}`;
+
+  // 浮框超出画布可视区时把画布平移一点，让整块浮框都落在屏幕内
+  // （节点在画布任何位置都能看全，不用手动拖画布）
+  useEffect(() => {
+    const nudge = ctx?.nudgeViewport;
+    if (!nudge) return;
+
+    const measure = () => {
+      const el = panelRef.current;
+      if (!el) return;
+      // 边界取画布容器而不是整个窗口：左侧还有导航与元素面板
+      const flow = el.closest(".react-flow");
+      const box = flow?.getBoundingClientRect() ?? {
+        top: 0,
+        bottom: window.innerHeight,
+        left: 0,
+        right: window.innerWidth,
+      };
+      const margin = 12;
+      // 画布比浮窗还窄时（窗口小 / 元素面板占位）自动收窄，否则横向怎么放都会被切
+      const availW = Math.max(280, Math.round(box.right - box.left - margin * 2));
+      if (el.style.maxWidth !== `${availW}px`) el.style.maxWidth = `${availW}px`;
+
+      const r = el.getBoundingClientRect();
+      let dy = 0;
+      let dx = 0;
+      if (r.bottom > box.bottom - margin) dy = r.bottom - (box.bottom - margin);
+      else if (r.top < box.top + margin) dy = -(box.top + margin - r.top);
+      if (r.right > box.right - margin) dx = r.right - (box.right - margin);
+      else if (r.left < box.left + margin) dx = -(box.left + margin - r.left);
+      // 已经完整可见就不动，避免来回抖
+      if (Math.abs(dx) >= 6 || Math.abs(dy) >= 6) nudge(dx, dy);
+    };
+
+    // 「定位到节点」有 300ms 平移动画，必须等它停下来再量，否则量到的是中途位置；
+    // 收窄后高度会变、位置会再变，所以补两次（已经完整可见时不会重复平移）。
+    const timers = [420, 950, 1500].map((ms) => window.setTimeout(measure, ms));
+    return () => timers.forEach((t) => window.clearTimeout(t));
+    // 只在切换节点 / 任务状态变化时重新测量：打字时不该反复平移画布
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, statusKey]);
+
   if (!ctx || !schema) return null;
   const features = schema.features ?? [];
   const nodeType = String(data.nodeType);
@@ -495,7 +541,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   };
 
   return (
-    <div className="canvas-float nodrag nowheel" onDoubleClick={(e) => e.stopPropagation()}>
+    <div ref={panelRef} className="canvas-float nodrag nowheel" onDoubleClick={(e) => e.stopPropagation()}>
       <div className="canvas-float-title">
         <span className="canvas-node-icon">{CATEGORY_ICON[schema.category]}</span>
         {schema.label}
@@ -531,33 +577,33 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
       {features.includes("styleSelect") && (
         <div className="field">
           <label className="field-label">风格</label>
-          <select
-            className="select"
-            value={String(data.styleKey ?? "")}
-            onChange={(e) => patch({ styleKey: e.target.value })}
-          >
-            <option value="">无（不注入风格）</option>
-            {ctx.styles.map((s) => (
-              <option key={s.key} value={s.key}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <div className="canvas-refbar">
+          <div className="canvas-inline">
+            <select
+              className="select"
+              value={String(data.styleKey ?? "")}
+              onChange={(e) => patch({ styleKey: e.target.value })}
+            >
+              <option value="">无（不注入风格）</option>
+              {ctx.styles.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
             <button
               type="button"
-              className="btn btn-ghost btn-xs"
+              className="btn btn-ghost btn-sm"
               onClick={() => ctx.applyStyleToAll(String(data.styleKey ?? ""))}
               title="把当前风格套用到画布上所有支持风格的节点"
             >
               <Sparkles size={12} />
-              同步到全链
+              同步全链
             </button>
           </div>
           <div className="field-hint">
             {isDoc
-              ? "风格卡会追加到这个阶段 Agent 的系统提示词里"
-              : "只取风格卡里的技法与约束词；导演名不会写进生图 / 生视频提示词"}
+              ? "追加到该阶段 Agent 的系统提示词；改这里就等于改写作风格"
+              : "只取技法与约束词，导演名不会写进生图 / 生视频提示词"}
           </div>
         </div>
       )}
@@ -577,9 +623,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
               </button>
             ))}
           </div>
-          <div className="field-hint">
-            按上游资产表的「类型」列筛选：一行资产 = 一张设定图，先只出角色能省不少钱
-          </div>
+          <div className="field-hint">按资产表的「类型」筛选：一行一张图，先只出角色最省钱</div>
         </div>
       )}
 
@@ -650,10 +694,11 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
             </>
           ) : (
             <>
-              <label className="field-label">
-                参考图{refImages.length > 0 ? `（${refImages.length}）` : "（图片/视频均可，上游自动收集）"}
-              </label>
-              <div className="canvas-refbar">
+              {/* 标题与两个按钮并成一行，省一层高度 */}
+              <div className="canvas-inline canvas-refhead">
+                <label className="field-label">
+                  参考图{refImages.length > 0 ? `（${refImages.length}）` : "（上游自动收集）"}
+                </label>
                 <button type="button" className="btn btn-ghost btn-xs" onClick={() => ctx.openPicker(id)}>
                   <Images size={12} />
                   图库
@@ -803,8 +848,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
 
       {features.includes("shotLimit") && (
         <div className="canvas-float-hint">
-          会按镜头表逐镜出图（填 0 = 全部，上限 24 镜）；每一镜只挂它自己提到的资产设定图，
-          上游整批图片不会带进来
+          逐镜出图，填 0 = 全部（上限 24 镜）；每镜只挂它自己提到的资产，上游整批图片不带进来
         </div>
       )}
 
@@ -841,9 +885,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
               </a>
             ))}
           </div>
-          <div className="field-hint">
-            资产名已写入资产库，下游节点提示词里提到名字就会自动挂上对应设定图
-          </div>
+          <div className="field-hint">资产名已入库：下游提示词里提到名字会自动挂图</div>
         </div>
       )}
 
@@ -853,30 +895,34 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
-      {String(data.nodeType) === "text" ? (
-        <div className="canvas-float-hint">文本节点无需运行，保存后直接供下游使用</div>
-      ) : (
-        <button
-          className="btn btn-primary btn-block"
-          disabled={ctx.running}
-          onClick={() => ctx.runNode(id)}
-        >
-          {ctx.running ? <Spinner light /> : <Play size={14} />}
-          运行此节点
-        </button>
-      )}
+      {/* 运行按钮与状态吸在底部：浮框内容长时不用滚到底才能运行 */}
+      <div className="canvas-float-actions">
+        {String(data.nodeType) === "text" ? (
+          <div className="canvas-float-hint">文本节点无需运行，保存后直接供下游使用</div>
+        ) : (
+          <button
+            className="btn btn-primary btn-block"
+            disabled={ctx.running}
+            onClick={() => ctx.runNode(id)}
+          >
+            {ctx.running ? <Spinner light /> : <Play size={14} />}
+            运行此节点
+          </button>
+        )}
 
-      {status && (
-        <div className="canvas-float-status">
-          任务 #{status.taskId} · {STATUS_BADGE[status.status] ?? status.status}
-          {status.error ? <div className="canvas-float-error">{status.error}</div> : null}
-          {status.assetUrl && status.assetKind !== "document" && (
-            <a className="btn btn-ghost btn-sm" href={status.assetUrl} target="_blank" rel="noreferrer">
-              查看产物
-            </a>
-          )}
-        </div>
-      )}
+        {status && (
+          <div className="canvas-float-status">
+            任务 #{status.taskId} · {STATUS_BADGE[status.status] ?? status.status}
+            {status.taskCount && status.taskCount > 1 ? ` · 共 ${status.taskCount} 个任务` : ""}
+            {status.error ? <div className="canvas-float-error">{status.error}</div> : null}
+            {status.assetUrl && status.assetKind !== "document" && (
+              <a className="btn btn-ghost btn-sm" href={status.assetUrl} target="_blank" rel="noreferrer">
+                查看产物
+              </a>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1180,7 +1226,8 @@ function AssetPickerDialog({
 
 function CanvasInner({ projectId, projectName, onBack }: { projectId: number; projectName: string; onBack: () => void }) {
   const toast = useToast();
-  const { screenToFlowPosition, toObject } = useReactFlow();
+  const { screenToFlowPosition, toObject, setCenter, getZoom, getViewport, setViewport } =
+    useReactFlow();
   const wrapper = useRef<HTMLDivElement>(null);
 
   const [schemas, setSchemas] = useState<Record<string, CanvasNodeSchema>>({});
@@ -1358,11 +1405,13 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       const id = `n${Date.now().toString(36)}${nodeSeq}`;
       const position = screenToFlowPosition({ x: screenX, y: screenY });
       setNodes((prev) => [
-        ...prev,
+        // 新加的节点直接选中（浮框随之打开），其余节点取消选中
+        ...prev.map((n) => ({ ...n, selected: false })),
         {
           id,
           type: "contract",
           position,
+          selected: true,
           data: { prompt: "", schema, nodeType: type } as CanvasNodeData,
         },
       ]);
@@ -1403,10 +1452,11 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       const stepX = 300;
       const stepY = 240;
       const idOf = (t: string) => `chain_${t}_${stamp}`;
-      const created = level.nodes.map(({ type, col, row }) => ({
+      const created = level.nodes.map(({ type, col, row }, i) => ({
         id: idOf(type),
         type: "contract",
         position: { x: originX + col * stepX, y: originY + row * stepY },
+        selected: i === 0,
         data: {
           prompt: "",
           model_key: type === ASSET_IMAGE_KIND || type === STORYBOARD_IMAGE_KIND ? imageModelKey : textModelKey,
@@ -1607,6 +1657,40 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [setNodes]
   );
 
+  /**
+   * 定位到某个节点：选中 + 平移到视口中央。
+   *
+   * 画布开了 onlyRenderVisibleElements（大画布下只渲染可见节点），
+   * 所以「元素」列表点一下必须真的把视图移过去，否则节点既看不见也点不着。
+   */
+  const focusNode = useCallback(
+    (nodeId: string) => {
+      const node = nodesRef.current.find((n) => n.id === nodeId);
+      if (!node) return;
+      setSelectedId(nodeId);
+      setNodes((prev) => prev.map((n) => ({ ...n, selected: n.id === nodeId })));
+      const w = node.measured?.width ?? node.width ?? 220;
+      const h = node.measured?.height ?? node.height ?? 140;
+      // 浮框在节点下方展开，所以把节点落在视口偏上的位置（往下多推约 1/8 屏），浮框才有地方放
+      const zoom = getZoom() || 1;
+      const vh = wrapper.current?.clientHeight ?? window.innerHeight;
+      setCenter(node.position.x + w / 2, node.position.y + h / 2 + (vh * 0.12) / zoom, {
+        zoom,
+        duration: 300,
+      });
+    },
+    [getZoom, setCenter, setNodes]
+  );
+
+  const nudgeViewport = useCallback(
+    (dxScreen: number, dyScreen: number) => {
+      const { x, y, zoom } = getViewport();
+      // 平移量与内容位移反向：浮框被右/下沿切掉，就要让内容往左/上走
+      setViewport({ x: x - dxScreen, y: y - dyScreen, zoom }, { duration: 220 });
+    },
+    [getViewport, setViewport]
+  );
+
   const openPicker = useCallback(
     (nodeId: string, slot?: "first" | "last") => setPickerFor({ nodeId, slot }),
     []
@@ -1655,6 +1739,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       running,
       updateNode: updateNodeData,
       applyStyleToAll,
+      nudgeViewport,
       runNode,
       openPicker,
       reloadWorkflows,
@@ -1667,6 +1752,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       running,
       updateNodeData,
       applyStyleToAll,
+      nudgeViewport,
       runNode,
       openPicker,
       reloadWorkflows,
@@ -1795,7 +1881,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                     <button
                       key={el.id}
                       className={`canvas-element-item ${el.id === selectedId ? "active" : ""}`}
-                      onClick={() => setSelectedId(el.id)}
+                      onClick={() => focusNode(el.id)}
                     >
                       <span className="canvas-element-dot" style={{ background: CATEGORY_DOT[el.category] }} />
                       <span className="canvas-element-body">

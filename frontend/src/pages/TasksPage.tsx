@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ListChecks, RefreshCw } from "lucide-react";
 import { api } from "../api";
 import type { Task, TaskStatus } from "../types";
-import { Empty, Spinner, isRunning } from "../components/common";
+import { Empty, Spinner, isDone, isRunning } from "../components/common";
 import TaskCard from "../components/TaskCard";
 import Lightbox from "../components/Lightbox";
 import { useToast } from "../components/Toast";
@@ -12,7 +12,7 @@ type StatusFilter = "all" | "running" | "completed" | "failed";
 
 const STATUS_MATCH: Record<Exclude<StatusFilter, "all">, (s: TaskStatus) => boolean> = {
   running: (s) => isRunning(s),
-  completed: (s) => s === "succeeded",
+  completed: (s) => isDone(s),
   failed: (s) => s === "failed" || s === "cancelled",
 };
 
@@ -60,7 +60,7 @@ export default function TasksPage() {
   const stats = useMemo(
     () => ({
       running: runningCount,
-      succeeded: tasks.filter((t) => t.status === "succeeded").length,
+      done: tasks.filter((t) => isDone(t.status)).length,
       failed: tasks.filter((t) => t.status === "failed" || t.status === "cancelled").length,
     }),
     [tasks, runningCount]
@@ -118,7 +118,7 @@ export default function TasksPage() {
             [
               ["all", `全部 ${tasks.length}`],
               ["running", `进行中 ${stats.running}`],
-              ["completed", `已完成 ${stats.succeeded}`],
+              ["completed", `已完成 ${stats.done}`],
               ["failed", `失败/取消 ${stats.failed}`],
             ] as [StatusFilter, string][]
           ).map(([f, label]) => (

@@ -68,7 +68,20 @@ export interface AssetBrief {
   height?: number | null;
 }
 
-export type TaskStatus = "pending" | "processing" | "succeeded" | "failed" | "cancelled";
+/**
+ * 任务状态。
+ *
+ * 后端实际写入的是 `completed`（见 backend 的 runner / models），
+ * `succeeded` 只是早期约定的历史别名（provider 层查上游任务时用它），
+ * 这里两者都收，展示层统一按「已完成」处理——不然查不到就会回落成「排队中」。
+ */
+export type TaskStatus =
+  | "pending"
+  | "processing"
+  | "completed"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
 
 export interface Task {
   id: number;

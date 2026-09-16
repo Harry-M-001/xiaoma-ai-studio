@@ -66,16 +66,26 @@ export function Empty({
 
 /* ---------------- 任务状态 ---------------- */
 
-const STATUS_MAP: Record<TaskStatus, { text: string; cls: string; icon?: ReactNode }> = {
+/**
+ * 任务状态表。
+ *
+ * 后端写库用的是 `completed`；`succeeded` 只是 provider 层的上游状态词，
+ * 历史别名也一并收下。未知状态**不做兜底伪装**——直接显示原始值，
+ * 免得状态值对不上时被静默显示成「排队中」。
+ */
+const DONE_META = { text: "已完成", cls: "badge-success", icon: <CheckCircle2 size={12} /> };
+
+const STATUS_MAP: Record<string, { text: string; cls: string; icon?: ReactNode }> = {
   pending: { text: "排队中", cls: "badge-warning", icon: <Clock size={12} /> },
   processing: { text: "生成中", cls: "badge-primary", icon: <Loader2 size={12} className="spin-ic" /> },
-  succeeded: { text: "已完成", cls: "badge-success", icon: <CheckCircle2 size={12} /> },
+  completed: DONE_META,
+  succeeded: DONE_META,
   failed: { text: "失败", cls: "badge-danger", icon: <XCircle size={12} /> },
   cancelled: { text: "已取消", cls: "", icon: <Ban size={12} /> },
 };
 
 export function StatusBadge({ status }: { status: TaskStatus }) {
-  const s = STATUS_MAP[status] ?? STATUS_MAP.pending;
+  const s = STATUS_MAP[status] ?? { text: String(status), cls: "" };
   return (
     <span className={`badge ${s.cls}`}>
       {s.icon}
@@ -85,6 +95,9 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
 }
 
 export const isRunning = (s: TaskStatus) => s === "pending" || s === "processing";
+
+/** 任务是否已成功结束（两种情况都算：后端写的 completed、历史别名 succeeded）。 */
+export const isDone = (s: TaskStatus) => s === "completed" || s === "succeeded";
 
 /* ---------------- 模型选择 ---------------- */
 
