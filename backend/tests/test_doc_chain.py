@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services import doc_service
+from app.models import Asset
+from app.services import canvas_runner, doc_service
 from app.services.doc_service import AgentSpec
 
 
@@ -122,6 +124,47 @@ def test_seed_agents_are_complete():
             assert ph in row["chunk_prompt"], f"{key} 分块模板缺 {ph}"
         assert "{total}" in row["plan_prompt"], f"{key} 大纲提示词缺 {{total}}"
         assert row["system_prompt"].strip() and row["user_template"].strip()
+
+
+def _doc_node(node_id: str, ntype: str, **data) -> dict:
+    return {"id": node_id, "type": ntype, "position": {"x": 0, "y": 0}, "data": data}
+
+
+def _doc_asset(filename: str = "missing.md") -> Asset:
+    """指向不存在文件的文档产物：_doc_asset_text 会安全跳过，正好用来测回退链。"""
+    return Asset(
+        kind="document", filename=filename, original_name="sb.md",
+        content_type="text/markdown", size=10,
+    )
+
+
+def _upstream_text(sheet: dict, sb: dict) -> str:
+    prompt, _images, _videos, upstream_text = asyncio.run(
+        canvas_runner._node_inputs(None, {"nodes": [sb, sheet], "edges": []}, sheet, [("sb", sb, [_doc_asset()])])
+    )
+    assert prompt  # 顺带确认没炸
+    return upstream_text
+
+
+def test_doc_override_wins_over_generated_body():
+    """画布上手工改过的正文，要优先给下游用（不用重跑整条链）。"""
+    sb = _doc_node("sb", "storyboard", docText="### 镜头1 | 中景 | 固定 | 3s\n- 画面：改过的内容")
+    sheet = _doc_node("sheet", "assetSheet")
+    assert _upstream_text(sheet, sb) == "### 镜头1 | 中景 | 固定 | 3s\n- 画面：改过的内容"
+
+
+def test_doc_override_blank_falls_back_to_input():
+    """docText 为空串 / 只有空白时当作没改过，回退到节点自己的输入。"""
+    sb = _doc_node("sb", "storyboard", docText="   ", prompt="原始输入")
+    sheet = _doc_node("sheet", "assetSheet")
+    assert _upstream_text(sheet, sb) == "原始输入"
+
+
+def test_doc_override_absent_keeps_old_behaviour():
+    """没有 docText 字段的老画布行为不变。"""
+    sb = _doc_node("sb", "storyboard", prompt="原始输入")
+    sheet = _doc_node("sheet", "assetSheet")
+    assert _upstream_text(sheet, sb) == "原始输入"
 
 
 def test_placeholder_defaults_cover_seed_params():

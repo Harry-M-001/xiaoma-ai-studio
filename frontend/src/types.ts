@@ -197,6 +197,12 @@ export interface CanvasNodeData {
   shotLimit?: number;
   /** 导演风格卡标识（空 = 不注入风格） */
   styleKey?: string;
+  /**
+   * 文档节点的「手改正文」：在画布上直接编辑过的内容。
+   * 有它就优先给下游用（后端 `_node_inputs` 的覆盖链：手改 > 生成结果 > 节点输入），
+   * 所以改几个字不必重跑整条链。清空即恢复用生成结果。
+   */
+  docText?: string;
   /** 是否自动挂载提示词里提到的资产设定图（false = 关闭，默认开） */
   mentionRefs?: boolean;
   [k: string]: unknown;

@@ -192,6 +192,19 @@ interface LightboxItem {
   meta?: string;
 }
 
+/** 文档正文弹窗的请求参数 */
+interface DocEditRequest {
+  nodeId: string;
+  /** 节点标题，例如「分镜」 */
+  label: string;
+  /** 打开时放进编辑器的内容（手改正文，没有则用生成结果） */
+  text: string;
+  /** 当前是否已经存在手改正文 */
+  hasOverride: boolean;
+  /** 生成结果的下载地址：编辑前用它取全文（节点状态里那份是截断过的预览） */
+  url?: string;
+}
+
 /** 节点浮框与页面通信（避免把全局态塞进 node.data 被持久化） */
 interface NodePanelCtx {
   models: ModelOption[];
@@ -210,6 +223,8 @@ interface NodePanelCtx {
   /** 产物缩略图大小（像素）与修改入口，全局记忆 */
   thumb: number;
   pickThumb: (v: number) => void;
+  /** 打开文档正文编辑器（大弹窗） */
+  editDoc: (req: DocEditRequest) => void;
   runNode: (id: string) => void;
   openPicker: (nodeId: string, slot?: "first" | "last") => void;
   reloadWorkflows: () => Promise<ComfyWorkflow[]>;
@@ -465,6 +480,67 @@ function WorkflowSection({ id, data }: { id: string; data: CanvasNodeData }) {
   );
 }
 
+/**
+ * 文档正文大弹窗。
+ *
+ * 节点上只放预览（浮框那么窄，长文根本没法改），编辑放到这里：
+ * 与项目里「节点=卡片，编辑=模态」的一贯做法一致，也和 Toonflow 处理长文本的方式相同。
+ */
+function DocEditorDialog({
+  req,
+  onSave,
+  onClear,
+  onClose,
+}: {
+  req: DocEditRequest;
+  onSave: (text: string) => void;
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState(req.text);
+  const dirty = text !== req.text;
+  return (
+    <div className="canvas-dialog-mask" onMouseDown={onClose}>
+      <div className="canvas-dialog wide" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="canvas-dialog-head">
+          <span className="canvas-dialog-title">
+            {req.label} · 正文
+            {req.hasOverride ? <em className="canvas-doc-badge">已手改</em> : null}
+          </span>
+          <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+        <textarea
+          className="canvas-doc-editor-body"
+          value={text}
+          autoFocus
+          spellCheck={false}
+          placeholder="正文（Markdown）…"
+          onChange={(e) => setText(e.target.value)}
+        />
+        <div className="canvas-dialog-foot">
+          <span className="canvas-dialog-hint">
+            {dirty ? "已修改，未保存" : `${text.length} 字`}
+            {" · 保存后下游节点读的就是这份，不必重跑"}
+          </span>
+          {req.hasOverride && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClear}>
+              取消手改，用生成结果
+            </button>
+          )}
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            关闭
+          </button>
+          <button type="button" className="btn btn-primary btn-sm" onClick={() => onSave(text)}>
+            保存到节点
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** 节点属性浮框：features 驱动，渲染在被选中节点下方（dola-v2 交互） */
 function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const ctx = useContext(PanelCtx);
@@ -520,6 +596,9 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const features = schema.features ?? [];
   // 图片产物（文档 / 视频不走这个网格）
   const imageProducts = (status?.assets ?? []).filter((a) => a.kind === "image");
+  // 文档正文：手改的覆盖 > 生成结果（后端也按这个顺序取，两边口径要一致）
+  const docOverride = String(data.docText ?? "").trim();
+  const bodyText = docOverride || status?.text || "";
   const nodeType = String(data.nodeType);
   const isVideo = nodeType === "video";
   const isDoc = DOC_KINDS.has(nodeType);
@@ -867,17 +946,41 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
-      {status?.text ? (
+      {(status?.text || docOverride) ? (
         <div className="field">
-          <label className="field-label">
-            生成的正文<em className="canvas-doc-count">（{status.text.length} 字）</em>
-          </label>
-          <pre className="canvas-doc-preview">{status.text}</pre>
-          {status.assetUrl && (
-            <a className="btn btn-ghost btn-xs" href={status.assetUrl} target="_blank" rel="noreferrer">
-              下载 Markdown
-            </a>
-          )}
+          <div className="canvas-inline canvas-refhead">
+            <label className="field-label">
+              正文
+              {docOverride ? <em className="canvas-doc-badge">已手改</em> : null}
+              <em className="canvas-doc-count">（{bodyText.length} 字）</em>
+            </label>
+            <button
+              type="button"
+              className="btn btn-ghost btn-xs"
+              onClick={() =>
+                ctx.editDoc({
+                  nodeId: id,
+                  label: schema.label,
+                  text: bodyText,
+                  hasOverride: Boolean(docOverride),
+                  url: status?.assetUrl,
+                })
+              }
+              title="在弹窗里编辑正文；保存后下游读的就是你改过的这份"
+            >
+              <FileText size={12} />
+              编辑
+            </button>
+            {status?.assetUrl && (
+              <a className="btn btn-ghost btn-xs" href={status.assetUrl} target="_blank" rel="noreferrer">
+                下载
+              </a>
+            )}
+          </div>
+          <pre className="canvas-doc-preview">{bodyText}</pre>
+          {docOverride ? (
+            <div className="field-hint">下游读的是你手改的这份，不必重跑；点「编辑」可改回生成结果</div>
+          ) : null}
         </div>
       ) : null}
 
@@ -968,6 +1071,8 @@ function ContractNode({ id, data, selected }: NodeProps) {
   const status = data.status as CanvasNodeStatus | undefined;
   const refCount = ((data.refImages as NodeRefImage[] | undefined) ?? []).length;
   const nodeImages = (status?.assets ?? []).filter((a) => a.kind === "image");
+  const docOverride = String(data.docText ?? "").trim();
+  const docBody = docOverride || status?.text || "";
   // 节点上选了风格就在卡片上标出来：一条链上七八个节点，一眼能看出谁在用哪套风格
   const styleName = data.styleKey
     ? ctx?.styles.find((s) => s.key === data.styleKey)?.name ?? ""
@@ -1000,9 +1105,10 @@ function ContractNode({ id, data, selected }: NodeProps) {
           )}
         </div>
         {styleName && <div className="canvas-node-style">风格 · {styleName}</div>}
+        {docOverride && <div className="canvas-node-style edited">正文已手改</div>}
         {status?.assetKind === "document" ? (
           <div className="canvas-node-doc">
-            {(status.text ?? "").split("\n").filter((l) => l.trim()).slice(0, 3).join("\n")}
+            {docBody.split("\n").filter((l) => l.trim()).slice(0, 3).join("\n")}
           </div>
         ) : nodeImages.length > 1 ? (
           // 批量节点一次产出多张：铺三张 + 剩余数量，每格角上标镜号 / 资产名
@@ -1287,6 +1393,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
   const [pickerFor, setPickerFor] = useState<{ nodeId: string; slot?: "first" | "last" } | null>(null);
   const [lightbox, setLightbox] = useState<LightboxItem | null>(null);
+  const [editorFor, setEditorFor] = useState<DocEditRequest | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
@@ -1345,18 +1452,19 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     return () => window.removeEventListener("keydown", guard, true);
   }, []);
 
-  // Esc 关闭灯箱 / 图库弹窗 / 添加菜单
+  // Esc 关闭灯箱 / 图库弹窗 / 添加菜单 / 正文编辑器
   useEffect(() => {
-    if (!lightbox && !pickerFor && !addMenu) return;
+    if (!lightbox && !pickerFor && !addMenu && !editorFor) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       setLightbox(null);
       setPickerFor(null);
       setAddMenu(null);
+      setEditorFor(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [lightbox, pickerFor, addMenu]);
+  }, [lightbox, pickerFor, addMenu, editorFor]);
 
   useEffect(() => {
     (async () => {
@@ -1747,6 +1855,35 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     []
   );
 
+  // 打开文档正文编辑器（大弹窗）与保存
+  const openDocEditor = useCallback(async (req: DocEditRequest) => {
+    // 节点状态里那份正文是后端截断过的预览（6000 字），编辑必须拿全文，
+    // 否则一保存就把后半段截没了
+    let payload = req;
+    if (!req.hasOverride && req.url) {
+      try {
+        const res = await fetch(req.url);
+        if (res.ok) {
+          const full = await res.text();
+          if (full.trim()) payload = { ...req, text: full };
+        }
+      } catch {
+        /* 取不到全文就退回预览 */
+      }
+    }
+    setEditorFor(payload);
+  }, []);
+
+  // 保存手改正文（空串 = 取消手改，恢复用生成结果）
+  const saveDocText = useCallback(
+    (nodeId: string, text: string) => {
+      updateNodeData(nodeId, { docText: text.trim() ? text : "" });
+      setEditorFor(null);
+      toast.success(text.trim() ? "已保存到节点，下游会读这份正文" : "已恢复为生成结果");
+    },
+    [updateNodeData, toast]
+  );
+
   // 产物缩略图大小（用户拖一次就记住，跟 Toonflow 的分镜网格一个思路）
   // 默认值要落在滑杆的步进网格上（56 + n*8），否则滑杆显示会与初值不一致
   const [thumb, setThumb] = useState(() => {
@@ -1818,6 +1955,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       preview: previewProduct,
       thumb,
       pickThumb,
+      editDoc: openDocEditor,
       runNode,
       openPicker,
       reloadWorkflows,
@@ -1834,6 +1972,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       previewProduct,
       thumb,
       pickThumb,
+      openDocEditor,
       runNode,
       openPicker,
       reloadWorkflows,
@@ -2083,6 +2222,15 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             slot={pickerFor.slot}
             onConfirm={confirmPick}
             onClose={() => setPickerFor(null)}
+          />
+        )}
+
+        {editorFor && (
+          <DocEditorDialog
+            req={editorFor}
+            onSave={(text) => saveDocText(editorFor.nodeId, text)}
+            onClear={() => saveDocText(editorFor.nodeId, "")}
+            onClose={() => setEditorFor(null)}
           />
         )}
 

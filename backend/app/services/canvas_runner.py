@@ -187,6 +187,16 @@ def _doc_asset_text(assets: list[Asset]) -> str:
     return "\n\n".join(parts)
 
 
+def _doc_override_text(node: dict) -> str:
+    """用户在画布上直接编辑过的正文（存在节点 data 的 `docText`）。
+
+    这条覆盖链的用意：文档节点生成完常常要手改几个字（改个名字、删一句），
+    为此重跑整条链既慢又费钱。所以手改的正文优先给下游用，
+    用户也不用担心重跑之后自己的修改被悄悄丢掉。
+    """
+    return str((node.get("data") or {}).get("docText") or "").strip()
+
+
 async def _node_inputs(
     db: AsyncSession,
     doc: dict,
@@ -213,8 +223,8 @@ async def _node_inputs(
         if src_type == "text" or is_doc_kind(src_type):
             t = _text_node_output(src_node, nodes_by_id, edges)
             if is_doc_kind(src_type):
-                # 文档节点：优先用已生成的正文，未运行过则回退到节点上的输入
-                t = _doc_asset_text(assets) or t
+                # 文档节点：手改正文 > 已生成的正文 > 节点上的输入
+                t = _doc_override_text(src_node) or _doc_asset_text(assets) or t
             if t:
                 texts.append(t)
             continue
