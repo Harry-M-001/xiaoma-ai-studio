@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from app.deps import require_auth
@@ -35,6 +35,19 @@ async def logs_status() -> dict:
 async def export_logs(errorLines: int = Query(200, ge=10, le=2000)) -> dict:
     """生成诊断报告文本（给界面预览用）。"""
     return log_service.export_report(error_lines=errorLines)
+
+
+@router.get("/issue")
+async def export_issue(errorLines: int = Query(200, ge=10, le=2000)) -> dict:
+    """排成 Issue 模板的内容，用户补两句就能提交。
+
+    自动上报暂时不做，这条路就是「把问题发回给作者」的主通道，
+    所以它得比裸报告好用：骨架先填好，用户只补「我做了什么 / 出了什么问题」。
+    """
+    try:
+        return log_service.export_issue(error_lines=errorLines)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/export.txt")

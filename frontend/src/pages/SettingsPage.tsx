@@ -452,20 +452,36 @@ function AboutPanel() {
   const [logLoading, setLogLoading] = useState(false);
   const [logData, setLogData] = useState<LogExport | null>(null);
   const [logFilesInfo, setLogFilesInfo] = useState<LogsStatus | null>(null);
+  const [logMode, setLogMode] = useState<"report" | "issue">("report");
 
-  const openLogs = async () => {
-    setLogOpen(true);
+  const loadLogs = async (mode: "report" | "issue") => {
     setLogLoading(true);
-    setLogData(null);
     try {
-      const [data, files] = await Promise.all([api.exportLogs(), api.logsStatus()]);
+      const data = mode === "issue" ? await api.exportIssue() : await api.exportLogs();
       setLogData(data);
-      setLogFilesInfo(files);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "生成诊断报告失败");
     } finally {
       setLogLoading(false);
     }
+  };
+
+  const openLogs = async () => {
+    setLogOpen(true);
+    setLogMode("report");
+    setLogData(null);
+    try {
+      setLogFilesInfo(await api.logsStatus());
+    } catch {
+      /* 拿不到文件清单不影响导出 */
+    }
+    await loadLogs("report");
+  };
+
+  const switchLogMode = async (mode: "report" | "issue") => {
+    if (mode === logMode && logData) return;
+    setLogMode(mode);
+    await loadLogs(mode);
   };
 
   /** 走 Blob 下载，而不是 <a href>：设了口令时直链带不上 Authorization。 */
@@ -684,7 +700,7 @@ function AboutPanel() {
                 关闭
               </button>
               <button className="btn btn-ghost" onClick={() => void copyLogs()} disabled={!logData}>
-                复制全文
+                {logMode === "issue" ? "复制 Issue 内容" : "复制全文"}
               </button>
               <button className="btn btn-primary" onClick={downloadLogs} disabled={!logData}>
                 下载 .txt
@@ -692,6 +708,24 @@ function AboutPanel() {
             </>
           }
         >
+          <div className="canvas-modetabs" style={{ marginBottom: 12 }}>
+            {(
+              [
+                ["report", "完整报告"],
+                ["issue", "Issue 内容"],
+              ] as ["report" | "issue", string][]
+            ).map(([m, label]) => (
+              <button
+                key={m}
+                type="button"
+                className={`canvas-modetab ${logMode === m ? "active" : ""}`}
+                onClick={() => void switchLogMode(m)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           {logLoading ? (
             <div style={{ padding: 24, textAlign: "center" }}>
               <Spinner />
@@ -699,8 +733,17 @@ function AboutPanel() {
           ) : logData ? (
             <>
               <div className="about-note" style={{ marginBottom: 10 }}>
-                生成时间 {logData.generatedAt}　·　错误行 {logData.errorLines} 条　·　
-                {logData.files.length} 个日志文件
+                {logMode === "issue" ? (
+                  <>
+                    已经按仓库的 Issue 模板排好版：把开头两句改成你自己的步骤和现象，
+                    整段粘到 <strong>Issues 新建页面</strong>即可提交。
+                  </>
+                ) : (
+                  <>
+                    生成时间 {logData.generatedAt}　·　错误行 {logData.errorLines} 条　·　
+                    {logData.files.length} 个日志文件
+                  </>
+                )}
                 <br />
                 日志中的接口密钥、URL 查询参数、系统用户名与家目录路径已替换为占位符；
                 <strong>发出去之前建议自己先扫一眼</strong>。

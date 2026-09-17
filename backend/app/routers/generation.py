@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import SessionLocal
 from app.deps import require_auth
 from app.models import Asset, Task
@@ -20,6 +21,7 @@ from app.schemas import (
     ImageBatchGenerateIn,
     ImageGenerateIn,
     TaskOut,
+    TaskRetryIn,
     VideoGenerateIn,
 )
 from app.services import log_service, option_service, storage
@@ -84,6 +86,7 @@ async def _task_to_out(db: AsyncSession, task: Task) -> TaskOut:
         assets=assets,
         created_at=task.created_at,
         completed_at=task.completed_at,
+        retry_of_task_id=task.retry_of_task_id,
     )
 
 
@@ -291,30 +294,92 @@ async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)) -> TaskO
 
 
 @router.post("/tasks/{task_id}/retry", response_model=TaskOut)
-async def retry_task(task_id: int, db: AsyncSession = Depends(get_db)) -> TaskOut:
-    """按原参数重新发起：复制原任务生成新任务，原记录保留作对照。"""
+async def retry_task(
+    task_id: int,
+    body: TaskRetryIn | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> TaskOut:
+    """按**当时的参数快照**重新发起，原记录保留作对照。
+
+    关键点是「快照」而不是「重跑」：
+    - 型号、提示词、params_json 全部沿用，只把 `body` 里显式给出的字段盖上去；
+    - **画布归属也一起带过去**，重跑出来的产物照常回到原节点的产物区，
+      不会变成一条谁也找不到的孤立记录；
+    - 按类型分发（文本 / 工作流 / 视频 / 图片），不会把 ComfyUI 任务当图片跑。
+    """
     src = await db.get(Task, task_id)
     if src is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     if src.status in ("pending", "processing"):
         raise HTTPException(status_code=400, detail="任务仍在进行中，无法重试")
 
+    params = json.loads(src.params_json or "{}")
+    if body is not None:
+        for key in ("n", "size", "duration", "ratio", "resolution"):
+            value = getattr(body, key, None)
+            if value is not None:
+                params[key] = value
+
+    override_prompt = (body.prompt or "").strip() if body is not None else ""
     task = Task(
         kind=src.kind,
         status="pending",
         service_id=src.service_id,
         model=src.model,
-        prompt=src.prompt,
-        params_json=src.params_json,
+        prompt=override_prompt or src.prompt,
+        params_json=json.dumps(params, ensure_ascii=False),
+        canvas_project_id=src.canvas_project_id,
+        canvas_node_id=src.canvas_node_id,
+        retry_of_task_id=src.id,
     )
     db.add(task)
     await db.commit()
     await db.refresh(task)
+    _dispatch_task(task)
+    return await _task_to_out(db, task)
+
+
+@router.post("/tasks/{task_id}/reveal")
+async def reveal_task(task_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """在系统的文件管理器里定位到该任务的产物。
+
+    自托管应用的产物就在本机，用户经常想直接去文件夹里翻，「产物在哪」是个真问题。
+    只允许打开**数据目录以内**的位置：这类「用系统命令打开路径」的接口一旦能指到
+    任意路径，就等于给了一个任意路径的暴露口子。
+    """
+    task = await db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    rows = (await db.execute(select(Asset).where(Asset.task_id == task_id))).scalars().all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="这个任务还没有产物")
+
+    root = settings.data_dir.resolve()
+    target = (settings.data_dir / rows[0].filename).resolve()
+    if root not in target.parents and target != root:
+        raise HTTPException(status_code=400, detail="产物路径不在数据目录内")
+
+    return {
+        "ok": storage.reveal_in_file_manager(target),
+        "path": str(target.parent),
+        "name": target.name,
+    }
+
+
+def _dispatch_task(task: Task) -> None:
+    """按任务类型交给对应的执行通道。
+
+    重跑时也必须按类型走：早先这里写死了图片通道，工作流与文档任务一旦重跑
+    就会被当成图片任务，报错还看不出真正原因。
+    """
     if task.kind == "video":
         runner.start_video(task.id)
+    elif task.kind == "workflow":
+        runner.start_comfy(task.id)
+    elif task.kind == "text":
+        runner.start_text(task.id)
     else:
         runner.start_image(task.id)
-    return await _task_to_out(db, task)
 
 
 @router.delete("/tasks/{task_id}")

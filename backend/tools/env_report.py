@@ -77,7 +77,10 @@ HINTS: dict[str, list[str]] = {
         "[错误] 创建虚拟环境失败。常见原因：",
         "       1. 当前 python 是精简版 / 嵌入式版（ComfyUI 整合包里带的那个就是），缺少 venv 模块；",
         "       2. 当前目录没有写入权限（比如装在 Program Files 里）。",
-        "       请从 python.org 安装官方 Python 3.11 / 3.12 后重试。",
+        "       两条出路，任选一条：",
+        "       · 从 python.org 安装官方 Python 3.11 / 3.12 后重试（最稳）；",
+        "       · 或者装 uv（https://docs.astral.sh/uv/）后再跑一次 start.bat，",
+        "         脚本会自动改用它来建环境——uv 不依赖解释器自带的 venv 模块。",
     ],
     "venv-missing": [
         "[错误] 虚拟环境没有建成功（找不到 venv 里的 python）。",
@@ -482,6 +485,48 @@ def build_report_text(
     return "\n".join(lines)
 
 
+def build_issue_text(findings: list[Finding], *, extra_lines: list[str] | None = None) -> str:
+    """按仓库的 Issue 模板排好版，用户改两行就能直接粘贴提交。
+
+    为什么单独做这个：自动上报暂时不做，那「让用户手动发过来」这条路就必须好走。
+    裸丢一份体检清单过去，用户还得自己组织语言；把模板骨架先填好，
+    他只补「我做了什么 → 出了什么 → 期望是什么」三句即可。
+
+    `extra_lines` 由应用侧传入（最近若干条错误日志），命令行调用时为空。
+    """
+    lines: list[str] = []
+    lines.append("### 我做了什么")
+    lines.append("")
+    lines.append("（一句话描述操作步骤，例如：铺了 L2 自动链，点了运行）")
+    lines.append("")
+    lines.append("### 出了什么问题")
+    lines.append("")
+    lines.append("（贴报错原文，或描述现象。任务中心里那张卡片的「日志」按钮能看到细节）")
+    lines.append("")
+    lines.append("### 我期望的结果")
+    lines.append("")
+    lines.append("（可选）")
+    lines.append("")
+    lines.append("### 环境信息")
+    lines.append("")
+    lines.append("```text")
+    lines.append(build_report_text(findings, heading=False, footer=True))
+    lines.append("```")
+    if extra_lines:
+        lines.append("")
+        lines.append("<details><summary>最近的错误与警告（已脱敏，点开查看）</summary>")
+        lines.append("")
+        lines.append("```text")
+        lines.extend(extra_lines)
+        lines.append("```")
+        lines.append("")
+        lines.append("</details>")
+    lines.append("")
+    lines.append("<!-- 由「导出日志」自动生成：只含环境信息与检查结论，")
+    lines.append("     不含提示词、作品正文、图片或接口密钥。 -->")
+    return "\n".join(lines)
+
+
 def render(findings: list[Finding], *, report: bool) -> None:
     print(build_report_text(findings, heading=report, footer=report))
 
@@ -490,6 +535,11 @@ def main(argv: list[str] | None = None) -> int:
     _reconfigure_stdout()
     parser = argparse.ArgumentParser(description="小马AI工坊环境体检")
     parser.add_argument("--report", action="store_true", help="输出可整段复制发送的诊断报告")
+    parser.add_argument(
+        "--issue",
+        action="store_true",
+        help="输出按 Issue 模板排好版的内容（改两句即可粘贴提交）",
+    )
     parser.add_argument("--root", default="", help="仓库根目录（默认按脚本位置推断）")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--skip-node", action="store_true", help="跳过 Node.js / npm 检查")
@@ -527,6 +577,12 @@ def main(argv: list[str] | None = None) -> int:
     findings: list[Finding] = collect_findings(
         root, need_node=not args.skip_node, port=args.port
     )
+
+    if args.issue:
+        # 只输出那段可直接粘贴的正文，不要夹带其它内容——
+        # 这段是给用户整段复制的，多一行都得他自己删
+        print(build_issue_text(findings))
+        return 0
 
     render(findings, report=args.report)
 

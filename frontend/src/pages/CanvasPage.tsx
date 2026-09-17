@@ -79,9 +79,31 @@ interface ChainLevel {
   key: string;
   label: string;
   hint: string;
-  nodes: { type: string; col: number; row: number }[];
+  nodes: { type: string; col: number; row: number; data?: Partial<CanvasNodeData> }[];
   edges: [string, string][];
 }
+
+/** L3 的落位与连线。L4 是在它基础上再接视频，抽出来免得抄两遍、以后改一处漏一处。 */
+const L3_NODES: ChainLevel["nodes"] = [
+  { type: "idea", col: 0, row: 0 },
+  { type: "novel", col: 1, row: 0 },
+  { type: "script", col: 2, row: 0 },
+  { type: "storyboard", col: 3, row: 0 },
+  { type: "assetSheet", col: 4, row: 0 },
+  { type: "assetImage", col: 5, row: 0 },
+  { type: "storyboardImage", col: 4, row: 1 },
+];
+
+const L3_EDGES: ChainLevel["edges"] = [
+  ["idea", "novel"],
+  ["novel", "script"],
+  ["script", "storyboard"],
+  ["storyboard", "assetSheet"],
+  ["assetSheet", "assetImage"],
+  // 分镜图要两个上游：分镜（镜头表）+ 资产图（等它先跑完，提及注入才有图可挂）
+  ["storyboard", "storyboardImage"],
+  ["assetImage", "storyboardImage"],
+];
 
 const CHAIN_LEVELS: ChainLevel[] = [
   {
@@ -124,24 +146,22 @@ const CHAIN_LEVELS: ChainLevel[] = [
     key: "L3",
     label: "L3 +分镜图",
     hint: "再加「分镜图」：按镜头表逐镜出图，每镜自动挂它提到的角色设定图",
+    nodes: L3_NODES,
+    edges: L3_EDGES,
+  },
+  {
+    key: "L4",
+    label: "L4 +逐镜视频",
+    hint: "全链打通：逐镜出图后再逐镜生视频，相邻两镜首尾相连。最贵的一档，建议先跑通 L3 再铺",
     nodes: [
-      { type: "idea", col: 0, row: 0 },
-      { type: "novel", col: 1, row: 0 },
-      { type: "script", col: 2, row: 0 },
-      { type: "storyboard", col: 3, row: 0 },
-      { type: "assetSheet", col: 4, row: 0 },
-      { type: "assetImage", col: 5, row: 0 },
-      { type: "storyboardImage", col: 4, row: 1 },
+      ...L3_NODES,
+      { type: "video", col: 5, row: 1, data: { shotVideo: "chain", mode: "first_last" } },
     ],
     edges: [
-      ["idea", "novel"],
-      ["novel", "script"],
-      ["script", "storyboard"],
-      ["storyboard", "assetSheet"],
-      ["assetSheet", "assetImage"],
-      // 分镜图要两个上游：分镜（镜头表）+ 资产图（等它先跑完，提及注入才有图可挂）
-      ["storyboard", "storyboardImage"],
-      ["assetImage", "storyboardImage"],
+      ...L3_EDGES,
+      // 视频同样要两个上游：分镜（每镜的动作与时长）+ 分镜图（每镜的首帧图）
+      ["storyboard", "video"],
+      ["storyboardImage", "video"],
     ],
   },
 ];
@@ -603,6 +623,10 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const isVideo = nodeType === "video";
   const isDoc = DOC_KINDS.has(nodeType);
   const videoMode = String(data.mode ?? "text2video");
+  // 逐镜出片：off 是普通单段视频；each / chain 会按上游分镜表一镜一段
+  const shotVideo = String(data.shotVideo ?? "off");
+  const shotMode = shotVideo !== "off";
+  const isShotVideoNode = isVideo && shotMode;
   // 文档节点要选文本模型；视频节点选视频模型；其余按图片
   const wantedModality = isDoc ? "text" : isVideo ? "video" : "image";
   const nodeModels = ctx.models.filter((m) => m.modality === wantedModality);
@@ -745,7 +769,40 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
-      {features.includes("imageUpload") && videoMode !== "text2video" && (
+      {features.includes("shotVideo") && (
+        <div className="field">
+          <label className="field-label">逐镜出视频</label>
+          <select
+            className="input"
+            value={shotVideo}
+            onChange={(e) => patch({ shotVideo: e.target.value })}
+          >
+            <option value="off">关闭（整段一个视频）</option>
+            <option value="each">每镜一段 · 用该镜分镜图当首帧</option>
+            <option value="chain">每镜一段 · 并用下一镜首帧收尾（首尾相连）</option>
+          </select>
+        </div>
+      )}
+
+      {isShotVideoNode && (
+        <div className="field">
+          <label className="canvas-check">
+            <input
+              type="checkbox"
+              checked={data.sceneRefs !== false}
+              onChange={(e) => patch({ sceneRefs: e.target.checked })}
+            />
+            <span>同场景串联</span>
+          </label>
+          <div className="canvas-float-hint">
+            {videoMode === "omni_ref"
+              ? "开启后，每一镜会额外带上同一场景上一镜的分镜图当参考，让一个场景内的多个镜头保持连贯"
+              : "「首尾帧」模式下连贯性已经由首尾帧保证，这项只对「全能参考」模式生效"}
+          </div>
+        </div>
+      )}
+
+      {features.includes("imageUpload") && videoMode !== "text2video" && !isShotVideoNode && (
         <div className="field">
           {videoMode === "first_last" ? (
             <>
@@ -902,7 +959,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
             </select>
           </div>
         )}
-        {features.includes("shotLimit") && (
+        {features.includes("shotLimit") && (!isVideo || shotMode) && (
           <div className="field">
             <label className="field-label">生成镜数</label>
             <input
@@ -940,9 +997,11 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
-      {features.includes("shotLimit") && (
+      {features.includes("shotLimit") && (!isVideo || shotMode) && (
         <div className="canvas-float-hint">
-          逐镜出图，填 0 = 全部（上限 24 镜）；每镜只挂它自己提到的资产，上游整批图片不带进来
+          {isShotVideoNode
+            ? "按上游分镜表逐镜出片，填 0 = 全部（上限 24 镜）。镜号对得上才出，对不上的会在任务日志里列出来"
+            : "逐镜出图，填 0 = 全部（上限 24 镜）；每镜只挂它自己提到的资产，上游整批图片不带进来"}
         </div>
       )}
 
@@ -1568,7 +1627,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   );
 
   // 一键铺自动链：拓扑是固定模板，不需要 LLM 生成
-  // L1 = 创意 → 小说 → 剧本 → 分镜；L2 接资产表 → 资产设定图；L3 再接分镜图（有分叉）
+  // L1 = 创意 → 小说 → 剧本 → 分镜；L2 接资产表 → 资产设定图；L3 再接分镜图（有分叉）；
+  // L4 再接视频（逐镜出片，首尾相连）
   const buildAutoChain = useCallback(
     (levelKey: string) => {
       const level = CHAIN_LEVELS.find((l) => l.key === levelKey) ?? CHAIN_LEVELS[0];
@@ -1592,22 +1652,33 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
         toast.error("分镜图需要图片模型，请先在「模型服务」里添加");
         return;
       }
+      const videoModelKey = models.find((m) => m.modality === "video")?.key ?? "";
+      if (types.includes("video") && !videoModelKey) {
+        toast.error("逐镜出视频需要视频模型，请先在「模型服务」里添加");
+        return;
+      }
+      const modelKeyFor = (t: string) => {
+        if (t === "video") return videoModelKey;
+        if (t === ASSET_IMAGE_KIND || t === STORYBOARD_IMAGE_KIND) return imageModelKey;
+        return textModelKey;
+      };
       const stamp = Date.now().toString(36);
       const originX = 80;
       const originY = 140;
       const stepX = 300;
       const stepY = 240;
       const idOf = (t: string) => `chain_${t}_${stamp}`;
-      const created = level.nodes.map(({ type, col, row }, i) => ({
+      const created = level.nodes.map(({ type, col, row, data: extra }, i) => ({
         id: idOf(type),
         type: "contract",
         position: { x: originX + col * stepX, y: originY + row * stepY },
         selected: i === 0,
         data: {
           prompt: "",
-          model_key: type === ASSET_IMAGE_KIND || type === STORYBOARD_IMAGE_KIND ? imageModelKey : textModelKey,
+          model_key: modelKeyFor(type),
           schema: schemas[type],
           nodeType: type,
+          ...extra,
         } as CanvasNodeData,
       }));
       const newEdges: Edge[] = level.edges.map(([from, to], i) => ({

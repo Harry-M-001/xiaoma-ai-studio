@@ -83,6 +83,16 @@ export type TaskStatus =
   | "failed"
   | "cancelled";
 
+/** 重新生成时的参数覆盖；留空即完整沿用原任务的参数快照 */
+export interface TaskRetryIn {
+  prompt?: string;
+  n?: number;
+  size?: string;
+  duration?: number;
+  ratio?: string;
+  resolution?: string;
+}
+
 export interface Task {
   id: number;
   kind: string;
@@ -96,6 +106,8 @@ export interface Task {
   assets: AssetBrief[];
   created_at: string;
   completed_at: string | null;
+  /** 若是「重新生成」出来的，这里是原任务 id */
+  retry_of_task_id?: number | null;
 }
 
 export interface Asset {
@@ -195,6 +207,10 @@ export interface CanvasNodeData {
   assetScope?: string;
   /** 分镜图：本次最多生成几个镜头（0 = 全部） */
   shotLimit?: number;
+  /** 逐镜出视频：off（整段一个）/ each（每镜一段）/ chain（每镜一段并首尾相连） */
+  shotVideo?: string;
+  /** 同场景串联：每镜额外带上同场景上一镜的分镜图当参考 */
+  sceneRefs?: boolean;
   /** 导演风格卡标识（空 = 不注入风格） */
   styleKey?: string;
   /**

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +23,28 @@ _EXT_BY_CT = {
 
 def _ext(content_type: str, fallback: str = "bin") -> str:
     return _EXT_BY_CT.get((content_type or "").lower(), fallback)
+
+
+def reveal_in_file_manager(path: Path) -> bool:
+    """在系统文件管理器里定位到该文件，返回是否成功唤起。
+
+    自托管应用的产物就在本机，「产物到底存哪了」是个真问题——这个动作省掉用户
+    自己去找路径。**只负责唤起，不碰任何文件**；调用方必须先确认路径在数据目录内
+    （这类用系统命令打开路径的能力，一旦能指到任意路径就成了信息暴露口子）。
+
+    容器里通常没有文件管理器，那时返回 False，界面提示用户手动去数据目录看。
+    """
+    try:
+        if sys.platform.startswith("win"):
+            # explorer 的 /select 是「打开所在目录并选中该文件」
+            subprocess.Popen(["explorer", "/select,", str(path)])  # noqa: S603,S607
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])  # noqa: S603,S607
+        else:
+            subprocess.Popen(["xdg-open", str(path.parent)])  # noqa: S603,S607
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 def save_bytes(data: bytes, content_type: str, preferred_ext: str | None = None) -> str:

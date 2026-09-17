@@ -207,6 +207,42 @@ def test_launchers_check_each_step():
     assert sh.count("die ") >= 6, sh.count("die ")
 
 
+def test_issue_mode_renders_template():
+    """`--issue` 要直接吐出可粘贴提交的正文，且不能夹带别的东西。
+
+    这条路径就是「让用户手动把日志发给我」的主干：用户复制、粘贴、提交三步完事。
+    只要混进了别的内容（比如体检结论那两行），用户就得自己先删干净——
+    一麻烦他就不发了，所以宁可在这里钉死。
+    """
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = env.main(["--issue", "--root", str(ROOT), "--skip-node"])
+    assert code == 0, "体检有错项时 --issue 也要正常输出（错误项本身就是要发的内容）"
+    out = buf.getvalue()
+    for section in ("### 我做了什么", "### 出了什么问题", "### 我期望的结果", "### 环境信息"):
+        assert section in out, f"Issue 内容缺少小节：{section}"
+    assert "```text" in out, "环境信息要放在代码块里，否则粘贴后排版散掉"
+    # 命令行输出不能带「结论：N 个错误」这类体检收尾语
+    assert "结论：" not in out, "--issue 混进了体检结论，用户还得手动删"
+
+
+def test_issue_text_folds_error_lines_into_details():
+    """带错误日志时用 <details> 折叠，避免正文被几十行日志冲垮。
+
+    折叠块存在的意义：用户只用看前三个小节，日志是给作者看的。
+    """
+    with_details = env.build_issue_text([], extra_lines=["ERROR 上游返回 502"])
+    assert "<details>" in with_details
+    assert "ERROR 上游返回 502" in with_details
+    assert "</details>" in with_details
+
+    without = env.build_issue_text([])
+    assert "<details>" not in without, "没有日志时不该留一个空的折叠块"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 先看常见问题
+    url: https://github.com/Harry-M-001/xiaoma-ai-studio#常见问题
+    about: 装不上、第二步失败、一键更新不可用——这几个大概率已经在里面了

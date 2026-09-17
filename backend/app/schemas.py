@@ -168,6 +168,24 @@ class TaskOut(BaseModel):
     assets: list[AssetBrief] = []
     created_at: datetime
     completed_at: datetime | None = None
+    # 重跑出来的任务记着原任务 id，便于在任务中心区分首次与重跑
+    retry_of_task_id: int | None = None
+
+
+class TaskRetryIn(BaseModel):
+    """重新生成时的参数覆盖。
+
+    这几个字段**不传就完整沿用原任务的参数快照**（型号 / 提示词 / params_json
+    一个都不丢）。只想调其中一两项时才传——这比让用户把参数重填一遍可靠得多，
+    也是原参数快照真正的用处。
+    """
+
+    prompt: str | None = None
+    n: int | None = None
+    size: str | None = None
+    duration: int | None = None
+    ratio: str | None = None
+    resolution: str | None = None
 
 
 # ---------- 资产 ----------

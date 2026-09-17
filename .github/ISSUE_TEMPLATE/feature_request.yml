@@ -1,0 +1,37 @@
+name: 功能建议
+description: 想要什么能力、哪里不好用，都可以说
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你现在卡在哪
+      description: 说说你想做的事，以及现在为什么做不成
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: 你希望它怎么工作
+      description: 有具体想法就写，没有也行——描述场景同样有用
+    validations:
+      required: false
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 大概属于哪块
+      multiple: true
+      options:
+        - 画布与自动链
+        - 模型服务接入
+        - 资产库
+        - 任务与产物
+        - ComfyUI
+        - 界面与交互
+        - 部署与更新
+        - 文档
+        - 其它
+    validations:
+      required: false

@@ -398,7 +398,9 @@ async def _create_storyboard_image_tasks(
             "（`### 镜头N | 景别 | 运镜 | 时长s` + `- 画面：` / `- 首帧提示词：`）"
         )
     total_found = len(shots)
-    shots = storyboard_sheet.limit_shots(shots, int(data.get("shotLimit") or 0))
+    shots = _dedupe_shots(
+        storyboard_sheet.limit_shots(shots, int(data.get("shotLimit") or 0)), label
+    )
 
     model_key = str(data.get("model_key") or "")
     if not model_key:
@@ -452,6 +454,236 @@ async def _create_storyboard_image_tasks(
         "画布 %s 分镜图：解析出 %s 镜，本次生成 %s 镜 → %s 个任务",
         project_id, total_found, len(shots), len(tasks),
     )
+    return tasks
+
+
+def _dedupe_shots(shots: list[storyboard_sheet.Shot], label: str) -> list[storyboard_sheet.Shot]:
+    """同一镜号只保留首次出现。
+
+    上游正文有可能是多份分镜表拼起来的（重跑过上游节点、或者用户手工把两份表粘在一起）。
+    不去重就会按镜号重复出片 / 重复出图——**费用直接翻倍**，而且 9 个任务看起来和 3 个
+    一样「正常」，只有账单上能看出来。所以宁可在这里挡一道，并把去重数量写进日志。
+    """
+    seen: set[str] = set()
+    unique: list[storyboard_sheet.Shot] = []
+    for shot in shots:
+        if shot.no in seen:
+            continue
+        seen.add(shot.no)
+        unique.append(shot)
+    dropped = len(shots) - len(unique)
+    if dropped:
+        logger.warning(
+            "节点「%s」的上游分镜表里有 %s 个重复镜号，已按首次出现去重（避免重复出片）",
+            label,
+            dropped,
+        )
+    return unique
+
+
+async def _assets_by_shot(db: AsyncSession, assets: list[Asset]) -> dict[str, Asset]:
+    """按镜号归拢上游图片。
+
+    分镜图节点在建任务时把镜号写进了 `params_json`，这里顺着 `Asset.task_id`
+    读回来，就知道每张图是哪一镜的。**靠镜号配对而不是靠顺序**：上游可能被
+    「生成镜数」截断过，两边的顺序不一定对得齐，按顺序配会张冠李戴。
+    同一镜有多张（多张采样）时保留最新的一张。
+    """
+    task_ids = {a.task_id for a in assets if a.task_id}
+    if not task_ids:
+        return {}
+    rows = (await db.execute(select(Task).where(Task.id.in_(task_ids)))).scalars().all()
+    shot_of: dict[int, str] = {}
+    for t in rows:
+        no = str(read_task_params(t).get("shot_no") or "").strip()
+        if no:
+            shot_of[t.id] = no
+
+    out: dict[str, Asset] = {}
+    # 按 id 升序覆盖，最终留下的是每镜最新的那张
+    for a in sorted(assets, key=lambda x: x.id or 0):
+        no = shot_of.get(a.task_id or 0)
+        if no:
+            out[no] = a
+    return out
+
+
+def _prev_shot_image(
+    shots: list[storyboard_sheet.Shot], idx: int, by_shot: dict[str, Asset]
+) -> Asset | None:
+    """同一场景里、当前镜之前最近的一镜的分镜图。
+
+    分镜表没写场景标题时，把整张表当成一个场景——「串联」这件事本身仍然有意义。
+    往前找而不是只看前一镜：中间那镜可能没出图（被截断或失败），
+    那就顺延到再前一镜，而不是直接放弃串联。
+    """
+    if idx <= 0:
+        return None
+    current_scene = shots[idx].scene_no
+    if not current_scene:
+        for j in range(idx - 1, -1, -1):
+            img = by_shot.get(str(shots[j].no))
+            if img is not None:
+                return img
+        return None
+    for j in range(idx - 1, -1, -1):
+        if shots[j].scene_no != current_scene:
+            return None
+        img = by_shot.get(str(shots[j].no))
+        if img is not None:
+            return img
+    return None
+
+
+async def _create_shot_video_tasks(
+    db: AsyncSession,
+    project_id: int,
+    node: dict,
+    upstream_text: str,
+    images: list[Asset],
+) -> list[Task]:
+    """视频节点逐镜出片：每一镜用它自己的分镜图当首帧，可选与下一镜首尾相连。
+
+    这是自动链「分镜图 → 视频」这一段。分镜图节点已经把图逐镜出好了，
+    这里一镜一段地送进生视频，不必再手工一张张选。
+
+    `data.shotVideo`：
+    - `each`  每镜一段，该镜分镜图当首帧
+    - `chain` 每镜一段，第 N 镜分镜图当首帧、**第 N+1 镜分镜图当尾帧**——相邻两镜
+      的接缝处首尾同图，拼起来就是连贯的
+    """
+    data = node.get("data") or {}
+    label = NODE_SCHEMAS["video"]["label"]
+
+    shots = storyboard_sheet.parse_storyboard(upstream_text)
+    if not shots:
+        raise ValueError(
+            f"「{label}」没能从上游内容里解析出分镜表：请把上游「分镜」节点接进来，"
+            "并确认它产出的是镜头表（`### 镜头N | 景别 | 运镜 | 时长s` + `- 画面：`）"
+        )
+    total_found = len(shots)
+    shots = _dedupe_shots(
+        storyboard_sheet.limit_shots(shots, int(data.get("shotLimit") or 0)), label
+    )
+
+    model_key = str(data.get("model_key") or "")
+    if not model_key:
+        raise ValueError(f"节点「{label}」未选择模型")
+    resolved = await provider_store.resolve_model(db, model_key, "video")
+
+    mode = str(data.get("mode") or "first_last")
+    if mode == "text2video":
+        raise ValueError(
+            "逐镜出片要靠分镜图当首帧：请把模式切到「首尾帧」或「全能参考」，"
+            "或者把「逐镜出视频」关掉"
+        )
+    chain = str(data.get("shotVideo") or "each") == "chain"
+    scene_refs = data.get("sceneRefs") is not False
+
+    by_shot = await _assets_by_shot(db, images)
+    if not by_shot:
+        raise ValueError(
+            f"「{label}」没有拿到带镜号的分镜图：请把上游「分镜图」节点接进来；"
+            "想用图库里手动选的图，就把「逐镜出视频」关掉、改用普通模式"
+        )
+
+    duration_default = int(data.get("duration") or 5)
+    ratio = str(data.get("ratio") or "16:9")
+    resolution = str(data.get("resolution") or "720p")
+    extra = str(data.get("prompt") or "").strip()
+    card = await style_service.load_card(db, str(data.get("styleKey") or ""))
+    style_suffix = style_service.video_suffix(card)
+    mention_on = data.get("mentionRefs") is not False
+    manual = await _apply_manual_refs(db, data, [])
+    batch = _new_batch_id(node)
+
+    tasks: list[Task] = []
+    missing: list[str] = []
+    for idx, shot in enumerate(shots):
+        first = by_shot.get(str(shot.no))
+        if first is None:
+            missing.append(shot.no)
+            continue
+
+        prompt = shot.video_prompt
+        prompt = style_service.append_style(prompt, extra)
+        prompt = style_service.append_style(prompt, style_suffix)
+
+        refs: list[Asset] = list(manual)
+        injected: list[str] = []
+        if mention_on:
+            refs, injected = await _inject_asset_refs(db, project_id, shot.scan_text, refs)
+
+        params: dict = {
+            "mode": mode,
+            # 分镜表里逐镜写了时长就用它（4s 的镜头不该被拉成 5s），否则用节点上的设置
+            "duration": shot.duration_seconds or duration_default,
+            "ratio": ratio,
+            "resolution": resolution,
+            "shot_no": shot.no,
+            "shot_label": shot.label,
+            "asset_batch": batch,
+        }
+        if shot.scene_no:
+            params["scene_no"] = shot.scene_no
+
+        if mode == "first_last":
+            params["first_frame_asset_id"] = first.id
+            if chain and idx + 1 < len(shots):
+                nxt = by_shot.get(str(shots[idx + 1].no))
+                if nxt is not None:
+                    params["last_frame_asset_id"] = nxt.id
+        else:  # omni_ref：首帧塞进参考图，再按需串上同场景上一镜
+            ref_ids = [first.id]
+            if scene_refs:
+                prev = _prev_shot_image(shots, idx, by_shot)
+                if prev is not None:
+                    ref_ids.append(prev.id)
+                    injected = [*injected, prev.name or prev.original_name]
+            for a in refs:
+                if a.id not in ref_ids:
+                    ref_ids.append(a.id)
+            params["ref_asset_ids"] = ref_ids
+
+        if injected:
+            params["injected_names"] = injected
+
+        task = Task(
+            kind="video",
+            status="pending",
+            service_id=resolved.service.id,
+            model=model_key,
+            prompt=prompt,
+            params_json=json.dumps(params, ensure_ascii=False),
+            canvas_project_id=project_id,
+            canvas_node_id=str(node["id"]),
+        )
+        db.add(task)
+        tasks.append(task)
+
+    if not tasks:
+        raise ValueError(
+            "分镜图与镜头对不上：上游给了 "
+            f"{len(by_shot)} 张带镜号的图（镜号 {'、'.join(sorted(by_shot))}），"
+            f"而分镜表要的是镜号 {'、'.join(missing)}。"
+            "常见原因是两边「生成镜数」填得不一样——请让「分镜图」节点覆盖到这些镜号"
+        )
+
+    await db.commit()
+    for t in tasks:
+        await db.refresh(t)
+
+    if missing:
+        # 放到日志里而不是直接报错：出一部分总比一镜都不出好，
+        # 而且这条会在任务中心的任务日志里看得到（用户不必来问）
+        logger.warning(
+            "节点「%s」有 %s 个镜头没有对应分镜图，已跳过：镜号 %s（共解析出 %s 镜，本次出片 %s 段）",
+            label,
+            len(missing),
+            "、".join(missing),
+            total_found,
+            len(tasks),
+        )
     return tasks
 
 
@@ -705,6 +937,11 @@ async def _build_node_tasks(
         return await _create_storyboard_image_tasks(
             db, project_id, node, upstream_text, manual, card
         )
+
+    # 视频节点逐镜出片（D 期）：分镜图节点已经逐镜出好图，这里一镜一段送进生视频。
+    # 放在普通分支之前，因为它同样要一次建出多个任务。
+    if ntype == "video" and str(data.get("shotVideo") or "off") != "off":
+        return await _create_shot_video_tasks(db, project_id, node, upstream_text, images)
 
     injected: list[str] = []
     # 角色提及注入：提示词里提到资产名就自动挂设定图（可在节点上关掉）

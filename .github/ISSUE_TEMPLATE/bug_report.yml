@@ -1,0 +1,58 @@
+name: 问题反馈
+description: 装不上、跑不起来、生成失败、界面异常——都提这里
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提之前先看两处，多数问题自己就能解决：
+
+        - **任务卡片上的「日志」按钮**：能看到这个任务执行期间发生了什么。
+        - **系统设置 → 关于与更新 → 导出日志**：点「Issue 内容」，会生成下面这份表单该填的全部内容，
+          改两句就能整段粘过来。
+
+        这份诊断信息里**不含**你的提示词、作品正文、图片或接口密钥。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 我做了什么
+      description: 操作步骤，越具体越好
+      placeholder: 例如：铺了 L2 自动链，填了主题，点了运行
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-went-wrong
+    attributes:
+      label: 出了什么问题
+      description: 有报错就贴报错原文，没有就描述现象
+      placeholder: 例如：分镜图节点一直是排队中，刷新也不动
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 我期望的结果
+      description: 可选
+    validations:
+      required: false
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 环境信息
+      description: 由「导出日志 → Issue 内容」自动生成，直接粘贴即可
+      render: text
+      placeholder: |
+        小马AI工坊 · 环境诊断报告
+        [OK]    ...
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        如果用的是自己的中转站 / 私有部署模型，请顺便说明大致情况，
+        但**不要贴 API Key**（贴了请立刻去重置，即使后面删掉评论也一样来不及）。

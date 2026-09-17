@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ListChecks, RefreshCw } from "lucide-react";
 import { api } from "../api";
-import type { Task, TaskStatus } from "../types";
+import type { Task, TaskRetryIn, TaskStatus } from "../types";
 import { Empty, Spinner, isDone, isRunning } from "../components/common";
 import TaskCard from "../components/TaskCard";
 import Lightbox from "../components/Lightbox";
@@ -66,11 +66,11 @@ export default function TasksPage() {
     [tasks, runningCount]
   );
 
-  const retry = async (t: Task) => {
+  const retry = async (t: Task, overrides?: TaskRetryIn) => {
     try {
-      const nt = await api.retryTask(t.id);
+      const nt = await api.retryTask(t.id, overrides);
       setTasks((prev) => [nt, ...prev]);
-      toast.success("已按原参数重新发起");
+      toast.success(overrides ? "已按调整后的参数发起" : "已按当时的参数重新发起");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "重试失败");
     }

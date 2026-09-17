@@ -27,6 +27,7 @@ import type {
   TableSpecMeta,
   Task,
   TaskLogs,
+  TaskRetryIn,
   UpdateRunResult,
   UpdateStatus,
 } from "./types";
@@ -148,7 +149,15 @@ export const api = {
     request<Task[]>(`/api/tasks?limit=${limit}${kind ? `&kind=${kind}` : ""}`),
   getTask: (id: number) => request<Task>(`/api/tasks/${id}`),
   cancelTask: (id: number) => request<Task>(`/api/tasks/${id}/cancel`, { method: "POST" }),
-  retryTask: (id: number) => request<Task>(`/api/tasks/${id}/retry`, { method: "POST" }),
+  retryTask: (id: number, overrides?: TaskRetryIn) =>
+    request<Task>(`/api/tasks/${id}/retry`, {
+      method: "POST",
+      body: json(overrides ?? {}),
+    }),
+  revealTask: (id: number) =>
+    request<{ ok: boolean; path: string; name: string }>(`/api/tasks/${id}/reveal`, {
+      method: "POST",
+    }),
   deleteTask: (id: number) => request<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }),
 
   // ---------- 资产 ----------
@@ -244,6 +253,7 @@ export const api = {
   // ---- 日志与诊断 ----
   logsStatus: () => request<LogsStatus>("/api/logs/status"),
   exportLogs: (errorLines = 200) => request<LogExport>(`/api/logs/export?errorLines=${errorLines}`),
+  exportIssue: (errorLines = 200) => request<LogExport>(`/api/logs/issue?errorLines=${errorLines}`),
   taskLogs: (id: number) => request<TaskLogs>(`/api/tasks/${id}/logs`),
 
   // ---- ComfyUI 工作流 ----

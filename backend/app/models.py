@@ -75,6 +75,8 @@ class Task(Base):
     # 画布节点执行时记录归属，便于画布查询节点状态（普通任务为空）
     canvas_project_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     canvas_node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 「重新生成」出来的任务记下原任务 id，便于在任务中心区分是重跑还是首次
+    retry_of_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

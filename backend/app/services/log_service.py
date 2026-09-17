@@ -319,30 +319,78 @@ def tail_lines(count: int, *, levels: tuple[str, ...] = ()) -> list[str]:
     return lines[-count:]
 
 
-def _env_report_text() -> str:
-    """复用环境体检脚本的输出。
+def _load_env_module() -> Any | None:
+    """加载环境体检脚本。
 
     该脚本刻意做到不依赖第三方包（它要在「虚拟环境还没建出来」时也能跑），
-    所以这里是按文件路径加载，而不是当成普通模块 import。
-
-    体检结果里有解释器、Node、npm 的**绝对路径**，而这类路径常常长在
-    `C:\\Users\\<用户名>\\AppData\\...` 下面——所以整段再过一次脱敏。
-    它走的是逐行输出，不会像日志那样被压平，多行结构得以保留。
+    所以按文件路径加载，而不是当成普通模块 import。
     """
     script = BACKEND_ROOT / "tools" / "env_report.py"
     if not script.exists():
-        return "（环境体检脚本缺失）"
+        return None
     try:
         spec = importlib.util.spec_from_file_location("xiaoma_env_report", script)
         if not spec or not spec.loader:
-            return "（环境体检脚本加载失败）"
+            return None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        findings = module.collect_findings(REPO_ROOT, check_port=False)
+        return module
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _env_findings() -> list[Any]:
+    module = _load_env_module()
+    if module is None:
+        return []
+    try:
+        # check_port=False：导出时应用正在跑，8787 必然被自己占着，报出来只是噪音
+        return module.collect_findings(REPO_ROOT, check_port=False)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _env_report_text() -> str:
+    """体检结果文本。
+
+    结果里有解释器、Node、npm 的**绝对路径**，而这类路径常常长在
+    `C:\\Users\\<用户名>\\AppData\\...` 下面——所以整段再过一次脱敏。
+    它走的是逐行输出，不会像日志那样被压平，多行结构得以保留。
+    """
+    module = _load_env_module()
+    if module is None:
+        return "（环境体检不可用）"
+    try:
+        findings = _env_findings()
         raw = module.build_report_text(findings, heading=False)
     except Exception as exc:  # noqa: BLE001
         return f"（环境体检执行失败：{type(exc).__name__}）"
     return redact.redact_text(raw, root=REPO_ROOT)
+
+
+def export_issue(*, error_lines: int = 200) -> dict[str, Any]:
+    """把诊断信息排成 Issue 模板的格式。
+
+    自动上报暂时不做，「让用户手动发过来」这条路就必须好走一点：
+    裸丢一份体检清单过去，用户还得自己想怎么组织语言；模板骨架先填好，
+    他只要补「我做了什么 / 出了什么问题」两句就能提交。
+    """
+    setup_logging()
+    module = _load_env_module()
+    if module is None:
+        raise RuntimeError("环境体检脚本不可用，无法生成 Issue 内容")
+
+    generated = datetime.datetime.now().isoformat(timespec="seconds")
+    errors = tail_lines(error_lines, levels=("ERROR", "WARNING"))
+    findings = _env_findings()
+    text = module.build_issue_text(findings, extra_lines=errors)
+    return {
+        "text": redact.redact_text(text, root=REPO_ROOT),
+        "generatedAt": generated,
+        "errorLines": len(errors),
+        "files": log_files(),
+        "bytes": len(text.encode("utf-8")),
+    }
 
 
 def export_report(*, error_lines: int = 200) -> dict[str, Any]:

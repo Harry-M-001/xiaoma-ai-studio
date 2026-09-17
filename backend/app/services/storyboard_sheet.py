@@ -42,6 +42,10 @@ _SHOT_NO = re.compile(r"(?:镜头|镜|shot)\s*([0-9]{1,3}[A-Za-z\-]*)", re.I)
 # 「标题里有没有镜头/镜号」的判定
 _SHOT_TITLE = re.compile(r"(镜头|镜号|\bshot\b)", re.I)
 
+# 场景标题：`## 场景2 | 黄昏的花园` / `### 第二幕`
+_SCENE_TITLE = re.compile(r"(场景|幕|\bscene\b|\bact\b)", re.I)
+_SCENE_NO = re.compile(r"(?:场景|幕|scene|act)\s*([0-9]{1,2})", re.I)
+
 # 字段名归一：五花八门的写法 → 内部键
 _FIELD_ALIASES = {
     "画面": "scene", "画面描述": "scene", "内容": "scene", "镜头内容": "scene",
@@ -51,6 +55,9 @@ _FIELD_ALIASES = {
     "台词": "dialogue", "对白": "dialogue", "dialogue": "dialogue",
     "情绪外化": "emotion", "情绪": "emotion", "emotion": "emotion",
     "约束": "constraints", "限制": "constraints", "注意事项": "constraints",
+    # 模型偶尔会额外给一段给生视频用的提示词，有就用它
+    "视频提示词": "video_hint", "生视频提示词": "video_hint", "运动提示词": "video_hint",
+    "运镜提示词": "video_hint", "video prompt": "video_hint", "motion": "video_hint",
 }
 
 # 备选字段名（按优先级取第一个非空的）
@@ -73,6 +80,11 @@ class Shot:
     emotion: str = ""
     first_frame: str = ""
     constraints: str = ""
+    # 所属场景：分镜表里写了「场景」标题时才有值，没写就是空（整表当一个场景）
+    scene_no: str = ""
+    scene_title: str = ""
+    # 可选：模型自己写了给生视频用的提示词时优先用它
+    video_hint: str = ""
 
     @property
     def label(self) -> str:
@@ -91,6 +103,42 @@ class Shot:
     def image_prompt(self) -> str:
         """生图提示词：优先英文首帧提示词，没有就退回画面描述。"""
         return self.first_frame or self.scene
+
+    @property
+    def video_prompt(self) -> str:
+        """生视频提示词。
+
+        分镜表一般只有「首帧提示词」（那是给生图用的），没有给生视频的。
+        而生视频真正要的是**动作**，正好写在「画面」里，运镜则决定镜头怎么动。
+        所以这里按「画面 + 运镜 + 情绪 + 约束」拼一句，语言统一（都用中文，
+        避免一半英文一半中文让模型左右为难）；模型确实写了「视频提示词」时优先用它。
+        """
+        if self.video_hint:
+            return self.video_hint
+        parts: list[str] = [self.scene or self.first_frame]
+        if self.move:
+            parts.append(f"镜头运动：{self.move}")
+        if self.emotion:
+            parts.append(f"情绪：{self.emotion}")
+        if self.constraints:
+            parts.append(self.constraints)
+        return "，".join(p for p in parts if p)
+
+    @property
+    def duration_seconds(self) -> int:
+        """从「约 4 秒」「4s」「3.5s」里取秒数；取不到或离谱就返回 0（由节点设置兜底）。
+
+        数字两侧加了边界：否则 `[0-9]{1,2}` 会把「120s」截成 12，
+        于是明显写错的时长反而被当成合法值用了出去。
+        """
+        m = re.search(r"(?<![0-9.])([0-9]{1,3}(?:\.[0-9])?)(?![0-9])", self.duration or "")
+        if not m:
+            return 0
+        try:
+            value = int(round(float(m.group(1))))
+        except ValueError:
+            return 0
+        return value if 1 <= value <= 30 else 0
 
 
 def _clean(text: str) -> str:
@@ -157,24 +205,49 @@ def _fields(lines: list[str]) -> dict[str, str]:
     return found
 
 
+def _split_scene(heading: str) -> tuple[str, str]:
+    """`场景2 | 黄昏的花园` → (`2`, `黄昏的花园`)。
+
+    取不到编号时用整行标题当 key：同名的场景仍然会归到一组，不会散掉。
+    """
+    m = _SCENE_NO.search(heading)
+    parts = [_clean(p) for p in heading.split("|")]
+    title = parts[1] if len(parts) > 1 else ""
+    return (m.group(1) if m else _clean(heading)), title
+
+
 def parse_storyboard(text: str) -> list[Shot]:
-    """解析分镜表；按出现顺序返回，最多 MAX_SHOTS 个。"""
+    """解析分镜表；按出现顺序返回，最多 MAX_SHOTS 个。
+
+    顺序遍历而不是「先筛出镜头块」：场景标题要用来给后面的镜头分组，
+    先筛会把它们之间的位置关系丢掉。
+    """
     blocks = _blocks(text)
     if not blocks:
         return []
 
-    shot_blocks = [(h, b) for h, b in blocks if _SHOT_TITLE.search(h)]
-    # 一个「镜头」标题都没有时退一步：把每个标题块都当一个镜头（模型换了别的写法）
-    chosen = shot_blocks or [(h, b) for h, b in blocks]
+    has_shot_titles = any(_SHOT_TITLE.search(h) for h, _ in blocks)
 
     shots: list[Shot] = []
-    for heading, body in chosen:
+    scene_no = ""
+    scene_title = ""
+    for heading, body in blocks:
+        # 场景标题：只切换当前场景，本身不是镜头
+        if _SCENE_TITLE.search(heading) and not _SHOT_TITLE.search(heading):
+            scene_no, scene_title = _split_scene(heading)
+            continue
+        # 有镜头标题时，其它非镜头块（前言、小结之类）直接跳过；
+        # 一个镜头标题都没有时退一步：把每个标题块都当一个镜头（模型换了别的写法）
+        if has_shot_titles and not _SHOT_TITLE.search(heading):
+            continue
         if any(w in heading for w in _SKIP_TITLE_WORDS):
             continue
+
         fields = _fields(body)
         scene = fields.get("scene", "")
         first_frame = next((fields[k] for k in _FIRST_FRAME_KEYS if fields.get(k)), "")
-        if not scene and not first_frame:
+        video_hint = fields.get("video_hint", "")
+        if not scene and not first_frame and not video_hint:
             continue
         no, size, move, duration = _split_heading(heading)
         if not no:
@@ -191,6 +264,9 @@ def parse_storyboard(text: str) -> list[Shot]:
                 emotion=fields.get("emotion", ""),
                 first_frame=first_frame,
                 constraints=fields.get("constraints", ""),
+                scene_no=scene_no,
+                scene_title=scene_title,
+                video_hint=video_hint,
             )
         )
         if len(shots) >= MAX_SHOTS:
