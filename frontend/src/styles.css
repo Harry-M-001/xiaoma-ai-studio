@@ -838,6 +838,9 @@ input, textarea, select { font-family: inherit; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin-ic { animation: spin 0.9s linear infinite; }
 
+/* 弹窗外壳（Dialog）：打开时焦点会被程序化移进来，这圈轮廓不是给用户看的 */
+.dlg-shell:focus { outline: none; }
+
 .progress { height: 6px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
 .progress-bar { height: 100%; background: var(--primary-grad); border-radius: 999px; transition: width .4s; }
 
@@ -1145,7 +1148,9 @@ input, textarea, select { font-family: inherit; }
 
 /* ============ Lightbox / 登录 ============ */
 
-.lightbox { position: fixed; inset: 0; z-index: 150; background: rgba(8,9,12,.88); display: flex; flex-direction: column; }
+/* 遮罩本身只负责盖住页面；列布局交给内层（Dialog 外壳是它唯一的子元素） */
+.lightbox { position: fixed; inset: 0; z-index: 150; background: rgba(8,9,12,.88); display: flex; }
+.lightbox-inner { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .lightbox-media { flex: 1; display: grid; place-items: center; padding: 40px; min-height: 0; }
 .lightbox-media img, .lightbox-media video { max-width: 100%; max-height: 100%; border-radius: var(--radius); box-shadow: var(--shadow-lg); }
 .lightbox-bar { padding: 14px 24px; display: flex; justify-content: flex-end; gap: 10px; }

@@ -64,6 +64,7 @@ import type {
   StyleOption,
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
+import { Dialog } from "../components/Dialog";
 import { useToast } from "../components/Toast";
 import { prefs } from "../prefs";
 // 自动链的拓扑与铺链逻辑在 canvasChain.ts：示例模板要用同一套形状，
@@ -436,8 +437,12 @@ function DocEditorDialog({
   const [text, setText] = useState(req.text);
   const dirty = text !== req.text;
   return (
-    <div className="canvas-dialog-mask" onMouseDown={onClose}>
-      <div className="canvas-dialog wide" onMouseDown={(e) => e.stopPropagation()}>
+    <Dialog
+      onClose={onClose}
+      label={`${req.label} · 正文`}
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog wide"
+    >
         <div className="canvas-dialog-head">
           <span className="canvas-dialog-title">
             {req.label} · 正文
@@ -472,8 +477,7 @@ function DocEditorDialog({
             保存到节点
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -596,8 +600,12 @@ function ShareDialog({
   );
 
   return (
-    <div className="canvas-dialog-mask" onMouseDown={onClose}>
-      <div className="canvas-dialog agent" onMouseDown={(e) => e.stopPropagation()}>
+    <Dialog
+      onClose={onClose}
+      label="分享画布"
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog agent"
+    >
         <div className="canvas-dialog-head">
           <span className="canvas-dialog-title">分享画布</span>
           <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
@@ -778,8 +786,7 @@ function ShareDialog({
             )
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -911,8 +918,12 @@ function AgentDialog({
   const ok = draft?.status === "ok";
 
   return (
-    <div className="canvas-dialog-mask" onMouseDown={onClose}>
-      <div className="canvas-dialog agent" onMouseDown={(e) => e.stopPropagation()}>
+    <Dialog
+      onClose={onClose}
+      label="AI 搭画布"
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog agent"
+    >
         <div className="canvas-dialog-head">
           <span className="canvas-dialog-title">AI 搭画布</span>
           <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
@@ -1010,8 +1021,7 @@ function AgentDialog({
             </button>
           )}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -1061,8 +1071,12 @@ function RunConfirmDialog({
   });
 
   return (
-    <div className="canvas-dialog-mask" onMouseDown={onClose}>
-      <div className="canvas-dialog run-confirm" onMouseDown={(e) => e.stopPropagation()}>
+    <Dialog
+      onClose={onClose}
+      label="运行整图 · 先看一眼花费"
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog run-confirm"
+    >
         <div className="canvas-dialog-head">
           <span className="canvas-dialog-title">运行整图 · 先看一眼花费</span>
           <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
@@ -1128,8 +1142,7 @@ function RunConfirmDialog({
             开始运行
           </button>
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -1940,8 +1953,12 @@ function AssetPickerDialog({
   };
 
   return (
-    <div className="canvas-dialog-mask" onMouseDown={onClose}>
-      <div className="canvas-dialog" onMouseDown={(e) => e.stopPropagation()}>
+    <Dialog
+      onClose={onClose}
+      label={single ? `选择${slot === "first" ? "首帧" : "尾帧"}图片` : "从资产库选择参考（可多选）"}
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog"
+    >
         <div className="canvas-dialog-head">
           <span className="canvas-dialog-title">
             {single
@@ -1994,8 +2011,7 @@ function AssetPickerDialog({
             </button>
           </div>
         )}
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -2980,8 +2996,12 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
         )}
 
         {lightbox && (
-          <div className="canvas-lightbox" onMouseDown={() => setLightbox(null)}>
-            <div className="canvas-lightbox-body" onMouseDown={(e) => e.stopPropagation()}>
+          <Dialog
+            onClose={() => setLightbox(null)}
+            label={lightbox.title}
+            maskClassName="canvas-lightbox"
+            className="canvas-lightbox-body"
+          >
               {lightbox.kind === "video" ? (
                 <video src={lightbox.url} controls autoPlay />
               ) : (
@@ -2997,8 +3017,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
               <button type="button" className="canvas-dialog-close" onClick={() => setLightbox(null)}>
                 <X size={16} />
               </button>
-            </div>
-          </div>
+          </Dialog>
         )}
       </PanelCtx.Provider>
     </div>

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { X, Download } from "lucide-react";
+import { Dialog } from "./Dialog";
 
 export default function Lightbox({
   url,
@@ -34,7 +35,12 @@ export default function Lightbox({
   }, [isDoc, url]);
 
   return (
-    <div className="lightbox" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    <Dialog
+      onClose={onClose}
+      label={isDoc ? "文稿预览" : kind === "video" ? "视频预览" : "图片预览"}
+      maskClassName="lightbox"
+      className="lightbox-inner"
+    >
       <div className="lightbox-bar">
         {downloadUrl && (
           <a className="btn btn-ghost btn-sm" href={downloadUrl} download>
@@ -56,6 +62,6 @@ export default function Lightbox({
           <img src={url} alt="预览" />
         )}
       </div>
-    </div>
+    </Dialog>
   );
 }
