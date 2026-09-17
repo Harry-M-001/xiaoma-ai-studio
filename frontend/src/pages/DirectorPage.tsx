@@ -43,6 +43,8 @@ export default function DirectorPage({ onNavigate }: { onNavigate: (route: strin
   const [extracting, setExtracting] = useState(false);
   const [merging, setMerging] = useState(false);
   const [merged, setMerged] = useState<Asset | null>(null);
+  // 正在截首帧的片段 id（AI 改造要先截一帧才能交给视频页）
+  const [remaking, setRemaking] = useState<number | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -113,9 +115,26 @@ export default function DirectorPage({ onNavigate }: { onNavigate: (route: strin
 
   const removeClip = (idx: number) => setClips((prev) => prev.filter((_, i) => i !== idx));
 
-  const aiRemake = (clip: Asset) => {
-    setDraftFirstFrame({ id: clip.id, url: clip.url });
-    onNavigate("video");
+  /**
+   * 导演台 → 视频生成（图生视频）。
+   *
+   * 这里手上是**视频片段**，而生成接口的首帧必须是图片：
+   * 直接把片段的 id 当首帧带过去，要到参数填完、点下生成之后才被后端挡下
+   * （「首帧图片不存在或不是图片」）——用户会以为是模型的问题。
+   * 所以先在本机截一帧（t=0，就是这段的起点）存成图片资产，再把它带过去。
+   */
+  const aiRemake = async (clip: Asset) => {
+    setRemaking(clip.id);
+    try {
+      const frame = await api.extractThumbnail(clip.id, 0);
+      setDraftFirstFrame({ id: frame.id, url: frame.url });
+      toast.success("已取这段的首帧，去视频页接着做");
+      onNavigate("video");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "截取首帧失败");
+    } finally {
+      setRemaking(null);
+    }
   };
 
   const doMerge = async () => {
@@ -294,8 +313,13 @@ export default function DirectorPage({ onNavigate }: { onNavigate: (route: strin
                       >
                         <ArrowDown size={14} />
                       </button>
-                      <button className="icon-btn" title="AI 改造（图生视频）" onClick={() => aiRemake(c)}>
-                        <Wand2 size={14} />
+                      <button
+                        className="icon-btn"
+                        title="AI 改造：取这段的首帧，去视频页做图生视频"
+                        disabled={remaking !== null}
+                        onClick={() => aiRemake(c)}
+                      >
+                        {remaking === c.id ? <Spinner /> : <Wand2 size={14} />}
                       </button>
                       <button className="icon-btn" title="移除" onClick={() => removeClip(i)}>
                         <X size={14} />

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import SessionLocal
 from app.models import Asset
 from app.schemas import AssetOut, DirectorExtractIn, DirectorMergeIn, DirectorProbeIn, DirectorThumbnailIn
-from app.services import ffmpeg_service, storage
+from app.services import ffmpeg_service, image_size, storage
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +147,13 @@ async def extract_clip(
         raise HTTPException(status_code=500, detail=str(e))
 
     rel = ffmpeg_service._save_asset_file(out_path, "mp4")
+    # 源视频没记宽高时（v1.1.7 之前入库的都在此列）去问一次产物：
+    # 与截帧同一处口径——不照抄可能为空的来源，否则这段的分辨率一路是空的。
+    width, height = a.width, a.height
+    if not width or not height:
+        meta = await ffmpeg_service.probe(storage.abs_path(rel))
+        width = meta.get("width") or width
+        height = meta.get("height") or height
     asset = Asset(
         kind="video",
         filename=rel,
@@ -154,8 +161,10 @@ async def extract_clip(
         content_type="video/mp4",
         size=out_path.stat().st_size,
         source="clip",
-        width=a.width,
-        height=a.height,
+        width=width,
+        height=height,
+        # 时长仍按用户点的区间算：probe 出来的是编码后的实际长度（9.98 之类），
+        # 拿它取整会让「截了 10 秒」显示成 9 秒
         duration=int(payload.end - payload.start),
     )
     db.add(asset)
@@ -175,6 +184,9 @@ async def extract_thumbnail(
         raise HTTPException(status_code=500, detail=str(e))
 
     rel = ffmpeg_service._save_asset_file(out_path, "jpg")
+    # 帧的尺寸以文件为准：照抄视频资产的宽高会踩两个坑——老视频根本没记宽高
+    # （于是截出来的图也没宽高），而下游的首帧预检读不到尺寸就**静默不提醒**。
+    picked = image_size.read_image_size_from_file(storage.abs_path(rel))
     asset = Asset(
         kind="image",
         filename=rel,
@@ -182,8 +194,8 @@ async def extract_thumbnail(
         content_type="image/jpeg",
         size=out_path.stat().st_size,
         source="frame",
-        width=a.width,
-        height=a.height,
+        width=picked[0] if picked else a.width,
+        height=picked[1] if picked else a.height,
     )
     db.add(asset)
     await db.commit()
