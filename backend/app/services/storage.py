@@ -25,6 +25,22 @@ def _ext(content_type: str, fallback: str = "bin") -> str:
     return _EXT_BY_CT.get((content_type or "").lower(), fallback)
 
 
+def image_size_kwargs(data: bytes, content_type: str = "") -> dict[str, int]:
+    """给 `Asset(...)` 用的宽高参数；不是图片或读不出来就返回空字典。
+
+    宽高不是装饰性字段：图生视频前要拿首帧的比例与分辨率去跟所选画幅对帐
+    （见 `preflight`），读不到就只能闭嘴不提醒。所以**每个存图片的地方都带上它**——
+    放在这里是为了别让五六个调用点各写一遍再慢慢漂移。
+    视频的宽高归 ffprobe 管（见 `director`），这里不碰。
+    """
+    from app.services.image_size import read_image_size
+
+    size = read_image_size(data, content_type)
+    if size is None:
+        return {}
+    return {"width": size[0], "height": size[1]}
+
+
 def reveal_in_file_manager(path: Path) -> bool:
     """在系统文件管理器里定位到该文件，返回是否成功唤起。
 

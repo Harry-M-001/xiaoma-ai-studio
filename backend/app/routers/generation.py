@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clock import utcnow
 from app.config import settings
 from app.database import SessionLocal
 from app.deps import require_auth
@@ -19,12 +19,17 @@ from app.schemas import (
     AssetList,
     AssetOut,
     ImageBatchGenerateIn,
+    ImageBatchPreflightIn,
     ImageGenerateIn,
+    ImagePreflightIn,
+    PreflightOut,
+    PreflightWarningOut,
     TaskOut,
     TaskRetryIn,
     VideoGenerateIn,
+    VideoPreflightIn,
 )
-from app.services import log_service, option_service, storage
+from app.services import log_service, option_service, preflight, storage
 from app.services.runner import runner
 
 router = APIRouter(prefix="/api", tags=["generation"], dependencies=[Depends(require_auth)])
@@ -110,6 +115,53 @@ def _asset_to_out(a: Asset) -> AssetOut:
     )
 
 
+# ---------- 生成前软校验 ----------
+
+def _to_preflight_out(report: preflight.Report) -> PreflightOut:
+    return PreflightOut(
+        warnings=[
+            PreflightWarningOut(
+                code=w.code, level=w.level, message=w.message, suggestion=w.suggestion
+            )
+            for w in report.warnings
+        ]
+    )
+
+
+@router.post("/images/preflight", response_model=PreflightOut)
+async def preflight_images(
+    payload: ImagePreflightIn, db: AsyncSession = Depends(get_db)
+) -> PreflightOut:
+    """生图前预检。只回告警，永远不拦人（blocking 恒为 False）。"""
+    report = await preflight.check_image(
+        db, prompt=payload.prompt, model_key=payload.model_key, n=payload.n,
+        ref_asset_ids=payload.ref_asset_ids,
+    )
+    return _to_preflight_out(report)
+
+
+@router.post("/images/batch/preflight", response_model=PreflightOut)
+async def preflight_image_batch(
+    payload: ImageBatchPreflightIn, db: AsyncSession = Depends(get_db)
+) -> PreflightOut:
+    report = await preflight.check_image_batch(
+        db, prompts=payload.prompts, model_keys=payload.model_keys, n=payload.n
+    )
+    return _to_preflight_out(report)
+
+
+@router.post("/videos/preflight", response_model=PreflightOut)
+async def preflight_videos(
+    payload: VideoPreflightIn, db: AsyncSession = Depends(get_db)
+) -> PreflightOut:
+    report = await preflight.check_video(
+        db, prompt=payload.prompt, model_key=payload.model_key,
+        first_frame_asset_id=payload.first_frame_asset_id,
+        ratio=payload.ratio, resolution=payload.resolution,
+    )
+    return _to_preflight_out(report)
+
+
 # ---------- 图片 ----------
 
 @router.post("/images/generations", response_model=TaskOut)
@@ -143,7 +195,7 @@ async def generate_images(
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    runner.start_image(task.id)
+    await runner.start_or_fail("image", task.id)
     return await _task_to_out(db, task)
 
 
@@ -199,7 +251,7 @@ async def batch_generate_images(
     await db.commit()
     for t in created:
         await db.refresh(t)
-        runner.start_image(t.id)
+        await runner.start_or_fail(t.kind, t.id)
     return [await _task_to_out(db, t) for t in created]
 
 
@@ -243,7 +295,7 @@ async def generate_videos(
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    runner.start_video(task.id)
+    await runner.start_or_fail("video", task.id)
     return await _task_to_out(db, task)
 
 
@@ -288,7 +340,9 @@ async def cancel_task(task_id: int, db: AsyncSession = Depends(get_db)) -> TaskO
     if task.status in ("pending", "processing"):
         task.status = "cancelled"
         task.error = "已手动取消"
-        task.completed_at = datetime.now()
+        # 与 runner 用同一个时钟：created_at 是库里写的 UTC，这里也必须写 UTC，
+        # 否则同一行两个时间列会差出一个时区
+        task.completed_at = utcnow()
         await db.commit()
     return await _task_to_out(db, task)
 
@@ -335,7 +389,7 @@ async def retry_task(
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    _dispatch_task(task)
+    await runner.start_or_fail(task.kind, task.id)
     return await _task_to_out(db, task)
 
 
@@ -364,22 +418,6 @@ async def reveal_task(task_id: int, db: AsyncSession = Depends(get_db)) -> dict:
         "path": str(target.parent),
         "name": target.name,
     }
-
-
-def _dispatch_task(task: Task) -> None:
-    """按任务类型交给对应的执行通道。
-
-    重跑时也必须按类型走：早先这里写死了图片通道，工作流与文档任务一旦重跑
-    就会被当成图片任务，报错还看不出真正原因。
-    """
-    if task.kind == "video":
-        runner.start_video(task.id)
-    elif task.kind == "workflow":
-        runner.start_comfy(task.id)
-    elif task.kind == "text":
-        runner.start_text(task.id)
-    else:
-        runner.start_image(task.id)
 
 
 @router.delete("/tasks/{task_id}")
@@ -441,6 +479,8 @@ async def upload_asset(
         content_type=ct,
         size=len(content),
         source="uploaded",
+        # 顺手记下宽高：图生视频前要用首帧比例跟画幅对帐
+        **storage.image_size_kwargs(content, ct),
     )
     db.add(asset)
     await db.commit()

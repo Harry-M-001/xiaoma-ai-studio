@@ -58,6 +58,7 @@ import type {
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
+import { prefs } from "../prefs";
 // 自动链的拓扑与铺链逻辑在 canvasChain.ts：示例模板要用同一套形状，
 // 抽出去之后两边不会各自漂移。
 import {
@@ -1364,38 +1365,21 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [savedTick, setSavedTick] = useState(0);
   const [running, setRunning] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [paletteOpen, setPaletteOpen] = useState(() => {
-    try {
-      return localStorage.getItem("xm_canvas_palette") !== "0";
-    } catch {
-      return true;
-    }
-  });
-  // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）
-  const [chainLevel, setChainLevel] = useState<string>(() => {
-    try {
-      return localStorage.getItem("xm_canvas_chain_level") || CHAIN_LEVELS[0].key;
-    } catch {
-      return CHAIN_LEVELS[0].key;
-    }
-  });
+  const [paletteOpen, setPaletteOpen] = useState(() => prefs.paletteOpen.get() ?? true);
+  // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）。
+  // 只认当前版本真实存在的档位——老版本的 key 可能已经没了
+  const [chainLevel, setChainLevel] = useState<string>(
+    () => prefs.chainLevel.get(CHAIN_LEVELS.map((l) => l.key)) ?? CHAIN_LEVELS[0].key,
+  );
 
   const pickChainLevel = useCallback((key: string) => {
     setChainLevel(key);
-    try {
-      localStorage.setItem("xm_canvas_chain_level", key);
-    } catch {
-      /* localStorage 不可用忽略 */
-    }
+    prefs.chainLevel.set(key);
   }, []);
 
   const togglePalette = useCallback((open: boolean) => {
     setPaletteOpen(open);
-    try {
-      localStorage.setItem("xm_canvas_palette", open ? "1" : "0");
-    } catch {
-      /* localStorage 不可用忽略 */
-    }
+    prefs.paletteOpen.set(open);
   }, []);
 
   // 输入框聚焦时按 Backspace/Delete 不冒泡到 ReactFlow，防误删节点
@@ -1812,21 +1796,10 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
   // 产物缩略图大小（用户拖一次就记住，跟 Toonflow 的分镜网格一个思路）
   // 默认值要落在滑杆的步进网格上（56 + n*8），否则滑杆显示会与初值不一致
-  const [thumb, setThumb] = useState(() => {
-    try {
-      const v = Number(localStorage.getItem("xm_canvas_thumb"));
-      return v >= 56 && v <= 176 ? v : 88;
-    } catch {
-      return 88;
-    }
-  });
+  const [thumb, setThumb] = useState(() => prefs.thumbSize.get());
   const pickThumb = useCallback((v: number) => {
     setThumb(v);
-    try {
-      localStorage.setItem("xm_canvas_thumb", String(v));
-    } catch {
-      /* localStorage 不可用忽略 */
-    }
+    prefs.thumbSize.set(v);
   }, []);
 
   const openPicker = useCallback(

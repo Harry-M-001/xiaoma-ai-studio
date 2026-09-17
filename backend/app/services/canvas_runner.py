@@ -955,18 +955,6 @@ async def _build_node_tasks(
     ]
 
 
-def _dispatch(task: Task) -> None:
-    """按任务类型交给对应的执行通道。"""
-    if task.kind == "video":
-        runner.start_video(task.id)
-    elif task.kind == "workflow":
-        runner.start_comfy(task.id)
-    elif task.kind == "text":
-        runner.start_text(task.id)
-    else:
-        runner.start_image(task.id)
-
-
 async def run_single_node(project_id: int, node_id: str) -> list[Task]:
     """运行单个节点：上游取最近成功产物，缺产物直接报错。
 
@@ -993,7 +981,8 @@ async def run_single_node(project_id: int, node_id: str) -> list[Task]:
         tasks = await _build_node_tasks(db, project_id, doc, node, upstream)
 
     for task in tasks:
-        _dispatch(task)
+        # 队列满时由 runner 把这条任务标失败并写明原因（提示口径统一在 runner 里）
+        await runner.start_or_fail(task.kind, task.id)
     return tasks
 
 
@@ -1032,7 +1021,7 @@ async def _run_full_graph(project_id: int) -> None:
                 continue
 
         for task in tasks:
-            _dispatch(task)
+            await runner.start_or_fail(task.kind, task.id)
 
         # 轮询等待整批完成（runner 异步推进）
         # 资产设定图一批可能有二十几个任务，等待预算要按任务数放宽，

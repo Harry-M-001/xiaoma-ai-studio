@@ -6,7 +6,10 @@ import type {
   ChatMessage,
   ChatSession,
   ComfyWorkflow,
+  ConfigImportResult,
   ConfigMap,
+  ConfigScopesMeta,
+  ConfigSnapshot,
   LogExport,
   LogsStatus,
   ModalityMeta,
@@ -14,6 +17,7 @@ import type {
   ModelSpec,
   NavMeta,
   ParamOptionItem,
+  PreflightResult,
   PromptItem,
   Provider,
   ProviderInput,
@@ -160,6 +164,24 @@ export const api = {
     ratio: string;
     resolution: string;
   }) => request<Task>("/api/videos/generations", { method: "POST", body: json(payload) }),
+
+  // 生成前软校验：只回告警，永远不拦人（后端 blocking 恒为 false）。
+  // 这三个调用**失败也不该挡住生成**，所以调用点要自己吞掉异常。
+  preflightImage: (payload: {
+    model_key: string;
+    prompt: string;
+    n: number;
+    ref_asset_ids: number[];
+  }) => request<PreflightResult>("/api/images/preflight", { method: "POST", body: json(payload) }),
+  preflightImageBatch: (payload: { prompts: string[]; model_keys: string[]; n: number }) =>
+    request<PreflightResult>("/api/images/batch/preflight", { method: "POST", body: json(payload) }),
+  preflightVideo: (payload: {
+    model_key: string;
+    prompt: string;
+    first_frame_asset_id?: number | null;
+    ratio: string;
+    resolution: string;
+  }) => request<PreflightResult>("/api/videos/preflight", { method: "POST", body: json(payload) }),
 
   listTasks: (kind?: string, limit = 20) =>
     request<Task[]>(`/api/tasks?limit=${limit}${kind ? `&kind=${kind}` : ""}`),
@@ -314,6 +336,20 @@ export const api = {
     request<SchemaRow>(`/api/admin/schema/${table}/rollback/${logId}`, {
       method: "POST",
       body: json({}),
+    }),
+
+  // ---------- 配置导入导出 ----------
+  /** 可用范围 + 固定排除项说明（前端的多选框与「不含 API Key」都由它驱动） */
+  configScopes: () => request<ConfigScopesMeta>("/api/admin/config/scopes"),
+  exportConfig: (scopes: string[]) =>
+    request<ConfigSnapshot>(
+      `/api/admin/config/export?scopes=${encodeURIComponent(scopes.join(","))}`,
+    ),
+  /** dryRun=true 只预览（一行都不写），false 才真正落库 */
+  importConfig: (snapshot: ConfigSnapshot, dryRun: boolean) =>
+    request<ConfigImportResult>(`/api/admin/config/import?dryRun=${dryRun ? "true" : "false"}`, {
+      method: "POST",
+      body: json(snapshot),
     }),
 };
 

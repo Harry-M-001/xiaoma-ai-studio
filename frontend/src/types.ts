@@ -110,6 +110,23 @@ export interface Task {
   retry_of_task_id?: number | null;
 }
 
+/* ---------------- 生成前软校验 ---------------- */
+
+/** 一条软告警。`code` 是稳定标识，文案可以改而前端不受影响。 */
+export interface PreflightWarning {
+  code: string;
+  /** warn = 大概率不是你想要的；info = 只是提醒一下 */
+  level: "warn" | "info";
+  message: string;
+  suggestion: string;
+}
+
+export interface PreflightResult {
+  warnings: PreflightWarning[];
+  /** 恒为 false：预检只告警不阻断。留着是为了前端不必去猜这类接口会不会挡人 */
+  blocking: boolean;
+}
+
 export interface Asset {
   id: number;
   kind: string;
@@ -460,6 +477,85 @@ export interface AuditLog {
   after: Record<string, unknown> | null;
   actor: string;
   created_at: string;
+}
+
+// ---- 配置导入导出 ----
+
+/** 一个导出范围里包含的配置表 */
+export interface ConfigScopeTable {
+  name: string;
+  label: string;
+}
+
+/** 可导出范围（由后端 /api/admin/config/scopes 驱动，后端加范围前端自动出现） */
+export interface ConfigScopeMeta {
+  name: string;
+  label: string;
+  description: string;
+  /** 默认勾选（「用户资产」那一组） */
+  default: boolean;
+  tables: ConfigScopeTable[];
+}
+
+/** 固定排除项：哪个字段、为什么不带走 */
+export interface ConfigExclusion {
+  table: string;
+  field: string;
+  reason: string;
+}
+
+/** 导出的 JSON 快照（也是导入接口的请求体） */
+export interface ConfigSnapshot {
+  format: string;
+  schemaVersion: number;
+  appVersion: string;
+  exportedAt: string;
+  scopes: string[];
+  tables: Record<string, Record<string, unknown>[]>;
+  excluded: ConfigExclusion[];
+  warnings: string[];
+  notes: string[];
+  /** 恒为 false —— 快照里不含任何密钥 */
+  containsSecrets: boolean;
+  /** 仅导入时带：目前只支持 merge */
+  mode?: string;
+}
+
+export interface ConfigScopesMeta {
+  format: string;
+  schemaVersion: number;
+  scopes: ConfigScopeMeta[];
+  defaultScopes: string[];
+  excluded: ConfigExclusion[];
+  containsSecrets: boolean;
+  notes: string[];
+}
+
+export interface ConfigImportCounts {
+  created: number;
+  updated: number;
+  skipped: number;
+}
+
+/** 被拒收的一行（脏数据、带密钥、标识重复…），reason 可直接展示 */
+export interface ConfigImportConflict {
+  table: string;
+  row: number | null;
+  identity: string;
+  reason: string;
+}
+
+export interface ConfigImportResult {
+  ok: boolean;
+  dryRun: boolean;
+  mode: string;
+  scopes: string[];
+  source: { format: string; schemaVersion: number; appVersion: string; exportedAt: string };
+  summary: Record<string, ConfigImportCounts>;
+  totals: ConfigImportCounts;
+  conflicts: ConfigImportConflict[];
+  warnings: string[];
+  notes: string[];
 }
 
 // ---- 在线更新 ----

@@ -1,44 +1,27 @@
 /**
- * 提示词草稿传递：提示词库页面把模板内容暂存到 localStorage，
- * 目标创作页挂载时取走并填入输入框。页面切换会卸载重挂，因此取走即删即可。
+ * 提示词草稿传递：提示词库页面把模板内容暂存下来，
+ * 目标创作页挂载时取走并填入输入框（页面切换会卸载重挂，所以取走即删）。
+ *
+ * 真正的存取在 `prefs.ts` 里——前端所有 localStorage 读写都收口在那一个文件，
+ * 这样「脏数据降级」只需要在一处保证。这里只留一层类型化的小包装，保持调用点可读。
  */
-const KEY = "xm_draft_prompt";
+import { prefs } from "./prefs";
 
 export type DraftTarget = "chat" | "image" | "video";
 
 export function setDraftPrompt(target: DraftTarget, text: string): void {
-  localStorage.setItem(KEY, JSON.stringify({ target, text }));
+  prefs.draftPrompt.set(target, text);
 }
 
 export function consumeDraftPrompt(target: DraftTarget): string | null {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return null;
-    const draft = JSON.parse(raw) as { target?: string; text?: unknown };
-    if (draft.target !== target || typeof draft.text !== "string") return null;
-    localStorage.removeItem(KEY);
-    return draft.text;
-  } catch {
-    return null;
-  }
+  return prefs.draftPrompt.take(target);
 }
 
 /** 导演台 → 视频生成：把片段作为图生视频的首帧带过去 */
-const FF_KEY = "xm_draft_first_frame";
-
 export function setDraftFirstFrame(asset: { id: number; url: string }): void {
-  localStorage.setItem(FF_KEY, JSON.stringify(asset));
+  prefs.draftFirstFrame.set(asset);
 }
 
 export function consumeDraftFirstFrame(): { id: number; url: string } | null {
-  try {
-    const raw = localStorage.getItem(FF_KEY);
-    if (!raw) return null;
-    localStorage.removeItem(FF_KEY);
-    const d = JSON.parse(raw) as { id?: number; url?: string };
-    if (typeof d.id !== "number" || typeof d.url !== "string") return null;
-    return { id: d.id, url: d.url };
-  } catch {
-    return null;
-  }
+  return prefs.draftFirstFrame.take();
 }

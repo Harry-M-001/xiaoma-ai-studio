@@ -6,6 +6,7 @@ import SetupBanner from "./components/SetupBanner";
 import { ToastProvider } from "./components/Toast";
 import { Empty } from "./components/common";
 import { api, authToken, cfgBool, cfgString } from "./api";
+import { prefs } from "./prefs";
 import type { AppInfo, ConfigMap, NavMeta } from "./types";
 import ChatPage from "./pages/ChatPage";
 import ImagePage from "./pages/ImagePage";
@@ -72,15 +73,16 @@ function Placeholder({ title, desc }: { title: string; desc: string }) {
 }
 
 function getInitialTheme(): Theme {
-  const saved = localStorage.getItem("xm_theme");
-  if (saved === "dark" || saved === "light") return saved;
+  // 合法化统一在 prefs 里做：非法值会被丢掉并回到系统偏好
+  const saved = prefs.theme.get();
+  if (saved) return saved;
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function Shell() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [route, setRoute] = useState<RouteKey>("home");
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("xm_sidebar_collapsed") === "1");
+  const [collapsed, setCollapsed] = useState(() => prefs.sidebarCollapsed.get() ?? false);
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [config, setConfig] = useState<ConfigMap>(DEFAULT_CONFIG);
   const [nav, setNav] = useState<NavMeta[]>([]);
@@ -90,11 +92,11 @@ function Shell() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem("xm_theme", theme);
+    prefs.theme.set(theme);
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("xm_sidebar_collapsed", collapsed ? "1" : "0");
+    prefs.sidebarCollapsed.set(collapsed);
   }, [collapsed]);
 
   // 站点配置与导航菜单：系统设置保存后也会调用它即时刷新

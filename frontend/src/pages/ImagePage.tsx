@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ImagePlus, Images, Settings, Sparkles, Upload, X } from "lucide-react";
 import { api, cfgBool, cfgNumber, cfgString } from "../api";
 import { consumeDraftPrompt } from "../promptDraft";
-import type { Asset, ConfigMap, ModelOption, ParamOptionItem, Task } from "../types";
+import type { Asset, ConfigMap, ModelOption, ParamOptionItem, PreflightWarning, Task } from "../types";
 import { Empty, Modal, ModelSelect, Spinner, isRunning } from "../components/common";
+import { PreflightNotice, runPreflight } from "../components/PreflightNotice";
 import { useToast } from "../components/Toast";
+import { prefs } from "../prefs";
 import TaskCard from "../components/TaskCard";
 import Lightbox from "../components/Lightbox";
 
@@ -27,7 +29,7 @@ type RefAsset = { id: number; url: string };
 export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }) {
   const toast = useToast();
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [modelKey, setModelKey] = useState(localStorage.getItem("xm_model_image") || "");
+  const [modelKey, setModelKey] = useState("");
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState("1024x1024");
   const [n, setN] = useState(1);
@@ -38,6 +40,9 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmGen, setConfirmGen] = useState(true);
+  // 生成前的软告警：只展示，不改变能不能提交
+  const [warnings, setWarnings] = useState<PreflightWarning[]>([]);
+  const [checking, setChecking] = useState(false);
   const [mode, setMode] = useState<"single" | "batch">("single");
   const [batchText, setBatchText] = useState("");
   const [batchModels, setBatchModels] = useState<string[]>([]);
@@ -52,6 +57,9 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
       const [ms, ts] = await Promise.all([api.listModels("image"), api.listTasks("image", 12)]);
       setModels(ms);
       setTasks(ts);
+      // 记住的模型可能已经不存在了（服务被删/改名）：合法的沿用，失效的丢掉并退回第一个可用的
+      const keys = ms.map((m) => m.key);
+      setModelKey((prev) => prev || prefs.modelKey.get("image", keys) || keys[0] || "");
     })();
     // 从提示词库「去图片生成」带过来的模板内容
     const draft = consumeDraftPrompt("image");
@@ -80,7 +88,7 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("xm_model_image", modelKey);
+    prefs.modelKey.set("image", modelKey);
   }, [modelKey]);
 
   // 批量模式：每行一条提示词；与选中的模型做笛卡尔积
@@ -122,6 +130,32 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
     }
   };
 
+  /** 提交前先问一句「你这组合可能不是你要的」，但不拦。
+   *
+   * 两条规则：**有告警一定弹窗**（哪怕用户关掉了二次确认——关掉二次确认是想少点一次，
+   * 不是想被蒙着走）；**没告警就按用户原来的设置**（开了二次确认才弹）。
+   */
+  const gate = async () => {
+    // 预检要占一小段网络往返，别让按钮看起来像没反应
+    setChecking(true);
+    try {
+      const found = await runPreflight(() =>
+        mode === "batch"
+          ? api.preflightImageBatch({ prompts: batchPrompts, model_keys: batchModels, n })
+          : api.preflightImage({
+              model_key: modelKey,
+              prompt: prompt.trim(),
+              n,
+              ref_asset_ids: refs.map((r) => r.id),
+            }),
+      );
+      setWarnings(found);
+      return found.length > 0 || confirmGen;
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const submit = async () => {
     if (mode === "batch") {
       if (batchModels.length === 0) {
@@ -136,7 +170,7 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
         toast.error(`批量任务数 ${batchTotal} 超过上限 ${batchMax}，请减少提示词或模型`);
         return;
       }
-      if (confirmGen) {
+      if (await gate()) {
         setConfirming(true);
         return;
       }
@@ -151,7 +185,7 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
       toast.error("请输入画面描述");
       return;
     }
-    if (confirmGen) {
+    if (await gate()) {
       setConfirming(true);
       return;
     }
@@ -327,9 +361,15 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
                 </div>
               ))}
               {refs.length < 4 && (
-                <div className="upload-tile" onClick={() => fileInput.current?.click()} title="上传参考图">
+                // 用 button 而不是带 onClick 的 div：键盘用户也要能上传参考图
+                <button
+                  type="button"
+                  className="upload-tile"
+                  onClick={() => fileInput.current?.click()}
+                  title="上传参考图"
+                >
                   <Upload />
-                </div>
+                </button>
               )}
             </div>
             <input
@@ -346,15 +386,21 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
             <div className="field-hint">部分模型支持参考图（如图生图），不支持时将自动忽略。</div>
           </div>
 
-          <button className="btn btn-primary btn-block" disabled={submitting} onClick={submit}>
-            {submitting ? <Spinner light /> : <Sparkles size={16} />}
+          <button
+            className="btn btn-primary btn-block"
+            disabled={submitting || checking}
+            onClick={submit}
+          >
+            {submitting || checking ? <Spinner light /> : <Sparkles size={16} />}
             {submitting
               ? "提交中…"
-              : mode === "batch"
-                ? batchTotal > 0
-                  ? `批量生成（${batchTotal} 个任务）`
-                  : "批量生成"
-                : "生成图片"}
+              : checking
+                ? "检查中…"
+                : mode === "batch"
+                  ? batchTotal > 0
+                    ? `批量生成（${batchTotal} 个任务）`
+                    : "批量生成"
+                  : "生成图片"}
           </button>
         </div>
 
@@ -396,12 +442,18 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
 
       {confirming && (
         <Modal
-          title={mode === "batch" ? `确认批量生成 ${batchTotal} 个任务？` : "确认生成？"}
+          title={
+            warnings.length > 0
+              ? `生成前有 ${warnings.length} 条提醒`
+              : mode === "batch"
+                ? `确认批量生成 ${batchTotal} 个任务？`
+                : "确认生成？"
+          }
           onClose={() => setConfirming(false)}
           footer={
             <>
               <button className="btn btn-ghost" onClick={() => setConfirming(false)} disabled={submitting}>
-                取消
+                {warnings.length > 0 ? "返回修改" : "取消"}
               </button>
               <button
                 className="btn btn-primary"
@@ -413,11 +465,12 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
                 }}
               >
                 {submitting ? <Spinner light /> : null}
-                确认生成
+                {warnings.length > 0 ? "仍然生成" : "确认生成"}
               </button>
             </>
           }
         >
+          <PreflightNotice warnings={warnings} />
           {mode === "batch" ? (
             <div className="confirm-summary">
               <div className="confirm-row">

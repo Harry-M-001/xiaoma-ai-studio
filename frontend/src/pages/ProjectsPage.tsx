@@ -3,7 +3,7 @@ import { FolderOpen, MoreHorizontal, Pencil, Plus, Sparkles, Trash2 } from "luci
 import { api } from "../api";
 import { createDemoProject } from "../demoProject";
 import type { Project } from "../types";
-import { Empty, Modal, Spinner } from "../components/common";
+import { Empty, formatDate, Modal, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
 export default function ProjectsPage({
@@ -187,7 +187,7 @@ export default function ProjectsPage({
               </div>
               <div className="project-card-desc">{p.description || "暂无描述"}</div>
               <div className="project-card-foot">
-                <span className="muted">更新于 {p.updated_at.slice(0, 10)}</span>
+                <span className="muted">更新于 {formatDate(p.updated_at)}</span>
                 <button className="btn btn-ghost btn-sm" onClick={() => openCanvas(p)}>
                   打开画布
                 </button>

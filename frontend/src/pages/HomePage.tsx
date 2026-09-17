@@ -12,7 +12,7 @@ import {
 import { api } from "../api";
 import { createDemoProject } from "../demoProject";
 import type { Project } from "../types";
-import { Spinner } from "../components/common";
+import { formatDate, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
 type Nav = (r: string) => void;
@@ -144,7 +144,7 @@ export default function HomePage({
               <button key={p.id} className="home-project card" onClick={() => onNavigate("projects")}>
                 <div className="home-project-name">{p.name}</div>
                 <div className="home-project-desc">{p.description || "暂无描述"}</div>
-                <div className="home-project-time muted">{p.updated_at.slice(0, 10)}</div>
+                <div className="home-project-time muted">{formatDate(p.updated_at)}</div>
               </button>
             ))}
           </div>

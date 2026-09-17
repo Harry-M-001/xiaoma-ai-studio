@@ -1,4 +1,4 @@
-"""后台任务执行器：进程内 asyncio 任务 + SQLite 持久化。
+﻿"""后台任务执行器：进程内 asyncio 任务 + SQLite 持久化。
 
 - 图片：同步接口，调用完成即落盘；
 - 视频：提交异步任务后周期轮询，成功下载视频到本地；
@@ -13,12 +13,12 @@ import asyncio
 import json
 import logging
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
 
+from app.clock import utcnow
 from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
 from app.providers.base import AdapterError
@@ -51,12 +51,36 @@ def _concurrency_limit() -> int:
     return max(1, _config_int("limits.task_concurrency", 4))
 
 
+def _queue_limit() -> int:
+    """在册任务的**总数**上限（正在跑的 + 还在排队的）。
+
+    到顶就直接拒绝新任务并给出可照做的提示，**不做无限排队**：
+    用户一口气点下几百个任务时，他真正需要知道的是「已经排了这么多、大概要等很久」，
+    而不是把任务默默收下、让他对着一个不动的进度条猜是不是坏了。
+    上限至少不低于并发数，否则配错成 1 会让整个队列立刻瘫痪。
+    """
+    return max(_concurrency_limit(), _config_int("limits.queue_max_pending", 200))
+
+
+def _queue_full_message() -> str:
+    limit = _queue_limit()
+    return (
+        f"排队中的任务太多了（上限 {limit} 个），这次没有接单。"
+        "请等前面几批跑完再发起；确实要一次跑很多，可以到「系统设置 → 系统配置」"
+        "把「任务并发数」调大（更贵的做法：加大上游配额）或把「排队上限」调高。"
+    )
+
+
 class _ConcurrencyGate:
     """按配置动态限流：每次进入时读取最新配置，设置里改完立即生效。"""
 
     def __init__(self) -> None:
         self._active = 0
         self._cond = asyncio.Condition()
+
+    @property
+    def running(self) -> int:
+        return self._active
 
     async def __aenter__(self) -> "_ConcurrencyGate":
         async with self._cond:
@@ -68,7 +92,9 @@ class _ConcurrencyGate:
     async def __aexit__(self, *exc: object) -> bool:
         async with self._cond:
             self._active = max(0, self._active - 1)
-            self._cond.notify()
+            # 只唤醒一个：notify_all 会让所有等待者同时醒来抢同一把锁（惊群），
+            # 而这里每次释放只腾出一个名额
+            self._cond.notify(1)
         return False
 
 
@@ -88,29 +114,92 @@ class TaskRunner:
 
     # ---------- 对外入口 ----------
 
-    def start_image(self, task_id: int) -> None:
-        self._spawn(task_id, self._run_image(task_id))
+    def start_image(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_image(task_id))
 
-    def start_video(self, task_id: int) -> None:
-        self._spawn(task_id, self._run_video(task_id))
+    def start_video(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_video(task_id))
 
-    def start_comfy(self, task_id: int) -> None:
-        self._spawn(task_id, self._run_comfy(task_id))
+    def start_comfy(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_comfy(task_id))
 
-    def start_text(self, task_id: int) -> None:
-        self._spawn(task_id, self._run_text(task_id))
+    def start_text(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_text(task_id))
 
-    def reattach(self, task_id: int) -> None:
-        self._spawn(task_id, self._poll_video(task_id))
+    def start(self, kind: str, task_id: int) -> bool:
+        """按任务类型投递。两个 dispatch 助手共用这一份分支，免得两处各写一遍再慢慢漂移。"""
+        if kind == "video":
+            return self.start_video(task_id)
+        if kind == "workflow":
+            return self.start_comfy(task_id)
+        if kind == "text":
+            return self.start_text(task_id)
+        return self.start_image(task_id)
 
-    def reattach_comfy(self, task_id: int) -> None:
-        self._spawn(task_id, self._poll_comfy(task_id))
+    async def start_or_fail(self, kind: str, task_id: int) -> bool:
+        """投递；队列满时把这条任务标成失败并写明原因。
 
-    def _spawn(self, task_id: int, coro: Any) -> None:
+        为什么由 runner 统一做：所有投递口（单个生成 / 批量 / 画布 / 重跑）都走这里，
+        提示口径就只有一份；否则「队列满」会表现成任务永远停在排队中，或者每个入口
+        各写一句不一样的话。
+        """
+        if self.start(kind, task_id):
+            return True
+        await self._mark_failed(task_id, AdapterError(_queue_full_message()))
+        return False
+
+    def reattach(self, task_id: int) -> bool:
+        # 恢复轮询不占生成名额：它只是定时问一下上游，不吃我们的算力
+        return self._spawn(task_id, lambda: self._poll_video(task_id))
+
+    def reattach_comfy(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._poll_comfy(task_id))
+
+    def queue_stats(self) -> dict[str, int]:
+        """给界面/健康检查看的队列概况。"""
+        live = len(self._live_jobs())
+        return {
+            "running": self._gate.running,
+            "live": live,
+            "maxLive": _queue_limit(),
+            "concurrency": _concurrency_limit(),
+        }
+
+    def _live_jobs(self) -> list[asyncio.Task]:
+        return [j for j in self._jobs.values() if not j.done()]
+
+    def _forget(self, task_id: int, task: asyncio.Task) -> None:
+        """任务结束后把它从在册表里摘掉。
+
+        早先这张表只增不减：一个跑了几千个任务的实例里，每个任务都会留一个
+        asyncio.Task 对象在那，属于慢性泄漏，也会让「队列里有多少」这个判断失真。
+        """
+        if self._jobs.get(task_id) is task:
+            self._jobs.pop(task_id, None)
+
+    def _spawn(self, task_id: int, factory: Any) -> bool:
+        """投递一个任务。返回 False 表示队列已满、没有收下。
+
+        传的是 `factory`（一个不带参数的函数）而不是现成的协程对象：
+        拒绝时不能留下一个「创建了却没人 await」的协程，那既会打印 RuntimeWarning，
+        也容易被误读成协程泄漏。
+        """
         old = self._jobs.get(task_id)
         if old and not old.done():
             old.cancel()
-        self._jobs[task_id] = asyncio.create_task(self._with_task_logs(task_id, coro))
+        # 先看再建：投递速度再快也不会超卖名额
+        if len(self._live_jobs()) >= _queue_limit():
+            logger.warning(
+                "队列已满（%s 个上限），拒绝任务 %s（当前在跑 %s 个）",
+                _queue_limit(),
+                task_id,
+                self._gate.running,
+            )
+            return False
+        task = asyncio.create_task(self._with_task_logs(task_id, factory()))
+        self._jobs[task_id] = task
+        task.add_done_callback(lambda t, tid=task_id: self._forget(tid, t))
+        return True
 
     async def _with_task_logs(self, task_id: int, coro: Any) -> None:
         """任务执行期间的日志额外留一份在内存，供任务中心展示「这个任务发生了什么」。
@@ -177,11 +266,13 @@ class TaskRunner:
                                 name=asset_name,
                                 category=asset_category,
                                 prompt=task.prompt,
+                                # 出图尺寸是下游图生视频要对帐的依据，必须落库
+                                **storage.image_size_kwargs(blob, "image/png"),
                             )
                         )
                     task.status = "completed"
                     task.progress = 100
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     task.error = None
                     await db.commit()
             except asyncio.CancelledError:
@@ -193,8 +284,14 @@ class TaskRunner:
     # ---------- 视频 ----------
 
     async def _run_video(self, task_id: int) -> None:
-        async with self._gate:
-            try:
+        # 闸机只圈住「提交」这一段。
+        #
+        # 原来 `_poll_video` 是在闸机里调用的，于是一个视频任务会**攥着并发名额等上游出片**——
+        # 可能几十分钟。并发数默认 4，四个视频任务就能把整条队列堵死，
+        # 后面的图片/文本任务全在干等，用户看到的现象是「点了没反应」。
+        # 而等待上游根本不占我们任何资源，不该算进并发成本。
+        try:
+            async with self._gate:
                 async with SessionLocal() as db:
                     task = await db.get(Task, task_id)
                     if task is None or task.status in ("cancelled", "failed"):
@@ -237,12 +334,22 @@ class TaskRunner:
                     task.remote_job_id = remote_id
                     await db.commit()
                     await adapter.close()
-                await self._poll_video(task_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                logger.exception("video task %s submit failed", task_id)
-                await self._mark_failed(task_id, e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("video task %s submit failed", task_id)
+            await self._mark_failed(task_id, e)
+            return
+
+        # 出了闸机再轮询；轮询自己要能兜住异常，否则协程里未捕获的异常会让任务
+        # 永远停在 processing（asyncio 只会打印一句 "Task exception was never retrieved"）
+        try:
+            await self._poll_video(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("video task %s polling failed", task_id)
+            await self._mark_failed(task_id, e)
 
     async def _poll_video(self, task_id: int) -> None:
         waited = 0
@@ -260,7 +367,7 @@ class TaskRunner:
                 if not task.remote_job_id:
                     task.status = "failed"
                     task.error = "视频任务未能提交，请重试"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
                     return
                 resolved = await provider_store.resolve_model(db, task.model, "video")
@@ -295,7 +402,7 @@ class TaskRunner:
                     )
                     task.status = "completed"
                     task.progress = 100
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     task.error = None
                     await db.commit()
                     return
@@ -303,7 +410,7 @@ class TaskRunner:
                 if status.status == "failed":
                     task.status = "failed"
                     task.error = status.error or "视频生成失败"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
                     return
 
@@ -332,8 +439,11 @@ class TaskRunner:
         return ct, ext.lstrip(".")
 
     async def _run_comfy(self, task_id: int) -> None:
-        async with self._gate:
-            try:
+        # 与视频同理：闸机只圈「提交工作流」这一段，轮询（ComfyUI 出一段视频可能十几分钟）
+        # 不占并发名额，也不该在整个轮询期间攥着数据库会话。
+        needs_poll = False
+        try:
+            async with self._gate:
                 async with SessionLocal() as db:
                     task = await db.get(Task, task_id)
                     if task is None or task.status in ("cancelled", "failed"):
@@ -352,42 +462,52 @@ class TaskRunner:
 
                     if task.remote_job_id:
                         # 服务重启后的恢复场景：已提交过，直接进入轮询
-                        await self._poll_comfy(task_id)
-                        return
+                        needs_poll = True
+                    else:
+                        # 参考图（上游/手动，按 refImages 顺序）：上传到 ComfyUI 供 LoadImage 引用
+                        ref_blobs: list[bytes] = []
+                        for aid in params.get("ref_asset_ids", []):
+                            asset = await db.get(Asset, int(aid))
+                            if asset:
+                                ref_blobs.append(storage.abs_path(asset.filename).read_bytes())
 
-                    # 参考图（上游/手动，按 refImages 顺序）：上传到 ComfyUI 供 LoadImage 引用
-                    ref_blobs: list[bytes] = []
-                    for aid in params.get("ref_asset_ids", []):
-                        asset = await db.get(Asset, int(aid))
-                        if asset:
-                            ref_blobs.append(storage.abs_path(asset.filename).read_bytes())
+                        adapter = ComfyUIAdapter(provider.base_url, "")
+                        param_map = json.loads(wf.param_map_json or "[]")
+                        image_slots = [p for p in param_map if p.get("type") == "image"]
+                        image_files: dict[str, str] = {}
+                        for i, blob in enumerate(ref_blobs[: len(image_slots)]):
+                            ext = "png"
+                            fname = f"canvas_ref_{task_id}_{i}.{ext}"
+                            image_files[image_slots[i]["key"]] = await adapter.upload_image(blob, fname)
 
-                    adapter = ComfyUIAdapter(provider.base_url, "")
-                    param_map = json.loads(wf.param_map_json or "[]")
-                    image_slots = [p for p in param_map if p.get("type") == "image"]
-                    image_files: dict[str, str] = {}
-                    for i, blob in enumerate(ref_blobs[: len(image_slots)]):
-                        ext = "png"
-                        fname = f"canvas_ref_{task_id}_{i}.{ext}"
-                        image_files[image_slots[i]["key"]] = await adapter.upload_image(blob, fname)
+                        graph = apply_params(
+                            json.loads(wf.graph_json),
+                            param_map,
+                            params.get("param_values") or {},
+                            image_files,
+                            task.prompt,
+                        )
+                        prompt_id = await adapter.submit_workflow(graph)
+                        await adapter.close()
+                        task.remote_job_id = prompt_id
+                        await db.commit()
+                        needs_poll = True
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("comfy task %s submit failed", task_id)
+            await self._mark_failed(task_id, e)
+            return
 
-                    graph = apply_params(
-                        json.loads(wf.graph_json),
-                        param_map,
-                        params.get("param_values") or {},
-                        image_files,
-                        task.prompt,
-                    )
-                    prompt_id = await adapter.submit_workflow(graph)
-                    await adapter.close()
-                    task.remote_job_id = prompt_id
-                    await db.commit()
-                await self._poll_comfy(task_id)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                logger.exception("comfy task %s submit failed", task_id)
-                await self._mark_failed(task_id, e)
+        if not needs_poll:
+            return
+        try:
+            await self._poll_comfy(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("comfy task %s polling failed", task_id)
+            await self._mark_failed(task_id, e)
 
     async def _poll_comfy(self, task_id: int) -> None:
         waited = 0
@@ -403,20 +523,20 @@ class TaskRunner:
                 if wf is None:
                     task.status = "failed"
                     task.error = "工作流已被删除"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
                     return
                 provider = await db.get(ProviderService, wf.provider_id)
                 if provider is None or not provider.enabled:
                     task.status = "failed"
                     task.error = "ComfyUI 服务不可用"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
                     return
                 if not task.remote_job_id:
                     task.status = "failed"
                     task.error = "工作流未能提交，请重试"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
                     return
 
@@ -438,11 +558,13 @@ class TaskRunner:
                                     source="generated",
                                     task_id=task_id,
                                     prompt=task.prompt,
+                                    # 图片能读出宽高就记下来；视频这里读不出（归 ffprobe 管）
+                                    **storage.image_size_kwargs(blob, ct),
                                 )
                             )
                         task.status = "completed"
                         task.progress = 100
-                        task.completed_at = datetime.now()
+                        task.completed_at = utcnow()
                         task.error = None
                         await db.commit()
                     finally:
@@ -452,7 +574,7 @@ class TaskRunner:
                 if status.status == "failed":
                     task.status = "failed"
                     task.error = status.error or "工作流执行失败"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
                     return
                 if status.progress and status.progress > task.progress:
@@ -606,7 +728,7 @@ class TaskRunner:
                     )
                     task.status = "completed"
                     task.progress = 100
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     task.error = None
                     await db.commit()
             except asyncio.CancelledError:
@@ -634,7 +756,7 @@ class TaskRunner:
                 else:
                     task.status = "failed"
                     task.error = "服务已重启，该任务未完成，请重新发起"
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
             await db.commit()
 
     async def _mark_failed(self, task_id: int, exc: Exception) -> None:
@@ -644,7 +766,7 @@ class TaskRunner:
                 if task and task.status not in ("completed", "cancelled"):
                     task.status = "failed"
                     task.error = str(exc) or exc.__class__.__name__
-                    task.completed_at = datetime.now()
+                    task.completed_at = utcnow()
                     await db.commit()
         except Exception:  # noqa: BLE001
             logger.exception("failed to mark task %s", task_id)

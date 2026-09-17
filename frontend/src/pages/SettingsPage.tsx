@@ -1,8 +1,22 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Download, History, Inbox, RefreshCw, RotateCcw, Save, Table2 } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  Download,
+  History,
+  Inbox,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  ShieldCheck,
+  Table2,
+  Upload,
+} from "lucide-react";
 import { api, ApiError } from "../api";
 import type {
   AuditLog,
+  ConfigImportResult,
+  ConfigScopesMeta,
+  ConfigSnapshot,
   LogExport,
   LogsStatus,
   SchemaRow,
@@ -16,6 +30,7 @@ import { useToast } from "../components/Toast";
 
 const AUDIT_TAB = "__audit__";
 const ABOUT_TAB = "__about__";
+const TRANSFER_TAB = "__transfer__";
 
 /** 安装方式 → 展示名与「一键更新」是否可用 */
 const INSTALL_LABEL: Record<string, string> = {
@@ -437,6 +452,465 @@ function AuditPanel({ schemas }: { schemas: TableSpecMeta[] }) {
   );
 }
 
+/* ---------------- 配置导入导出 ---------------- */
+
+/** 下载任意文本为文件（走 Blob，而不是 <a href>：设了口令时直链带不上 Authorization） */
+function downloadText(text: string, filename: string, mime = "application/json") {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function snapshotFileName(exportedAt: string): string {
+  const stamp = (exportedAt || new Date().toISOString()).replace(/[:+]/g, "-").replace(/\..*$/, "");
+  return `xiaoma-config-${stamp}.json`;
+}
+
+function countRows(result: ConfigImportResult | null): number {
+  if (!result) return 0;
+  return result.totals.created + result.totals.updated + result.totals.skipped;
+}
+
+/** 快照里的 scopes 可能是数组、逗号串，也可能没有——统一成数组再往后用 */
+function snapshotScopes(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.map((x) => String(x).trim()).filter(Boolean);
+  if (typeof raw === "string") return raw.split(",").map((x) => x.trim()).filter(Boolean);
+  return [];
+}
+
+/** 导入结果的逐表统计（表名用注册表里的中文名） */
+function ImportSummary({
+  result,
+  tableLabel,
+}: {
+  result: ConfigImportResult;
+  tableLabel: (table: string) => string;
+}) {
+  const rows = Object.entries(result.summary);
+  if (rows.length === 0) return <div className="muted">没有需要写入的行。</div>;
+  return (
+    <table className="transfer-table">
+      <thead>
+        <tr>
+          <th>配置表</th>
+          <th>新增</th>
+          <th>更新</th>
+          <th>跳过</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map(([table, c]) => (
+          <tr key={table}>
+            <td>{tableLabel(table)}</td>
+            <td className={c.created ? "transfer-strong" : ""}>{c.created}</td>
+            <td className={c.updated ? "transfer-strong" : ""}>{c.updated}</td>
+            <td className="muted">{c.skipped}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * 配置导入导出。
+ *
+ * 三件事必须一眼看明白，否则用户不敢点：
+ * 1. 导出的文件里**没有 API Key**（后端也不会接受带 Key 的导入）；
+ * 2. 跟这台机器绑定的参数（绝对路径、本机地址、本机服务编号）不会带走，且能展开看清单；
+ * 3. 导入先预览（新增/更新/跳过多少行、有哪些行被拒），确认后才写库。
+ */
+function TransferPanel({ onImported }: { onImported?: () => void }) {
+  const toast = useToast();
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const [meta, setMeta] = useState<ConfigScopesMeta | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [snapshotText, setSnapshotText] = useState("");
+  const [exportedAt, setExportedAt] = useState("");
+  const [showNotes, setShowNotes] = useState(false);
+
+  const [incoming, setIncoming] = useState<ConfigSnapshot | null>(null);
+  const [incomingName, setIncomingName] = useState("");
+  const [importScopes, setImportScopes] = useState<string[]>([]);
+  const [preview, setPreview] = useState<ConfigImportResult | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const [lastResult, setLastResult] = useState<ConfigImportResult | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        const m = await api.configScopes();
+        setMeta(m);
+        setSelected(m.defaultScopes);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "加载导出范围失败");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const tableLabels: Record<string, string> = {};
+  for (const s of meta?.scopes ?? []) for (const t of s.tables) tableLabels[t.name] = t.label;
+  const tableLabel = (table: string) => tableLabels[table] ?? table;
+  const scopeLabel = (name: string) => meta?.scopes.find((s) => s.name === name)?.label ?? name;
+
+  const toggle = (name: string) =>
+    setSelected((prev) => (prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]));
+
+  const doExport = async () => {
+    if (selected.length === 0) {
+      toast.error("至少勾一个范围");
+      return;
+    }
+    setExporting(true);
+    try {
+      const snap = await api.exportConfig(selected);
+      const text = JSON.stringify(snap, null, 2);
+      setSnapshotText(text);
+      setExportedAt(snap.exportedAt);
+      downloadText(text, snapshotFileName(snap.exportedAt));
+      const rows = Object.values(snap.tables).reduce((n, list) => n + list.length, 0);
+      toast.success(`已导出 ${rows} 行配置`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "导出失败");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const copySnapshot = async () => {
+    if (!snapshotText) return;
+    try {
+      await navigator.clipboard.writeText(snapshotText);
+      toast.success("已复制到剪贴板");
+    } catch {
+      toast.error("复制失败，请手动选中文本复制");
+    }
+  };
+
+  /** 快照里出现了哪些表 → 对应哪些范围（后端没写 scopes 时兜底） */
+  const scopesOfTables = (tables: string[]): string[] =>
+    (meta?.scopes ?? [])
+      .filter((s) => s.tables.some((t) => tables.includes(t.name)))
+      .map((s) => s.name);
+
+  const runPreview = async (snap: ConfigSnapshot, scopes: string[]) => {
+    setPreviewing(true);
+    try {
+      const r = await api.importConfig({ ...snap, scopes, mode: "merge" }, true);
+      setPreview(r);
+      setPreviewOpen(true);
+    } catch (e) {
+      setPreview(null);
+      toast.error(e instanceof Error ? e.message : "预览失败");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const onPickFile = async (file: File | undefined) => {
+    if (!file) return;
+    setLastResult(null);
+    setPreview(null);
+    try {
+      const parsed = JSON.parse(await file.text()) as ConfigSnapshot;
+      if (!parsed || typeof parsed !== "object" || !parsed.tables) {
+        throw new Error("文件里没有 tables 字段，可能不是本程序导出的配置快照");
+      }
+      const declared = snapshotScopes(parsed.scopes);
+      const scopes = declared.length ? declared : scopesOfTables(Object.keys(parsed.tables));
+      setIncoming({ ...parsed, scopes });
+      setIncomingName(file.name);
+      setImportScopes(scopes);
+      await runPreview({ ...parsed, scopes }, scopes);
+    } catch (e) {
+      setIncoming(null);
+      setIncomingName("");
+      toast.error(e instanceof Error ? e.message : "读取文件失败");
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const toggleImportScope = (name: string) => {
+    if (!incoming) return;
+    const next = importScopes.includes(name)
+      ? importScopes.filter((x) => x !== name)
+      : [...importScopes, name];
+    setImportScopes(next);
+    void runPreview(incoming, next);
+  };
+
+  const confirmImport = async () => {
+    if (!incoming) return;
+    setWriting(true);
+    try {
+      const r = await api.importConfig({ ...incoming, scopes: importScopes, mode: "merge" }, false);
+      setLastResult(r);
+      setPreviewOpen(false);
+      if (r.conflicts.length > 0) {
+        toast.error(`已写入 ${r.totals.created + r.totals.updated} 行，另有 ${r.conflicts.length} 行被拒`);
+      } else {
+        toast.success(`导入完成：新增 ${r.totals.created} 行，更新 ${r.totals.updated} 行`);
+      }
+      // 站点名、模块开关可能被改，通知外层刷新一次元信息
+      onImported?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "导入失败");
+    } finally {
+      setWriting(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="loading-page">
+        <span className="spinner lg" />
+      </div>
+    );
+  }
+  if (!meta) return null;
+
+  const exportedRowCount = preview ? countRows(preview) : 0;
+
+  return (
+    <div className="config-panel">
+      <section className="card config-section">
+        <div className="config-section-head">
+          <div>
+            <div className="config-section-title">导出配置</div>
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 3 }}>
+              把提示词库、导演风格、创作 Agent、服务商预设等打包成一个 JSON 快照，可以分享或搬到别的机器
+            </div>
+          </div>
+          <div className="transfer-actions">
+            <button className="btn btn-sm btn-ghost" onClick={() => void copySnapshot()} disabled={!snapshotText}>
+              复制全文
+            </button>
+            <button className="btn btn-sm btn-primary" onClick={() => void doExport()} disabled={exporting}>
+              {exporting ? <Spinner light /> : <Download size={14} />}
+              导出 .json
+            </button>
+          </div>
+        </div>
+        <div className="config-section-body">
+          <div className="transfer-scopes">
+            {meta.scopes.map((s) => (
+              <label className={`transfer-scope ${selected.includes(s.name) ? "checked" : ""}`} key={s.name}>
+                <input type="checkbox" checked={selected.includes(s.name)} onChange={() => toggle(s.name)} />
+                <span className="transfer-scope-body">
+                  <span className="transfer-scope-label">{s.label}</span>
+                  <span className="transfer-scope-desc">{s.description}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          <div className="transfer-note">
+            <ShieldCheck size={14} />
+            <span>
+              <b>不含 API Key</b>：模型服务只导出名称、协议、地址与模型清单；
+              密钥在每台机器上单独加密，导出了也解不开，导入时也不会接受。
+            </span>
+            <button className="btn btn-xs btn-ghost" onClick={() => setShowNotes((v) => !v)}>
+              {showNotes ? "收起排除说明" : `排除了什么（${meta.excluded.length} 项）`}
+            </button>
+          </div>
+
+          {showNotes && (
+            <div className="transfer-excluded">
+              {meta.excluded.map((e, i) => (
+                <div className="transfer-excluded-row" key={i}>
+                  <code>{e.table === "*" ? "所有表" : tableLabel(e.table)} · {e.field}</code>
+                  <span>{e.reason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {snapshotText && (
+            <>
+              <div className="transfer-file">
+                已导出（{exportedAt.replace("T", " ")}）。下面就是文件内容，也可以直接复制给别人：
+              </div>
+              <pre className="log-preview">{snapshotText}</pre>
+            </>
+          )}
+        </div>
+      </section>
+
+      <section className="card config-section">
+        <div className="config-section-head">
+          <div>
+            <div className="config-section-title">导入配置</div>
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 3 }}>
+              先预览「将新增 / 更新 / 跳过多少行、有没有冲突」，确认之后才写库；写入的每一行都会留下可回滚的审计记录
+            </div>
+          </div>
+          <div className="transfer-actions">
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".json,application/json"
+              style={{ display: "none" }}
+              onChange={(e) => void onPickFile(e.target.files?.[0])}
+            />
+            <button
+              className="btn btn-sm btn-ghost"
+              onClick={() => fileRef.current?.click()}
+              disabled={previewing}
+            >
+              {previewing ? <Spinner /> : <Upload size={14} />}
+              {previewing ? "读取中…" : "选择 .json 文件"}
+            </button>
+          </div>
+        </div>
+        <div className="config-section-body">
+          {!incoming ? (
+            <div className="transfer-file muted">
+              还没选择文件。选一个导出好的 <code>.json</code> 快照，会立刻给出预览，不会直接改数据。
+            </div>
+          ) : (
+            <div className="transfer-file">
+              已读取 <b>{incomingName}</b>
+              {incoming.appVersion ? `（导出自 v${incoming.appVersion}` : "（"}
+              {incoming.exportedAt ? ` · ${incoming.exportedAt.replace("T", " ")}）` : "）"}
+              <div className="muted" style={{ marginTop: 6 }}>
+                文件里共 {Object.keys(incoming.tables).length} 张表、{incoming.scopes.map(scopeLabel).join("、") || "—"}
+              </div>
+            </div>
+          )}
+
+          {lastResult && (
+            <div className="transfer-result">
+              <div className="transfer-result-head">
+                上次导入：新增 {lastResult.totals.created} 行、更新 {lastResult.totals.updated} 行、跳过{" "}
+                {lastResult.totals.skipped} 行
+                {lastResult.conflicts.length > 0 && ` · 被拒 ${lastResult.conflicts.length} 行`}
+              </div>
+              <ImportSummary result={lastResult} tableLabel={tableLabel} />
+              {lastResult.conflicts.length > 0 && (
+                <div className="transfer-conflicts">
+                  {lastResult.conflicts.map((c, i) => (
+                    <div className="transfer-conflict" key={i}>
+                      <AlertTriangle size={13} />
+                      <span>{c.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {previewOpen && preview && incoming && (
+        <Modal
+          title={preview.dryRun ? "导入预览（还没有写库）" : "导入结果"}
+          wide
+          onClose={() => setPreviewOpen(false)}
+          footer={
+            <>
+              <button className="btn btn-ghost" onClick={() => setPreviewOpen(false)}>
+                取消
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => void confirmImport()}
+                disabled={writing || (preview.totals.created === 0 && preview.totals.updated === 0)}
+              >
+                {writing ? <Spinner light /> : <Upload size={14} />}
+                {writing ? "写入中…" : `确认写入（新增 ${preview.totals.created} / 更新 ${preview.totals.updated}）`}
+              </button>
+            </>
+          }
+        >
+          <div className="transfer-preview">
+            <div className="transfer-preview-line">
+              快照导出自 v{preview.source.appVersion || "?"} ·{" "}
+              {preview.source.exportedAt ? preview.source.exportedAt.replace("T", " ") : "时间未知"} ·
+              共 {exportedRowCount} 行
+            </div>
+
+            <div className="about-k" style={{ margin: "14px 0 6px" }}>
+              导入范围（取消勾选可跳过某些表）
+            </div>
+            <div className="transfer-scopes transfer-scopes-compact">
+              {(incoming.scopes.length ? incoming.scopes : importScopes).map((name) => (
+                <label
+                  className={`transfer-scope ${importScopes.includes(name) ? "checked" : ""}`}
+                  key={name}
+                >
+                  <input
+                    type="checkbox"
+                    checked={importScopes.includes(name)}
+                    onChange={() => toggleImportScope(name)}
+                  />
+                  <span className="transfer-scope-body">
+                    <span className="transfer-scope-label">{scopeLabel(name)}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+
+            <div className="about-k" style={{ margin: "14px 0 6px" }}>
+              将发生什么
+            </div>
+            <ImportSummary result={preview} tableLabel={tableLabel} />
+
+            {preview.warnings.length > 0 && (
+              <div className="transfer-warnings">
+                {preview.warnings.map((w, i) => (
+                  <div className="transfer-warning" key={i}>
+                    <AlertTriangle size={13} />
+                    <span>{w}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {preview.conflicts.length > 0 && (
+              <>
+                <div className="about-k" style={{ margin: "14px 0 6px" }}>
+                  被拒收的行（{preview.conflicts.length} 行，其余照常导入）
+                </div>
+                <div className="transfer-conflicts">
+                  {preview.conflicts.map((c, i) => (
+                    <div className="transfer-conflict" key={i}>
+                      <AlertTriangle size={13} />
+                      <span>{c.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <div className="about-note">
+              合并规则：按各表的唯一标识（如提示词 / 风格的 <code>key</code>、参数选项的{" "}
+              <code>kind+value</code>、服务的接口地址）匹配。内容完全一样就跳过——同一份文件导两次不会产生重复行；
+              已有的东西不会被删除，本机已保存的 API Key 也不会被覆盖。
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- 页面主体（关于与更新 + 注册表 Tabs） ---------------- */
 
 /** 关于与更新：版本信息 + 检查更新 + 一键更新 */
@@ -819,6 +1293,7 @@ export default function SettingsPage({ onMetaChanged }: { onMetaChanged?: () => 
   const renderPanel = () => {
     if (active === AUDIT_TAB) return <AuditPanel schemas={schemas} />;
     if (active === ABOUT_TAB) return <AboutPanel />;
+    if (active === TRANSFER_TAB) return <TransferPanel onImported={onMetaChanged} />;
     if (!activeSpec) return null;
     // 系统配置是特殊的键值表，字段是 value/value_type，用专用渲染
     if (activeSpec.name === "config_items") {
@@ -857,6 +1332,12 @@ export default function SettingsPage({ onMetaChanged }: { onMetaChanged?: () => 
             ))}
             <button className={active === AUDIT_TAB ? "active" : ""} onClick={() => setActive(AUDIT_TAB)}>
               变更审计
+            </button>
+            <button
+              className={active === TRANSFER_TAB ? "active" : ""}
+              onClick={() => setActive(TRANSFER_TAB)}
+            >
+              配置导入导出
             </button>
             <button className={active === ABOUT_TAB ? "active" : ""} onClick={() => setActive(ABOUT_TAB)}>
               关于与更新

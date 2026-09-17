@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -15,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
 from app.models import Project
+from app.schemas import UtcDateTime
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -30,8 +29,8 @@ class ProjectOut(BaseModel):
     description: str
     status: str
     canvas_ready: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
     model_config = {"from_attributes": True}
 

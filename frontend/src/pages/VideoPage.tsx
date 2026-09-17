@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Clapperboard, Film, Settings, Upload, Video as VideoIcon, X } from "lucide-react";
 import { api, cfgBool, cfgNumber, cfgString } from "../api";
 import { consumeDraftFirstFrame, consumeDraftPrompt } from "../promptDraft";
-import type { Asset, ConfigMap, ModelOption, ParamOptionItem, Task } from "../types";
+import type { Asset, ConfigMap, ModelOption, ParamOptionItem, PreflightWarning, Task } from "../types";
 import { Empty, Modal, ModelSelect, Spinner, isRunning } from "../components/common";
+import { PreflightNotice, runPreflight } from "../components/PreflightNotice";
 import { useToast } from "../components/Toast";
+import { prefs } from "../prefs";
 import TaskCard from "../components/TaskCard";
 import Lightbox from "../components/Lightbox";
 
@@ -28,7 +30,7 @@ function pickValue(opts: ParamOptionItem[], preferred: string): string {
 export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }) {
   const toast = useToast();
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [modelKey, setModelKey] = useState(localStorage.getItem("xm_model_video") || "");
+  const [modelKey, setModelKey] = useState("");
   const [prompt, setPrompt] = useState("");
   const [duration, setDuration] = useState(5);
   const [ratio, setRatio] = useState("16:9");
@@ -41,6 +43,9 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [confirmGen, setConfirmGen] = useState(true);
+  // 生成前的软告警：只展示，不改变能不能提交
+  const [warnings, setWarnings] = useState<PreflightWarning[]>([]);
+  const [checking, setChecking] = useState(false);
   const [preview, setPreview] = useState<{ url: string; kind: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -51,6 +56,9 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
       const [ms, ts] = await Promise.all([api.listModels("video"), api.listTasks("video", 10)]);
       setModels(ms);
       setTasks(ts);
+      // 记住的模型可能已经不存在了（服务被删/改名）：合法的沿用，失效的丢掉并退回第一个可用的
+      const keys = ms.map((m) => m.key);
+      setModelKey((prev) => prev || prefs.modelKey.get("video", keys) || keys[0] || "");
     })();
     // 从提示词库「去视频生成」带过来的模板内容
     const draft = consumeDraftPrompt("video");
@@ -84,7 +92,7 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("xm_model_video", modelKey);
+    prefs.modelKey.set("video", modelKey);
   }, [modelKey]);
 
   const runningIds = tasks.filter((t) => isRunning(t.status)).map((t) => t.id).join(",");
@@ -113,6 +121,30 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
     }
   };
 
+  /** 提交前先问一句「你这组合可能不是你要的」，但不拦。
+   *
+   * 视频这一条尤其值钱：一次出片又慢又贵，而「首帧是 16:9 却选了 9:16」
+   * 这种错上游不会报错，只会闷头裁切，等看到成片才知道白花了额度。
+   */
+  const gate = async () => {
+    setChecking(true);
+    try {
+      const found = await runPreflight(() =>
+        api.preflightVideo({
+          model_key: modelKey,
+          prompt: prompt.trim(),
+          first_frame_asset_id: firstFrame?.id ?? null,
+          ratio,
+          resolution,
+        }),
+      );
+      setWarnings(found);
+      return found.length > 0 || confirmGen;
+    } finally {
+      setChecking(false);
+    }
+  };
+
   const submit = async () => {
     if (!modelKey) {
       toast.error("请先选择视频模型");
@@ -122,7 +154,7 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
       toast.error("请输入视频描述");
       return;
     }
-    if (confirmGen) {
+    if (await gate()) {
       setConfirming(true);
       return;
     }
@@ -196,13 +228,15 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
                 </button>
               </div>
             ) : (
-              <div
+              // 用 button 而不是带 onClick 的 div：键盘用户也要能选首帧
+              <button
+                type="button"
                 className="upload-tile"
                 style={{ width: 96, height: 96 }}
                 onClick={() => fileInput.current?.click()}
               >
                 <Upload />
-              </div>
+              </button>
             )}
             <input
               ref={fileInput}
@@ -258,9 +292,13 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
             <div className="field-hint">参数支持情况取决于具体模型，不支持的参数会被自动忽略。</div>
           </div>
 
-          <button className="btn btn-primary btn-block" disabled={submitting} onClick={submit}>
-            {submitting ? <Spinner light /> : <Clapperboard size={16} />}
-            {submitting ? "提交中…" : "生成视频"}
+          <button
+            className="btn btn-primary btn-block"
+            disabled={submitting || checking}
+            onClick={submit}
+          >
+            {submitting || checking ? <Spinner light /> : <Clapperboard size={16} />}
+            {submitting ? "提交中…" : checking ? "检查中…" : "生成视频"}
           </button>
         </div>
 
@@ -284,12 +322,12 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
 
       {confirming && (
         <Modal
-          title="确认生成视频？"
+          title={warnings.length > 0 ? `生成前有 ${warnings.length} 条提醒` : "确认生成视频？"}
           onClose={() => setConfirming(false)}
           footer={
             <>
               <button className="btn btn-ghost" onClick={() => setConfirming(false)} disabled={submitting}>
-                取消
+                {warnings.length > 0 ? "返回修改" : "取消"}
               </button>
               <button
                 className="btn btn-primary"
@@ -300,11 +338,12 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
                 }}
               >
                 {submitting ? <Spinner light /> : null}
-                确认生成
+                {warnings.length > 0 ? "仍然生成" : "确认生成"}
               </button>
             </>
           }
         >
+          <PreflightNotice warnings={warnings} />
           <div className="confirm-summary">
             <div className="confirm-row">
               <span>模型</span>

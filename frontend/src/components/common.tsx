@@ -142,6 +142,18 @@ export function formatTime(iso: string) {
   return `${d.getMonth() + 1}-${d.getDate()} ${hm}`;
 }
 
+/** 只要日期（本地时区）。
+ *
+ * 不要用 `iso.slice(0, 10)`：接口给的是 UTC 时间串，直接切前 10 位得到的是
+ * UTC 日期，晚上 8 点之后做的事会被显示成「昨天」。
+ */
+export function formatDate(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 export function formatSize(bytes: number) {
   if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(bytes / 1024))} KB`;

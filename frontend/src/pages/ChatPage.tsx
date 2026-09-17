@@ -5,13 +5,14 @@ import { consumeDraftPrompt } from "../promptDraft";
 import type { ChatMessage, ChatSession, ConfigMap, ModelOption } from "../types";
 import { Empty, ModelSelect, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
+import { prefs } from "../prefs";
 
 type UIMessage = ChatMessage & { error?: boolean };
 
 export default function ChatPage({ onGoSettings }: { onGoSettings: () => void }) {
   const toast = useToast();
   const [models, setModels] = useState<ModelOption[]>([]);
-  const [modelKey, setModelKey] = useState(localStorage.getItem("xm_model_text") || "");
+  const [modelKey, setModelKey] = useState("");
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [messages, setMessages] = useState<UIMessage[]>([]);
@@ -36,11 +37,13 @@ export default function ChatPage({ onGoSettings }: { onGoSettings: () => void })
       setModels(ms);
       setSessions(ss);
       setTemperature(cfgNumber(cfg, "defaults.temperature", 0.7));
-      // 未手动选择过模型时，采用配置里的默认文本模型（仅当它确实存在）
-      if (!localStorage.getItem("xm_model_text")) {
-        const want = cfgString(cfg, "defaults.text_model", "");
-        if (want && ms.some((m) => m.key === want)) setModelKey(want);
-      }
+      // 模型优先级：记住的选择（失效就丢掉）→ 配置里的默认文本模型（确实存在才用）→ 第一个可用
+      const keys = ms.map((m) => m.key);
+      const remembered = prefs.modelKey.get("text", keys);
+      const want = cfgString(cfg, "defaults.text_model", "");
+      setModelKey(
+        (prev) => prev || remembered || (want && keys.includes(want) ? want : "") || keys[0] || "",
+      );
       if (ss.length > 0) await openSession(ss[0].id);
     })();
     // 从提示词库「去对话」带过来的模板内容
@@ -49,7 +52,7 @@ export default function ChatPage({ onGoSettings }: { onGoSettings: () => void })
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("xm_model_text", modelKey);
+    prefs.modelKey.set("text", modelKey);
   }, [modelKey]);
 
   useEffect(() => {

@@ -20,6 +20,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clock import utc_iso
+
 from app.models import ConfigAuditLog
 from app.registry.schema_registry import SCHEMA_REGISTRY, FieldSpec, TableSpec
 
@@ -162,7 +164,8 @@ async def list_audit(db: AsyncSession, table_name: str, limit: int = 50) -> list
             "before": _load_json(r.before_json),
             "after": _load_json(r.after_json),
             "actor": r.actor,
-            "created_at": r.created_at,
+            # 走统一出口：库里是不带时区标记的 UTC，标上 +00:00 前端才会正确换算
+            "created_at": utc_iso(r.created_at),
         }
         for r in rows.scalars().all()
     ]

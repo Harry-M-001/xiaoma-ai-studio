@@ -1,4 +1,4 @@
-"""Pydantic API 模型。
+﻿"""Pydantic API 模型。
 
 注意：能力类型（modality）与协议类型（kind）**不用枚举写死**——
 能力由 `modalities` 表驱动，协议由 `ADAPTERS` 注册表驱动，
@@ -9,13 +9,21 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
+
+from app.clock import utc_iso
 
 # 运行期字符串，具体取值范围来自配置表 / 注册表
 Modality = str
 ProviderKind = str
+
+# 所有返回给前端的时间字段都用这个类型：库里存的是不带时区标记的 UTC，
+# 出口统一标上 `+00:00`，由浏览器换算成本地时间（细节见 app.clock）。
+UtcDateTime = Annotated[
+    datetime, PlainSerializer(utc_iso, return_type=str, when_used="json")
+]
 
 
 # ---------- 模型服务 ----------
@@ -45,8 +53,8 @@ class ProviderOut(BaseModel):
     sort_order: int
     models: list[ModelSpec]
     has_api_key: bool
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
 
 class ProviderTestIn(BaseModel):
@@ -91,8 +99,8 @@ class ChatRequest(BaseModel):
 class ChatSessionOut(BaseModel):
     id: int
     title: str
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
 
 class ChatMessageOut(BaseModel):
@@ -100,7 +108,7 @@ class ChatMessageOut(BaseModel):
     role: str
     content: str
     model: str = ""
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 # ---------- 生成任务 ----------
@@ -121,6 +129,48 @@ class ImageBatchGenerateIn(BaseModel):
     size: str = "1024x1024"
     n: int = Field(1, ge=1, le=16)
     ref_asset_ids: list[int] = []
+
+
+# ---------- 生成前软校验 ----------
+#
+# 预检的输入**故意不做硬校验**：字段全给默认值，不设 min_length / 范围。
+# 理由：预检的职责是「照实告警」，而不是「挡住你」——挡人的活在正式生成接口那边。
+# 如果这里也 422，用户点一次生成会先收到一个格式错误，而不是一句「首帧会被裁掉」。
+
+
+class ImagePreflightIn(BaseModel):
+    model_key: str = ""
+    prompt: str = ""
+    n: int = 1
+    ref_asset_ids: list[int] = []
+
+
+class ImageBatchPreflightIn(BaseModel):
+    prompts: list[str] = []
+    model_keys: list[str] = []
+    n: int = 1
+
+
+class VideoPreflightIn(BaseModel):
+    model_key: str = ""
+    prompt: str = ""
+    first_frame_asset_id: int | None = None
+    ratio: str = ""
+    resolution: str = ""
+
+
+class PreflightWarningOut(BaseModel):
+    code: str
+    level: str = "warn"
+    message: str
+    suggestion: str = ""
+
+
+class PreflightOut(BaseModel):
+    warnings: list[PreflightWarningOut] = []
+    # 恒为 False。留着是为了让前端不必去猜「这类接口会不会挡我」——
+    # 将来真要做硬校验，也应该新增 blocking=true 而另开接口，而不是改动这里的语义。
+    blocking: bool = False
 
 
 # ---- 导演台 ----
@@ -174,8 +224,8 @@ class TaskOut(BaseModel):
     error: str | None = None
     progress: int = 0
     assets: list[AssetBrief] = []
-    created_at: datetime
-    completed_at: datetime | None = None
+    created_at: UtcDateTime
+    completed_at: UtcDateTime | None = None
     # 重跑出来的任务记着原任务 id，便于在任务中心区分首次与重跑
     retry_of_task_id: int | None = None
 
@@ -214,7 +264,7 @@ class AssetOut(BaseModel):
     height: int | None = None
     duration: int | None = None
     task_id: int | None = None
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 class AssetList(BaseModel):

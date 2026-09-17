@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, PlugZap, X } from "lucide-react";
 import { api } from "../api";
 import { PROVIDERS_CHANGED } from "../providerEvents";
+import { prefs } from "../prefs";
 import type { SetupStatus } from "../types";
 import { useToast } from "./Toast";
 
@@ -17,8 +18,7 @@ import { useToast } from "./Toast";
  * 就把真正的阻断问题一起永久静音。
  */
 
-const DISMISS_KEY = "xm_setup_dismissed";
-
+// 关闭状态由 prefs 统一管理（键名与合法化都在那里）
 const MODALITY_LABEL: Record<string, string> = {
   text: "文本",
   image: "图片",
@@ -41,7 +41,7 @@ export default function SetupBanner({
 }) {
   const toast = useToast();
   const [status, setStatus] = useState<SetupStatus | null>(null);
-  const [dismissed, setDismissed] = useState<string>(() => localStorage.getItem(DISMISS_KEY) ?? "");
+  const [dismissed, setDismissed] = useState<string>(() => prefs.setupDismissed.get());
   const [connecting, setConnecting] = useState(false);
 
   const load = useCallback(async () => {
@@ -72,7 +72,7 @@ export default function SetupBanner({
   if (dismissed === sig) return null;
 
   const close = () => {
-    localStorage.setItem(DISMISS_KEY, sig);
+    prefs.setupDismissed.set(sig);
     setDismissed(sig);
   };
 

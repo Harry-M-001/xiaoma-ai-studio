@@ -17,7 +17,10 @@ router = APIRouter(prefix="/api", tags=["system"])
 
 @router.get("/health")
 async def health() -> dict:
-    return {"status": "ok"}
+    """存活探针。顺带带上队列概况：出问题时第一眼要看的就是「在跑几个、排了几个」。"""
+    from app.services.runner import runner
+
+    return {"status": "ok", "queue": runner.queue_stats()}
 
 
 @router.get("/app/info", response_model=AppInfo)

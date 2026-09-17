@@ -1,0 +1,158 @@
+/**
+ * 界面偏好的统一读写口。
+ *
+ * 规矩只有一条：**前端所有 localStorage 读写都必须经过这里**（有单测把这条钉住，
+ * 见 backend/tests/test_frontend_prefs.py）。
+ *
+ * 为什么值得单独收口：localStorage 是「用户能手动改、旧版本写过、跨版本会残留」的地方。
+ * 脏数据进来不会报错，只会让界面表现诡异——自动链下拉框显示空白、生成时用了一个早被删掉的
+ * 模型、缩略图莫名变成 0。所以这里读回来的每个值都要过一遍合法化：
+ * 不合法就**当场丢掉并降级到默认**，而不是原样用出去、让问题在后面某处冒出来。
+ */
+
+const K = {
+  theme: "xm_theme",
+  sidebar: "xm_sidebar_collapsed",
+  palette: "xm_canvas_palette",
+  chainLevel: "xm_canvas_chain_level",
+  thumb: "xm_canvas_thumb",
+  setupDismissed: "xm_setup_dismissed",
+  draftPrompt: "xm_draft_prompt",
+  draftFirstFrame: "xm_draft_first_frame",
+  model: (modality: string) => `xm_model_${modality}`,
+} as const;
+
+type Theme = "light" | "dark";
+
+/** 读一个原始值。localStorage 在隐私模式/配额满时会直接抛异常，界面不该因此崩。 */
+function readRaw(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeRaw(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* 存不进去就算了：偏好丢了顶多下次回到默认值 */
+  }
+}
+
+function dropRaw(key: string): void {
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* 同上 */
+  }
+}
+
+/** 读回来做一次校验；返回 null 表示「不合法」。 */
+function read<T>(key: string, validate: (raw: string) => T | null): T | null {
+  const raw = readRaw(key);
+  if (raw === null) return null;
+  const value = validate(raw);
+  if (value === null) {
+    // 不合法就地清掉：留着它只会在每次进页面时重复失败一次
+    dropRaw(key);
+  }
+  return value;
+}
+
+const FLAG = (on: string, off: string) => (raw: string) => {
+  const v = raw.trim();
+  if (v === on) return true;
+  if (v === off) return false;
+  return null;
+};
+
+export const prefs = {
+  theme: {
+    get: (): Theme | null => read(K.theme, (r) => (r === "dark" || r === "light" ? r : null)),
+    set: (v: Theme) => writeRaw(K.theme, v),
+  },
+
+  sidebarCollapsed: {
+    get: () => read(K.sidebar, FLAG("1", "0")),
+    set: (v: boolean) => writeRaw(K.sidebar, v ? "1" : "0"),
+  },
+
+  paletteOpen: {
+    get: () => read(K.palette, FLAG("1", "0")),
+    set: (v: boolean) => writeRaw(K.palette, v ? "1" : "0"),
+  },
+
+  /**
+   * 自动链档位：只接受**当前版本真实存在**的档位。
+   * 老版本写过的 key 在新版本里可能已经没了，原样用出去的下场是下拉框显示空白、
+   * 或铺链时静默退回第一档（用户以为自己选的是 L4）。
+   */
+  chainLevel: {
+    get: (known: readonly string[]): string | null =>
+      read(K.chainLevel, (r) => (known.includes(r) ? r : null)),
+    set: (v: string) => writeRaw(K.chainLevel, v),
+  },
+
+  /** 缩略图尺寸：限定在滑杆的步进范围内，超出就回默认值。 */
+  thumbSize: {
+    get: (min = 56, max = 176, fallback = 88): number =>
+      read(K.thumb, (r) => {
+        const v = Number(r);
+        return Number.isFinite(v) && v >= min && v <= max ? v : null;
+      }) ?? fallback,
+    set: (v: number) => writeRaw(K.thumb, String(v)),
+  },
+
+  setupDismissed: {
+    get: () => readRaw(K.setupDismissed) ?? "", // 只是个比较用的签名串，没有可校验的形状
+    set: (signature: string) => writeRaw(K.setupDismissed, signature),
+  },
+
+  /**
+   * 记住的模型是**本机配置的引用**，不是纯偏好：服务被删掉或改名后那个 key 就悬空了。
+   * 原样用出去的表现是选择框空白、一生成就报「模型服务不存在」。
+   */
+  modelKey: {
+    get: (modality: string, available: readonly string[]): string | null =>
+      read(K.model(modality), (r) => (r && available.includes(r) ? r : null)),
+    set: (modality: string, key: string) => {
+      if (key) writeRaw(K.model(modality), key);
+      else dropRaw(K.model(modality));
+    },
+  },
+
+  /** 提示词库 → 创作页的草稿传递（取走即删，所以读取就是消费） */
+  draftPrompt: {
+    set: (target: string, text: string) => writeRaw(K.draftPrompt, JSON.stringify({ target, text })),
+    take: (target: string): string | null => {
+      const raw = readRaw(K.draftPrompt);
+      if (raw === null) return null;
+      dropRaw(K.draftPrompt);
+      try {
+        const d = JSON.parse(raw) as { target?: unknown; text?: unknown };
+        return d.target === target && typeof d.text === "string" ? d.text : null;
+      } catch {
+        return null;
+      }
+    },
+  },
+
+  /** 导演台 → 视频生成的「首帧」传递 */
+  draftFirstFrame: {
+    set: (asset: { id: number; url: string }) =>
+      writeRaw(K.draftFirstFrame, JSON.stringify({ id: asset.id, url: asset.url })),
+    take: (): { id: number; url: string } | null => {
+      const raw = readRaw(K.draftFirstFrame);
+      if (raw === null) return null;
+      dropRaw(K.draftFirstFrame);
+      try {
+        const d = JSON.parse(raw) as { id?: unknown; url?: unknown };
+        return typeof d.id === "number" && typeof d.url === "string" ? { id: d.id, url: d.url } : null;
+      } catch {
+        return null;
+      }
+    },
+  },
+};

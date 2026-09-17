@@ -884,6 +884,8 @@ input, textarea, select { font-family: inherit; }
   width: 64px; height: 64px; border-radius: var(--radius-sm);
   border: 1.5px dashed var(--border-strong); display: grid; place-items: center;
   color: var(--text-3); cursor: pointer; background: var(--surface-2);
+  /* 有的地方是 <button>（键盘用户也要点得动），清掉浏览器默认内边距 */
+  padding: 0; font: inherit;
 }
 .upload-tile:hover { border-color: var(--primary); color: var(--primary); }
 .upload-tile svg { width: 20px; height: 20px; }
@@ -1185,6 +1187,110 @@ input, textarea, select { font-family: inherit; }
   font-family: var(--font-mono);
 }
 .audit-time { font-size: 12px; color: var(--text-3); white-space: nowrap; }
+
+/* ============ 配置导入导出 ============ */
+
+.transfer-actions { display: flex; align-items: center; gap: 8px; }
+
+/* 范围多选框：一张卡片一个范围，勾上的用主色描边 */
+.transfer-scopes {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.transfer-scopes-compact {
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  padding: 0; border-bottom: none;
+}
+.transfer-scope {
+  display: flex; align-items: flex-start; gap: 9px; cursor: pointer;
+  padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.transfer-scope:hover { border-color: var(--border-strong); }
+.transfer-scope.checked { border-color: var(--primary); background: var(--primary-soft); }
+.transfer-scope input { margin: 2px 0 0; accent-color: var(--primary); flex-shrink: 0; }
+.transfer-scope-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.transfer-scope-label { font-size: 13px; font-weight: 600; }
+.transfer-scope-desc { font-size: 11.5px; color: var(--text-3); line-height: 1.5; }
+
+/* 「不含 API Key」那一行：盾牌图标 + 说明 + 展开排除清单 */
+.transfer-note {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 18px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2); font-size: 12.5px; line-height: 1.7; color: var(--text-2);
+}
+.transfer-note svg { color: var(--success); flex-shrink: 0; }
+.transfer-note b { color: var(--text); }
+.transfer-note .btn { margin-left: auto; }
+
+.transfer-excluded { padding: 6px 18px 14px; border-bottom: 1px solid var(--border); }
+.transfer-excluded-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 5px 0;
+  font-size: 12px; line-height: 1.7; color: var(--text-3);
+}
+.transfer-excluded-row code {
+  flex-shrink: 0; padding: 1px 6px; border-radius: 4px;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+
+.transfer-file { padding: 14px 18px; font-size: 13px; line-height: 1.75; }
+.transfer-file code {
+  font-family: var(--font-mono); font-size: 12px;
+  padding: 1px 5px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border);
+}
+.transfer-file + .log-preview { margin: 0 18px 16px; max-height: 320px; }
+
+.transfer-result { padding: 0 18px 16px; }
+.transfer-result-head { padding: 12px 0 8px; font-size: 13px; font-weight: 650; }
+
+.transfer-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.transfer-table th {
+  padding: 7px 10px; text-align: left; font-size: 11.5px; font-weight: 600;
+  color: var(--text-3); border-bottom: 1px solid var(--border);
+}
+.transfer-table td {
+  padding: 7px 10px; color: var(--text-2); border-bottom: 1px solid var(--border);
+}
+.transfer-table tr:last-child td { border-bottom: none; }
+.transfer-strong { color: var(--primary); font-weight: 700; }
+
+.transfer-warnings,
+.transfer-conflicts { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.transfer-warning,
+.transfer-conflict {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  background: var(--warning-soft); font-size: 12px; line-height: 1.7; color: var(--text-2);
+}
+.transfer-warning svg,
+.transfer-conflict svg { flex-shrink: 0; margin-top: 2px; color: var(--warning); }
+
+.transfer-preview { font-size: 13px; }
+.transfer-preview-line { font-size: 12.5px; color: var(--text-3); }
+.transfer-preview .about-note { margin-top: 14px; }
+.transfer-preview .transfer-table { margin-top: 4px; }
+
+/* ============ 生成前软校验（告警但不阻断） ============ */
+
+.preflight { margin-bottom: 12px; }
+.preflight-head {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12.5px; font-weight: 600; color: var(--warning);
+}
+.preflight-head svg { flex-shrink: 0; }
+.preflight-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.preflight-item {
+  padding: 9px 11px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--warning-soft);
+  font-size: 12.5px; line-height: 1.7; color: var(--text-2);
+}
+/* info 只是提醒，不用警示色，免得「每条都像错误」 */
+.preflight-item.info { background: var(--surface-2); }
+.preflight-msg { display: flex; align-items: flex-start; gap: 7px; }
+.preflight-msg svg { flex-shrink: 0; margin-top: 3px; color: var(--warning); }
+.preflight-item.info .preflight-msg svg { color: var(--text-3); }
+.preflight-hint { margin-top: 5px; padding-left: 21px; color: var(--text-3); }
 
 /* ============ 关于与更新 ============ */
 

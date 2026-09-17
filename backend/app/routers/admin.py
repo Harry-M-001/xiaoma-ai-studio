@@ -10,6 +10,12 @@
     PUT    /api/admin/schema/{table}/{row_id}    修改（需带 version）
     DELETE /api/admin/schema/{table}/{row_id}    删除
 
+配置导入导出（把配置搬到另一份安装上）：
+
+    GET    /api/admin/config/scopes              可用范围 + 排除说明（前端多选框据此渲染）
+    GET    /api/admin/config/export?scopes=a,b   导出 JSON 快照
+    POST   /api/admin/config/import?dryRun=true  导入快照（dryRun=true 只预览不写库）
+
 新增一张配置表不需要动这里的任何一行代码。
 """
 
@@ -23,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.deps import get_db, require_auth
 from app.registry.schema_registry import SCHEMA_REGISTRY, TableSpec
 from app.services import config_center_service as config_center
+from app.services import config_transfer_service as config_transfer
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_auth)]
@@ -47,6 +54,41 @@ def _fail(exc: config_center.ConfigError) -> HTTPException:
 async def list_schemas() -> list[dict]:
     """返回所有已注册配置表的元信息，前端据此动态生成管理界面。"""
     return [config_center.spec_to_meta(s) for s in SCHEMA_REGISTRY.values()]
+
+
+# ---------- 配置导入导出 ----------
+
+
+@router.get("/config/scopes")
+async def config_scopes() -> dict:
+    """可用导出范围 + 固定排除项说明（"为什么不带 API Key / 为什么不带本机路径"）。"""
+    return config_transfer.scope_meta()
+
+
+@router.get("/config/export")
+async def export_config(
+    scopes: str | None = None, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """导出配置快照。scopes 逗号分隔，缺省是「用户资产」那一组。"""
+    try:
+        return await config_transfer.export_snapshot(db, scopes)
+    except config_center.ConfigError as e:
+        raise _fail(e) from e
+
+
+@router.post("/config/import")
+async def import_config(
+    payload: dict[str, Any], dryRun: bool = True, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """导入配置快照。
+
+    dryRun=true（默认）只返回「会新增 / 更新 / 跳过多少行、有哪些冲突」，
+    一行都不写；用户确认后再用 dryRun=false 真正落库（逐行提交并留审计）。
+    """
+    try:
+        return await config_transfer.import_snapshot(db, payload, dry_run=dryRun)
+    except config_center.ConfigError as e:
+        raise _fail(e) from e
 
 
 @router.get("/schema/{table}")
