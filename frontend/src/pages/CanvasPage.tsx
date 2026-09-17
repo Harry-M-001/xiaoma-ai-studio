@@ -1156,8 +1156,17 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const statusKey = `${status?.taskId ?? ""}:${status?.status ?? ""}`;
 
-  // 浮框超出画布可视区时把画布平移一点，让整块浮框都落在屏幕内
-  // （节点在画布任何位置都能看全，不用手动拖画布）
+  /**
+   * 浮框超出画布可视区时把画布平移一点，让整块浮框都落在屏幕内
+   * （节点在画布任何位置都能看全，不用手动拖画布）
+   *
+   * 但「什么时候才该对齐」有讲究，否则就是「拖节点时画布乱窜」：
+   *   浮框刚挂载（= 刚选中一个节点）、或浮框变高变矮了（产物出来了）→ 对齐
+   *   只是浮框的位置变了、尺寸没变 → 不动。位置变而尺寸不变，说明移动的是
+   *   节点或画布本身（都是用户自己拖的），这时候再把画布拽回去就是画布在乱走。
+   */
+  const lastAlignHeight = useRef(0);
+
   useEffect(() => {
     const nudge = ctx?.nudgeViewport;
     if (!nudge) return;
@@ -1179,6 +1188,11 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
       if (el.style.maxWidth !== `${availW}px`) el.style.maxWidth = `${availW}px`;
 
       const r = el.getBoundingClientRect();
+      // 初值 0 保证「刚挂载」这一趟必对齐；之后只有尺寸真的变了才再对齐
+      const resized = Math.abs(r.height - lastAlignHeight.current) >= 6;
+      lastAlignHeight.current = r.height;
+      if (!resized) return;
+
       let dy = 0;
       let dx = 0;
       if (r.bottom > box.bottom - margin) dy = r.bottom - (box.bottom - margin);
@@ -2545,8 +2559,20 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [getZoom, setCenter, setNodes]
   );
 
+  /**
+   * 浮框超出可视区时自动平移画布，让整块浮框都能看见。
+   *
+   * 但指针按在节点上时**一律不平移**。以前没有这道闸门，于是「拖节点偶尔画布乱窜」：
+   * 拖一个还没选中的节点会让它被选中、浮框随之挂载并在 420/950/1500ms 后测量，
+   * 这几次测量正好落在拖动过程中；任务状态轮询也会让浮框重新测量。指针还按在节点上、
+   * 画布先自己平移走了，看起来就是画布在乱窜。拖动期间挡掉之后，画布的自动平移
+   * 只会发生在「刚选中一个节点」与「浮框尺寸变了」这两个时刻。
+   */
+  const draggingRef = useRef(false);
+
   const nudgeViewport = useCallback(
     (dxScreen: number, dyScreen: number) => {
+      if (draggingRef.current) return;
       const { x, y, zoom } = getViewport();
       // 平移量与内容位移反向：浮框被右/下沿切掉，就要让内容往左/上走
       setViewport({ x: x - dxScreen, y: y - dyScreen, zoom }, { duration: 220 });
@@ -2897,6 +2923,15 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                 isValidConnection={isValidConnection}
                 onNodeClick={(_, n) => setSelectedId(n.id)}
                 onPaneClick={() => setSelectedId(null)}
+                // 拖动期间不让「浮框自动平移」动画布
+                onNodeDragStart={() => {
+                  draggingRef.current = true;
+                  // 顺手掐掉可能正在跑的自动平移动画：剩下那一两百毫秒同样会让用户觉得画布在动
+                  setViewport(getViewport(), { duration: 0 });
+                }}
+                onNodeDragStop={() => {
+                  draggingRef.current = false;
+                }}
                 zoomOnDoubleClick={false}
                 onlyRenderVisibleElements
                 connectionRadius={28}
