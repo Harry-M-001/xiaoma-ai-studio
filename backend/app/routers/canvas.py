@@ -20,7 +20,7 @@ from app.registry.canvas_nodes import (
     normalize_type,
     validate_document,
 )
-from app.services import canvas_runner, storage
+from app.services import canvas_agent, canvas_runner, storage
 
 router = APIRouter(prefix="/api/canvas", tags=["canvas"])
 
@@ -43,10 +43,26 @@ class RunNodeIn(BaseModel):
     node_id: str | None = None  # 不传 = 整图执行
 
 
+class AgentPlanIn(BaseModel):
+    brief: str = ""
+    model_key: str = ""
+
+
 @router.get("/contract")
 async def canvas_contract() -> dict:
     """节点契约下发：前端属性面板与连线校验的数据源。"""
     return {"schemaVersion": CANVAS_SCHEMA_VERSION, "nodeSchemas": NODE_SCHEMAS}
+
+
+@router.post("/agent/plan")
+async def canvas_agent_plan(payload: AgentPlanIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """自然语言搭画布：**只出草稿**，不改画布、不建任务。
+
+    落定交给前端（它本来就有画布状态与自动保存）。放服务端「先存草稿再让用户确认」
+    会多出一份需要清理的中间态，而用户直接关掉页面就没人清。
+    """
+    draft = await canvas_agent.plan(db, payload.brief, model_key=payload.model_key)
+    return draft.to_dict()
 
 
 def _aggregate_status(tasks: list[Task]) -> dict:
@@ -109,6 +125,18 @@ async def save_canvas(project_id: int, doc: CanvasDocIn, db: AsyncSession = Depe
     )
     await db.commit()
     return {"ok": True}
+
+
+@router.get("/{project_id}/preview")
+async def preview_canvas(project_id: int) -> dict:
+    """整图执行前的预估：会派多少任务、花多少次调用、哪些节点已有产物会被重做。
+
+    给「运行整图」的二次确认弹窗用。纯读：不建任务、不写库、不调模型。
+    """
+    try:
+        return await canvas_runner.preview_graph(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/{project_id}/run")

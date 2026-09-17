@@ -33,6 +33,7 @@ from app.routers import (
     meta,
     projects,
     providers,
+    share,
     system,
     update,
 )
@@ -86,6 +87,7 @@ app.include_router(generation.router)
 app.include_router(director.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
+app.include_router(share.router)
 app.include_router(comfy.router)
 app.include_router(update.router)
 app.include_router(logs.router)

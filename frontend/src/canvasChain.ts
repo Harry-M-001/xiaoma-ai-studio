@@ -112,6 +112,24 @@ export const CHAIN_LEVELS: ChainLevel[] = [
   },
 ];
 
+/**
+ * 按节点类型挑一个该用的模型。
+ *
+ * 抽出来是因为两个地方都要它：自动链铺节点、AI 搭画布落草稿。
+ * 原先这份逻辑只写在自动链里，而且 `image`（普通图片生成节点）落到了兜底分支上、
+ * 会被填成文本模型——自动链的模板里没有 image 节点，所以一直没露出来。
+ */
+export function modelKeyForNodeType(type: string, models: ModelOption[]): string {
+  const pick = (modality: string) => models.find((m) => m.modality === modality)?.key ?? "";
+  if (type === "video") return pick("video");
+  if (type === "image" || type === ASSET_IMAGE_KIND || type === STORYBOARD_IMAGE_KIND) {
+    return pick("image");
+  }
+  // ComfyUI 工作流不需要选模型（它按上传的工作流跑）
+  if (type === "workflow") return "";
+  return pick("text");
+}
+
 /** 这条链需要哪些能力（text / image / video），用于「缺什么」的提示 */
 export function requiredModalities(levelKey: string): string[] {
   const level = CHAIN_LEVELS.find((l) => l.key === levelKey) ?? CHAIN_LEVELS[0];
@@ -164,11 +182,6 @@ export function buildChainNodes(
   const stepX = 300;
   const stepY = 240;
   const idOf = (t: string) => `chain_${t}_${stamp}`;
-  const modelKeyFor = (t: string) => {
-    if (t === "video") return keys.video;
-    if (t === ASSET_IMAGE_KIND || t === STORYBOARD_IMAGE_KIND) return keys.image;
-    return keys.text;
-  };
 
   const nodes = level.nodes.map(({ type, col, row, data: extra }, i) => ({
     id: idOf(type),
@@ -177,7 +190,7 @@ export function buildChainNodes(
     selected: i === 0,
     data: {
       prompt: "",
-      model_key: modelKeyFor(type),
+      model_key: modelKeyForNodeType(type, models),
       schema: schemas[type],
       nodeType: type,
       ...extra,

@@ -471,6 +471,103 @@ input, textarea, select { font-family: inherit; }
 
 /* 文档正文编辑器：长文编辑要够大，所以在大弹窗基础上再放宽 */
 .canvas-dialog.wide { width: min(1040px, 94vw); height: min(760px, 88vh); }
+
+/* ============ AI 搭画布 ============ */
+
+/* 比正文编辑器窄：这里主要是读（草稿预览 + 说明），不是改长文 */
+.canvas-dialog.agent { width: min(720px, 94vw); max-height: 86vh; }
+.agent-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
+.agent-brief { width: 100%; resize: vertical; font-family: inherit; line-height: 1.6; }
+.agent-examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.agent-example {
+  font-size: 11.5px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px dashed var(--border-strong); background: transparent; color: var(--text-3);
+}
+.agent-example:hover { border-color: var(--primary); color: var(--primary); }
+
+.agent-result { display: flex; flex-direction: column; gap: 10px; }
+.agent-summary { font-size: 13px; font-weight: 600; color: var(--text); }
+.agent-caveat { font-size: 11.5px; color: var(--text-3); line-height: 1.7; }
+
+/* 迷你预览：横向可滚，宽链不会被压成一团 */
+.agent-mini {
+  overflow-x: auto; overflow-y: hidden; padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.agent-mini-inner { position: relative; }
+.agent-mini-edges { position: absolute; inset: 0; pointer-events: none; }
+.agent-mini-edges path { fill: none; stroke: var(--border-strong); stroke-width: 1.4; }
+.agent-mini-node {
+  position: absolute; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--primary-border); border-radius: 6px; background: var(--surface);
+  color: var(--text-2); font-size: 11px; white-space: nowrap; padding: 0 4px;
+}
+
+.agent-node-list { display: flex; flex-direction: column; gap: 2px; }
+.agent-node-row { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px dashed var(--border); font-size: 12px; }
+.agent-node-row:last-child { border-bottom: none; }
+.agent-node-kind { flex-shrink: 0; width: 84px; color: var(--text-3); }
+.agent-node-prompt { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.agent-lines-title { font-size: 11.5px; font-weight: 600; color: var(--text-3); margin-top: 4px; }
+.agent-lines { list-style: disc; margin: 0 0 0 18px; padding: 0; font-size: 12px; line-height: 1.75; color: var(--text-3); }
+.agent-lines.warn {
+  list-style: none; margin: 0; padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--warning-soft); color: var(--text-2);
+}
+.agent-lines.warn li + li { margin-top: 4px; }
+
+.agent-fail {
+  padding: 12px 14px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface-2);
+}
+.agent-fail-title { font-size: 13px; font-weight: 650; color: var(--text); }
+.agent-fail-next { margin-top: 6px; font-size: 12.5px; line-height: 1.75; color: var(--text-2); }
+
+/* ============ 运行整图的二次确认 ============ */
+
+/* 窄一些：这里是「看一眼再决定」，不是来读长文的 */
+.canvas-dialog.run-confirm { width: min(560px, 94vw); max-height: 86vh; }
+.run-confirm-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.run-confirm-total { font-size: 13px; line-height: 1.8; color: var(--text-2); }
+.run-confirm-total b { color: var(--text); }
+
+.run-confirm-nodes { display: flex; flex-direction: column; gap: 2px; }
+.run-confirm-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 6px 0;
+  border-bottom: 1px dashed var(--border); font-size: 12px;
+}
+.run-confirm-row:last-child { border-bottom: none; }
+.run-confirm-row.bad .run-confirm-label { color: var(--danger); }
+.run-confirm-label { flex-shrink: 0; width: 96px; color: var(--text-2); }
+.run-confirm-detail { color: var(--text-3); }
+/* 「已有产物会重做」是这一行里最该被看见的：给它上色，别混在灰字里 */
+.run-confirm-badge {
+  margin-left: auto; flex-shrink: 0; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border-strong); background: var(--warning-soft); color: var(--text-2);
+}
+.run-confirm-caveat { font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
+
+/* ============ 社区分享 ============ */
+
+.share-tabs { padding: 10px 16px 0; flex-shrink: 0; }
+.share-note {
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface-2);
+  font-size: 12px; line-height: 1.75; color: var(--text-2);
+}
+/* 分享码是等宽的一长串，用普通正文字体看不出「这是一整段」 */
+.share-code { font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6; word-break: break-all; }
+.share-pick { display: flex; gap: 8px; margin-top: 8px; }
+
+.share-meta { display: flex; flex-direction: column; gap: 4px; }
+.share-meta-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.share-meta-desc { font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
+.share-meta-line { font-size: 11.5px; color: var(--text-3); }
+
 .canvas-doc-editor-body {
   flex: 1; min-height: 0; width: 100%; resize: none;
   padding: 14px 16px; border: none; outline: none; background: var(--surface);

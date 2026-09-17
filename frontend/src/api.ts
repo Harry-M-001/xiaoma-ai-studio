@@ -23,10 +23,15 @@ import type {
   ProviderInput,
   ProviderKindMeta,
   ProviderPresetMeta,
+  ShareExportResult,
+  ShareImportResult,
+  ShareLicense,
   Project,
   CanvasDoc,
   CanvasNodeSchema,
   CanvasNodeStatus,
+  CanvasAgentDraft,
+  CanvasPreview,
   OllamaStatus,
   QuickSetupResult,
   SchemaRow,
@@ -183,6 +188,19 @@ export const api = {
     resolution: string;
   }) => request<PreflightResult>("/api/videos/preflight", { method: "POST", body: json(payload) }),
 
+  // 分享：服务端不托管任何内容，这里只做「打包」与「读懂」两件纯事
+  shareLicenses: () =>
+    request<{ default: string; options: ShareLicense[] }>("/api/share/licenses"),
+  shareExport: (payload: {
+    doc: unknown;
+    title: string;
+    description: string;
+    author: string;
+    license: string;
+  }) => request<ShareExportResult>("/api/share/export", { method: "POST", body: json(payload) }),
+  shareImport: (text: string) =>
+    request<ShareImportResult>("/api/share/import", { method: "POST", body: json({ text }) }),
+
   listTasks: (kind?: string, limit = 20) =>
     request<Task[]>(`/api/tasks?limit=${limit}${kind ? `&kind=${kind}` : ""}`),
   getTask: (id: number) => request<Task>(`/api/tasks/${id}`),
@@ -259,6 +277,9 @@ export const api = {
       schemaVersion: number;
       nodeSchemas: Record<string, CanvasNodeSchema>;
     }>("/api/canvas/contract"),
+  // AI 搭画布：只回草稿，不动画布。落定由前端做（它本来就有画布状态与自动保存）。
+  canvasAgentPlan: (payload: { brief: string; model_key?: string }) =>
+    request<CanvasAgentDraft>("/api/canvas/agent/plan", { method: "POST", body: json(payload) }),
   getCanvas: (projectId: number) =>
     request<CanvasDoc>(`/api/canvas/${projectId}`),
   saveCanvas: (projectId: number, doc: CanvasDoc) =>
@@ -278,6 +299,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ node_id: nodeId ?? null }),
     }),
+  // 整图执行前的预估：会派多少任务、花多少次调用（纯读，不建任务）
+  previewCanvas: (projectId: number) =>
+    request<CanvasPreview>(`/api/canvas/${projectId}/preview`),
   canvasStatus: (projectId: number) =>
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),

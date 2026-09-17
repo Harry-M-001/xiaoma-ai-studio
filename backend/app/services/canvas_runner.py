@@ -311,12 +311,20 @@ async def _inject_asset_refs(
 
 
 async def _create_asset_image_tasks(
-    db: AsyncSession, project_id: int, node: dict, upstream_text: str, images: list[Asset]
+    db: AsyncSession,
+    project_id: int,
+    node: dict,
+    upstream_text: str,
+    images: list[Asset],
+    dry_run: bool = False,
 ) -> list[Task]:
     """资产设定图节点：解析上游资产表 → 逐行建一个图片任务。
 
     一行资产 = 一个任务，好处是单行失败不影响其它行，任务中心里也能逐个重试。
     这批任务带同一个 asset_batch 标记，节点上因此能一次看到整批产物。
+
+    `dry_run=True` 时只把任务对象造出来、**不落库**，用来回答「这一跑会派多少个任务」。
+    预估与真跑共用这一段，是为了让「弹窗上写的数」与「实际派发的数」不可能对不上。
     """
     data = node.get("data") or {}
     label = NODE_SCHEMAS["assetImage"]["label"]
@@ -363,9 +371,12 @@ async def _create_asset_image_tasks(
             canvas_project_id=project_id,
             canvas_node_id=str(node["id"]),
         )
-        db.add(task)
+        if not dry_run:
+            db.add(task)
         tasks.append(task)
 
+    if dry_run:
+        return tasks
     await db.commit()
     for t in tasks:
         await db.refresh(t)
@@ -380,6 +391,7 @@ async def _create_storyboard_image_tasks(
     upstream_text: str,
     manual: list[Asset],
     card: style_service.StyleCard | None,
+    dry_run: bool = False,
 ) -> list[Task]:
     """分镜图节点：解析上游分镜表 → 逐镜建一个图片任务。
 
@@ -445,8 +457,11 @@ async def _create_storyboard_image_tasks(
                 canvas_node_id=str(node["id"]),
             )
         )
-        db.add(tasks[-1])
+        if not dry_run:
+            db.add(tasks[-1])
 
+    if dry_run:
+        return tasks
     await db.commit()
     for t in tasks:
         await db.refresh(t)
@@ -541,6 +556,7 @@ async def _create_shot_video_tasks(
     node: dict,
     upstream_text: str,
     images: list[Asset],
+    dry_run: bool = False,
 ) -> list[Task]:
     """视频节点逐镜出片：每一镜用它自己的分镜图当首帧，可选与下一镜首尾相连。
 
@@ -551,6 +567,9 @@ async def _create_shot_video_tasks(
     - `each`  每镜一段，该镜分镜图当首帧
     - `chain` 每镜一段，第 N 镜分镜图当首帧、**第 N+1 镜分镜图当尾帧**——相邻两镜
       的接缝处首尾同图，拼起来就是连贯的
+
+    `dry_run=True` 时只把任务对象造出来、**不落库**：用来回答「这一跑会派多少段视频」。
+    校验（镜号对不上、缺模型、模式不对）照旧照跑，所以预览也能提前把「这一跑必挂」说出来。
     """
     data = node.get("data") or {}
     label = NODE_SCHEMAS["video"]["label"]
@@ -658,7 +677,8 @@ async def _create_shot_video_tasks(
             canvas_project_id=project_id,
             canvas_node_id=str(node["id"]),
         )
-        db.add(task)
+        if not dry_run:
+            db.add(task)
         tasks.append(task)
 
     if not tasks:
@@ -668,6 +688,9 @@ async def _create_shot_video_tasks(
             f"而分镜表要的是镜号 {'、'.join(missing)}。"
             "常见原因是两边「生成镜数」填得不一样——请让「分镜图」节点覆盖到这些镜号"
         )
+
+    if dry_run:
+        return tasks
 
     await db.commit()
     for t in tasks:
@@ -701,6 +724,37 @@ async def _apply_manual_refs(db: AsyncSession, data: dict, images: list[Asset]) 
     return picked or images
 
 
+def _referenced_asset_ids(params: dict) -> list[int]:
+    """任务 params 里引用到的资产 id（参考图 / 首帧 / 尾帧 / 参考视频）。
+
+    整图预览靠它统计「同一张素材被这一跑引用了多少次」。
+    """
+    ids: list[int] = []
+    for key in ("ref_asset_ids", "video_ref_asset_ids"):
+        for x in params.get(key) or []:
+            if isinstance(x, int):
+                ids.append(x)
+    for key in ("first_frame_asset_id", "last_frame_asset_id"):
+        x = params.get(key)
+        if isinstance(x, int):
+            ids.append(x)
+    return ids
+
+
+async def _persist_task(db: AsyncSession, task: Task, dry_run: bool) -> Task:
+    """落库单个任务；`dry_run=True` 时**完全不碰 session**。
+
+    预览（预估要派多少任务）和真跑共用同一段建任务代码，只有「落库」这一步分开。
+    这样预览在物理上不可能写库——靠的不是调用方自觉，而是这里根本不执行写。
+    """
+    if dry_run:
+        return task
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    return task
+
+
 async def _create_node_task(
     db: AsyncSession,
     project_id: int,
@@ -710,6 +764,7 @@ async def _create_node_task(
     videos: list[Asset],
     upstream_text: str = "",
     injected_names: list[str] | None = None,
+    dry_run: bool = False,
 ) -> Task:
     ntype = node["type"]
     data = node.get("data") or {}
@@ -754,10 +809,7 @@ async def _create_node_task(
             canvas_project_id=project_id,
             canvas_node_id=str(node["id"]),
         )
-        db.add(task)
-        await db.commit()
-        await db.refresh(task)
-        return task
+        return await _persist_task(db, task, dry_run)
 
     # ComfyUI 工作流节点：不走模型解析，按工作流 ID + 参数表执行
     if ntype == "workflow":
@@ -783,10 +835,7 @@ async def _create_node_task(
             canvas_project_id=project_id,
             canvas_node_id=str(node["id"]),
         )
-        db.add(task)
-        await db.commit()
-        await db.refresh(task)
-        return task
+        return await _persist_task(db, task, dry_run)
 
     modality = "video" if ntype == "video" else "image"
     model_key = data.get("model_key") or ""
@@ -849,10 +898,7 @@ async def _create_node_task(
         canvas_project_id=project_id,
         canvas_node_id=str(node["id"]),
     )
-    db.add(task)
-    await db.commit()
-    await db.refresh(task)
-    return task
+    return await _persist_task(db, task, dry_run)
 
 
 async def _resolve_upstream(
@@ -883,11 +929,25 @@ def _missing_upstream_labels(upstream: list[tuple[str, dict, list[Asset]]]) -> l
     ]
 
 
+def _is_shot_video(node: dict) -> bool:
+    """视频节点是否开了「逐镜出片」。
+
+    开了之后提示词与首帧都来自上游（分镜表逐镜给画面、分镜图逐镜给首帧），
+    节点自己写不写提示词都成立 —— 这个口径必须只有一处定义，
+    否则「能不能跑」和「走哪条分支」会各判各的。
+    """
+    return (
+        node["type"] == "video"
+        and str((node.get("data") or {}).get("shotVideo") or "off") != "off"
+    )
+
+
 def _has_input(node: dict, prompt: str, upstream_text: str) -> bool:
     """节点是否有可执行输入。
 
     - 工作流节点：提示词可空（参数与工作流本身足够）
     - 批量图片节点（资产设定图 / 分镜图）：输入完全来自上游文档，节点自己的输入框可选
+    - 逐镜出片的视频节点：提示词由上游分镜表逐镜给出，节点自己的输入框可选
     - 文档节点：上游正文或本节点的「补充要求」有其一即可
     - 其余节点：必须有提示词
     """
@@ -896,6 +956,9 @@ def _has_input(node: dict, prompt: str, upstream_text: str) -> bool:
         return True
     if is_batch_image(ntype):
         return bool(upstream_text.strip())
+    if _is_shot_video(node):
+        # 每一镜的画面与首帧都由上游逐镜给出，节点自己不写提示词也成立
+        return True
     if is_doc_kind(ntype):
         own = str((node.get("data") or {}).get("prompt") or "").strip()
         return bool(upstream_text.strip() or own)
@@ -912,10 +975,14 @@ async def _build_node_tasks(
     doc: dict,
     node: dict,
     upstream: list[tuple[str, dict, list[Asset]]],
+    dry_run: bool = False,
 ) -> list[Task]:
     """把一个画布节点翻译成待执行的任务列表。
 
     普通节点 = 1 个任务；资产设定图节点 = 每行资产 1 个任务。
+
+    `dry_run=True` 只算数不落库：整图确认弹窗（见 `preview_graph`）走的也是这一段，
+    保证「弹窗上写的数」和「真跑派出的数」来自同一份计算。
     """
     prompt, images, videos, upstream_text = await _node_inputs(db, doc, node, upstream)
     if not _has_input(node, prompt, upstream_text):
@@ -926,7 +993,12 @@ async def _build_node_tasks(
 
     if is_asset_image(ntype):
         return await _create_asset_image_tasks(
-            db, project_id, node, upstream_text, await _apply_manual_refs(db, data, images)
+            db,
+            project_id,
+            node,
+            upstream_text,
+            await _apply_manual_refs(db, data, images),
+            dry_run=dry_run,
         )
 
     if is_storyboard_image(ntype):
@@ -935,13 +1007,15 @@ async def _build_node_tasks(
         manual = await _apply_manual_refs(db, data, [])
         card = await style_service.load_card(db, str(data.get("styleKey") or ""))
         return await _create_storyboard_image_tasks(
-            db, project_id, node, upstream_text, manual, card
+            db, project_id, node, upstream_text, manual, card, dry_run=dry_run
         )
 
     # 视频节点逐镜出片（D 期）：分镜图节点已经逐镜出好图，这里一镜一段送进生视频。
     # 放在普通分支之前，因为它同样要一次建出多个任务。
-    if ntype == "video" and str(data.get("shotVideo") or "off") != "off":
-        return await _create_shot_video_tasks(db, project_id, node, upstream_text, images)
+    if _is_shot_video(node):
+        return await _create_shot_video_tasks(
+            db, project_id, node, upstream_text, images, dry_run=dry_run
+        )
 
     injected: list[str] = []
     # 角色提及注入：提示词里提到资产名就自动挂设定图（可在节点上关掉）
@@ -950,7 +1024,15 @@ async def _build_node_tasks(
 
     return [
         await _create_node_task(
-            db, project_id, node, prompt, images, videos, upstream_text, injected
+            db,
+            project_id,
+            node,
+            prompt,
+            images,
+            videos,
+            upstream_text,
+            injected,
+            dry_run=dry_run,
         )
     ]
 
@@ -984,6 +1066,155 @@ async def run_single_node(project_id: int, node_id: str) -> list[Task]:
         # 队列满时由 runner 把这条任务标失败并写明原因（提示口径统一在 runner 里）
         await runner.start_or_fail(task.kind, task.id)
     return tasks
+
+
+# 一张素材被这一跑引用这么多次以上，才值得在确认弹窗里点名（更低的次数属正常搭配）
+_REUSE_MIN_HITS = 2
+
+
+async def preview_graph(project_id: int) -> dict:
+    """整图执行前的预估：这一跑会派多少任务、花多少次调用、谁已经有产物。
+
+    **纯读**：不建任务、不写库、不调模型（模型解析只查本机配置），可以随便点。
+    任务数用的是和真跑同一段代码（`_build_node_tasks(dry_run=True)`），
+    所以弹窗上的数字不可能和实际派发的对不上；算不出来的节点如实标成待定，不猜。
+    """
+    async with SessionLocal() as db:
+        project = await db.get(Project, project_id)
+        if project is None or not project.canvas_json:
+            raise ValueError("画布不存在")
+        doc = json.loads(project.canvas_json)
+        nodes = {n["id"]: n for n in doc.get("nodes", [])}
+        order = _topo_order(doc.get("nodes", []), doc.get("edges", []))
+
+        items: list[dict] = []
+        hits: dict[int, int] = {}  # 资产 id → 本次被引用次数
+        by_kind: dict[str, int] = {}
+        total_tasks = 0
+        step_nodes = 0  # 本次会执行的节点数
+        pending: list[str] = []  # 条数待定的节点
+        rerun: list[str] = []  # 已经有产物、这一跑会重做的节点
+        blocked: list[str] = []  # 已经能判定必挂的节点
+        billable = False  # 是否会真实调用外部模型（workflow 走本机 ComfyUI，不扣额度）
+
+        for nid in order:
+            node = nodes[nid]
+            if not is_runnable(node["type"]):
+                continue
+            step_nodes += 1
+            if node["type"] != "workflow":
+                # 非 workflow 节点一律要真调模型（workflow 走本机 ComfyUI，不扣额度）
+                billable = True
+            label = NODE_SCHEMAS[node["type"]]["label"]
+            upstream = await _resolve_upstream(db, project_id, doc, nid)
+            # 上游里本次才会产出东西的节点：它们跑完之前，本节点会派几条无从得知
+            waiting = [
+                NODE_SCHEMAS[s["type"]]["label"]
+                for _sid, s, assets in upstream
+                if is_runnable(s["type"]) and not assets and not _doc_override_text(s)
+            ]
+            existing = await _latest_task_assets(db, project_id, nid)
+
+            item: dict = {
+                "id": nid,
+                "type": node["type"],
+                "label": label,
+                "count": None,
+                "kinds": {},
+                "hasOutput": bool(existing),
+                "outputCount": len(existing),
+                "waiting": waiting,
+                "error": "",
+            }
+
+            try:
+                tasks = await _build_node_tasks(
+                    db, project_id, doc, node, upstream, dry_run=True
+                )
+            except Exception as e:  # noqa: BLE001 - 预览要把「这跑必挂」摆出来，而不是自己中断
+                if waiting:
+                    item["waiting"] = waiting
+                else:
+                    item["error"] = str(e)
+                    blocked.append(label)
+            else:
+                item["count"] = len(tasks)
+                total_tasks += len(tasks)
+                by: dict[str, int] = {}
+                for t in tasks:
+                    by[t.kind] = by.get(t.kind, 0) + 1
+                    by_kind[t.kind] = by_kind.get(t.kind, 0) + 1
+                    for aid in _referenced_asset_ids(read_task_params(t)):
+                        hits[aid] = hits.get(aid, 0) + 1
+                item["kinds"] = by
+
+            if item["count"] is None and not item["error"]:
+                pending.append(label)
+            if existing:
+                rerun.append(label)
+            items.append(item)
+
+        reused: list[dict] = []
+        if hits:
+            arow = await db.execute(select(Asset).where(Asset.id.in_(list(hits))))
+            names = {a.id: (a.name or a.original_name) for a in arow.scalars().all()}
+            reused = [
+                {"assetId": aid, "name": names.get(aid, f"#{aid}"), "count": n}
+                for aid, n in sorted(hits.items(), key=lambda kv: (-kv[1], kv[0]))
+                if n >= _REUSE_MIN_HITS
+            ]
+
+    notes: list[dict] = []
+    if blocked:
+        notes.append(
+            {
+                "level": "blocker",
+                "text": "这一跑会直接失败："
+                + "、".join(f"「{x}」" for x in blocked)
+                + "。请先按节点上的提示补齐配置，否则整图会在这里断掉。",
+            }
+        )
+    if billable and (total_tasks or pending or blocked):
+        seg: list[str] = []
+        if total_tasks:
+            seg.append(f"至少 {total_tasks} 次模型调用")
+        if pending:
+            seg.append(f"{len(pending)} 个节点的次数要等上游跑完才知道")
+        notes.append(
+            {
+                "level": "warning",
+                "text": f"这一跑会执行 {step_nodes} 个节点"
+                + (f"，{'、'.join(seg)}" if seg else "")
+                + "。每次调用都会真实消耗对应服务的额度（本机服务则占本机算力），确认后再跑。",
+            }
+        )
+    if rerun:
+        notes.append(
+            {
+                "level": "warning",
+                "text": "、".join(f"「{x}」" for x in rerun)
+                + " 已经有产物了，整图会把它们重做一遍（再花一次钱）。"
+                "只想补跑某一步的话，用那个节点上的单独运行。",
+            }
+        )
+    if reused:
+        top = "、".join(f"「{r['name']}」{r['count']} 次" for r in reused[:5])
+        notes.append({"level": "info", "text": f"本次会复用已有素材：{top}。"})
+
+    return {
+        "nodes": items,
+        "totals": {
+            "tasks": total_tasks,
+            "steps": step_nodes,
+            "byKind": by_kind,
+            "pendingNodes": len(pending),
+            "rerunNodes": len(rerun),
+            "blockedNodes": len(blocked),
+        },
+        "reused": reused,
+        "notes": notes,
+        "billable": billable,
+    }
 
 
 async def _run_full_graph(project_id: int) -> None:

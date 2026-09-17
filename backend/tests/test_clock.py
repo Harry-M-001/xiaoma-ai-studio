@@ -85,6 +85,7 @@ LOCAL_CLOCK_OK = {
     "app/routers/logs.py": "日志导出文件名用本地时间，用户按文件名找日志才对得上",
     "app/services/log_service.py": "日志正文里的时间戳是给人看的，本地时间更直观",
     "app/services/config_transfer_service.py": "快照里的 exportedAt 是带时区的展示值，不是入库时间",
+    "app/services/share_service.py": "分享快照里的 createdAt 同样是带时区的展示值，不是入库时间",
     "app/services/storage.py": "媒体按月分目录，按**本地**月份分，用户照自己的日历才找得到",
     "app/services/update_service.py": "更新检查时间只以字符串直接展示，不经浏览器做时区换算",
 }

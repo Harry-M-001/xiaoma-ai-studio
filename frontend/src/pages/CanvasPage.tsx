@@ -37,10 +37,12 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Share2,
   Sparkles,
   Trash2,
   Upload,
   Video,
+  Wand2,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
@@ -48,12 +50,17 @@ import { api } from "../api";
 import type {
   AgentMeta,
   Asset,
+  CanvasAgentDraft,
   CanvasDoc,
   CanvasNodeData,
   CanvasNodeSchema,
   CanvasNodeStatus,
+  CanvasPreview,
   ComfyWorkflow,
   ModelOption,
+  ShareExportResult,
+  ShareImportResult,
+  ShareLicense,
   StyleOption,
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
@@ -67,7 +74,9 @@ import {
   STORYBOARD_IMAGE_KIND,
   buildChainNodes,
   missingModelMessage,
+  modelKeyForNodeType,
   toCanvasDocNodes,
+  type DocNodeInput,
 } from "../canvasChain";
 
 /** 自动链文档节点类型（需要调 LLM 写正文） */
@@ -461,6 +470,662 @@ function DocEditorDialog({
           </button>
           <button type="button" className="btn btn-primary btn-sm" onClick={() => onSave(text)}>
             保存到节点
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- 社区分享 ---------------- */
+
+/** 下载任意文本为文件（走 Blob；设了口令时直链带不上 Authorization） */
+function downloadJson(text: string, filename: string) {
+  const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * 分享一个画布。
+ *
+ * 两条产品上的判断，写在组件里免得被改回去：
+ * - **默认走「复制分享码」**：这是「零服务器」下最省事的路径，贴进聊天窗口就完事。
+ *   码太长时（后端会告诉我们）主动建议改用文件，而不是让用户复制一段必然被截断的文本。
+ * - **导入先看清再落**：标题、作者、授权范围、缺什么，都摆出来之后才给「导入到画布」。
+ *   别人分享的东西是什么、能不能用、允许你怎么用，这三件事不该混在一起让人猜。
+ */
+function ShareDialog({
+  doc,
+  defaultTitle,
+  onApply,
+  onClose,
+}: {
+  doc: CanvasDoc;
+  defaultTitle: string;
+  onApply: (doc: CanvasDoc) => void;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [tab, setTab] = useState<"export" | "import">("export");
+
+  const [licenses, setLicenses] = useState<ShareLicense[]>([]);
+  const [title, setTitle] = useState(defaultTitle);
+  const [description, setDescription] = useState("");
+  const [author, setAuthor] = useState("");
+  const [license, setLicense] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [exported, setExported] = useState<ShareExportResult | null>(null);
+
+  const [text, setText] = useState("");
+  const [incoming, setIncoming] = useState<ShareImportResult | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await api.shareLicenses();
+        setLicenses(r.options);
+        setLicense((prev) => prev || r.default);
+      } catch {
+        // 拿不到档位不该拦住分享：留空走后端默认那一档
+      }
+    })();
+  }, []);
+
+  const nodeCount = doc.nodes.length;
+
+  const doExport = async () => {
+    if (nodeCount === 0) {
+      toast.error("空画布没什么可分享的");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.shareExport({ doc, title, description, author, license });
+      setExported(r);
+      toast.success("已打包，可以复制分享码或下载文件");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "打包失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyCode = async () => {
+    if (!exported) return;
+    try {
+      await navigator.clipboard.writeText(exported.code);
+      toast.success(`分享码已复制（${exported.codeLength} 字符）`);
+    } catch {
+      toast.error("复制失败，请手动选中下面的内容");
+    }
+  };
+
+  const doImport = async (raw: string) => {
+    if (!raw.trim()) {
+      toast.error("请粘贴分享码或选择 .json 文件");
+      return;
+    }
+    setBusy(true);
+    try {
+      setIncoming(await api.shareImport(raw));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "读取失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onPickFile = async (file: File | undefined) => {
+    if (!file) return;
+    const body = await file.text();
+    setText(body);
+    await doImport(body);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const input = (value: string, set: (v: string) => void, placeholder: string) => (
+    <input className="input" value={value} placeholder={placeholder} onChange={(e) => set(e.target.value)} />
+  );
+
+  return (
+    <div className="canvas-dialog-mask" onMouseDown={onClose}>
+      <div className="canvas-dialog agent" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="canvas-dialog-head">
+          <span className="canvas-dialog-title">分享画布</span>
+          <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="segmented share-tabs">
+          <button className={tab === "export" ? "active" : ""} onClick={() => setTab("export")}>
+            导出给别人
+          </button>
+          <button className={tab === "import" ? "active" : ""} onClick={() => setTab("import")}>
+            导入别人的
+          </button>
+        </div>
+
+        <div className="agent-body">
+          {tab === "export" ? (
+            <>
+              <div className="share-note">
+                分享的是「怎么搭」：节点拓扑、每个节点的要求与参数。
+                不含产出的图片视频，也不含你的模型服务与密钥。
+              </div>
+              <div className="field">
+                <label className="field-label">标题与说明</label>
+                {input(title, setTitle, "例如：60 秒竖屏短剧流水线")}
+                {input(description, setDescription, "一句话说明这条链是干什么的（可选）")}
+              </div>
+              <div className="field">
+                <label className="field-label">作者与授权范围</label>
+                {input(author, setAuthor, "你的名字或昵称（可选）")}
+                <div className="select-wrap">
+                  <select className="select" value={license} onChange={(e) => setLicense(e.target.value)}>
+                    {licenses.map((l) => (
+                      <option key={l.key} value={l.key}>
+                        {l.key} · {l.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="field-hint">
+                  授权范围只影响「别人可以拿它做什么」。不填就会问一次作者。
+                </div>
+              </div>
+
+              {exported && (
+                <div className="agent-result">
+                  {exported.codeTooLong ? (
+                    <div className="agent-lines warn">
+                      <li>
+                        分享码有 {exported.codeLength} 字符，贴到聊天窗口里容易被截断。
+                        建议下载 .json 文件发给对方。
+                      </li>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="agent-lines-title">
+                        分享码（{exported.codeLength} 字符，直接贴给对方）
+                      </div>
+                      <textarea className="input share-code" readOnly rows={4} value={exported.code} />
+                    </>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="field">
+                <label className="field-label">粘贴分享码，或选择对方发来的 .json 文件</label>
+                <textarea
+                  className="input share-code"
+                  rows={5}
+                  value={text}
+                  placeholder={'XMS1:… 或 {"format":"xiaoma-share",…}'}
+                  onChange={(e) => setText(e.target.value)}
+                />
+                <div className="share-pick">
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => fileRef.current?.click()}>
+                    <Upload size={14} />
+                    选择 .json 文件
+                  </button>
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".json,application/json,text/plain"
+                    hidden
+                    onChange={(e) => void onPickFile(e.target.files?.[0])}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    disabled={busy}
+                    onClick={() => void doImport(text)}
+                  >
+                    {busy ? <Spinner /> : null}
+                    读一读内容
+                  </button>
+                </div>
+              </div>
+
+              {incoming && (
+                <div className="agent-result">
+                  {incoming.ok ? (
+                    <div className="share-meta">
+                      <div className="share-meta-title">{incoming.title || "未命名画布"}</div>
+                      {incoming.description ? (
+                        <div className="share-meta-desc">{incoming.description}</div>
+                      ) : null}
+                      <div className="share-meta-line">
+                        {incoming.author ? `作者：${incoming.author} · ` : ""}
+                        {incoming.createdAt ? `${incoming.createdAt.replace("T", " ")} · ` : ""}
+                        {`${incoming.doc.nodes.length} 个节点 / ${incoming.doc.edges.length} 条连线`}
+                      </div>
+                      <div className="share-meta-line">
+                        授权：{incoming.license || "未声明"}
+                        {incoming.licenseText ? `（${incoming.licenseText}）` : ""}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="agent-fail">
+                      <div className="agent-fail-title">这份分享用不了</div>
+                      <ul className="agent-lines">
+                        {incoming.errors.map((e, i) => (
+                          <li key={i}>{e}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {incoming.warnings.length > 0 && (
+                    <ul className="agent-lines warn">
+                      {incoming.warnings.map((w, i) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="canvas-dialog-foot">
+          <span className="canvas-dialog-hint">
+            {tab === "export"
+              ? `${nodeCount} 个节点 · 服务端不存任何分享内容`
+              : "导入只读取，点确认才落到画布上"}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            关闭
+          </button>
+          {tab === "export" ? (
+            <>
+              {exported && (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void copyCode()}>
+                  复制分享码
+                </button>
+              )}
+              {exported && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => downloadJson(JSON.stringify(exported.snapshot, null, 2), `${title || "canvas"}.xiaoma-share.json`)}
+                >
+                  下载 .json
+                </button>
+              )}
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => void doExport()} disabled={busy}>
+                {busy ? <Spinner light /> : null}
+                {exported ? "重新打包" : "打包"}
+              </button>
+            </>
+          ) : (
+            incoming?.ok && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => onApply(incoming.doc)}>
+                导入到画布
+              </button>
+            )
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- AI 搭画布 ---------------- */
+
+const AGENT_EXAMPLES = [
+  "做一个 60 秒竖屏短剧，三幕结构，从一句话创意开始",
+  "只要文字产出：小说到分镜，先不要出图",
+  "角色要立得住：先出资产表做设定图，再逐镜出图",
+];
+
+/** 预览卡片与间距：固定尺寸而不是按后端坐标缩放——7 列的链缩到 460px 宽会糊成一坨 */
+const MINI_COL_W = 106;
+const MINI_ROW_H = 38;
+const MINI_CARD_W = 88;
+const MINI_CARD_H = 26;
+
+/**
+ * 草稿的迷你预览。
+ *
+ * 不按后端坐标等比缩放，而是取「列序 / 行序」重新摆：后端布局本来就是整齐的网格，
+ * 取序号之后无论 3 个节点还是 12 个节点，预览都一样看得清。
+ * 形状忠实（分叉能看出来），尺寸不忠实——这是有意的取舍。
+ */
+function DraftMiniMap({
+  draft,
+  labelOf,
+}: {
+  draft: CanvasAgentDraft;
+  labelOf: (kind: string) => string;
+}) {
+  const xs = [...new Set(draft.nodes.map((n) => n.position.x))].sort((a, b) => a - b);
+  const colOf = new Map(xs.map((x, i) => [x, i]));
+  const byCol = new Map<number, CanvasAgentDraft["nodes"]>();
+  for (const n of draft.nodes) {
+    const c = colOf.get(n.position.x) ?? 0;
+    byCol.set(c, [...(byCol.get(c) ?? []), n]);
+  }
+  const place = new Map<string, { x: number; y: number }>();
+  let maxRows = 1;
+  for (const [col, list] of byCol) {
+    const sorted = [...list].sort((a, b) => a.position.y - b.position.y);
+    maxRows = Math.max(maxRows, sorted.length);
+    sorted.forEach((n, row) => place.set(n.id, { x: col * MINI_COL_W, y: row * MINI_ROW_H }));
+  }
+  const width = Math.max(1, xs.length) * MINI_COL_W;
+  const height = maxRows * MINI_ROW_H;
+
+  return (
+    <div className="agent-mini">
+      <div className="agent-mini-inner" style={{ width, height }}>
+        <svg className="agent-mini-edges" width={width} height={height}>
+          {draft.edges.map((e, i) => {
+            const a = place.get(e.from);
+            const b = place.get(e.to);
+            if (!a || !b) return null;
+            const y1 = a.y + MINI_CARD_H / 2;
+            const y2 = b.y + MINI_CARD_H / 2;
+            const mid = (a.x + MINI_CARD_W + b.x) / 2;
+            return (
+              <path
+                key={i}
+                d={`M ${a.x + MINI_CARD_W} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${b.x} ${y2}`}
+              />
+            );
+          })}
+        </svg>
+        {draft.nodes.map((n) => {
+          const p = place.get(n.id)!;
+          return (
+            <div
+              key={n.id}
+              className="agent-mini-node"
+              style={{ left: p.x, top: p.y, width: MINI_CARD_W, height: MINI_CARD_H }}
+              title={String(n.data.prompt ?? "")}
+            >
+              {labelOf(n.kind)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** 状态 → 这块面板该怎么说话。文案集中在表里，免得散在 JSX 里各写一遍。 */
+const AGENT_FAIL_TITLE: Record<CanvasAgentDraft["status"], string> = {
+  ok: "",
+  need_input: "需求再具体一点",
+  need_credentials: "还没有可用的文本模型",
+  unparsable: "模型没有按格式回答",
+  upstream_error: "调用模型失败",
+};
+
+function AgentDialog({
+  textModels,
+  schemas,
+  onApply,
+  onClose,
+}: {
+  textModels: ModelOption[];
+  schemas: Record<string, CanvasNodeSchema>;
+  onApply: (draft: CanvasAgentDraft) => void;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [brief, setBrief] = useState("");
+  const [modelKey, setModelKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<CanvasAgentDraft | null>(null);
+
+  const labelOf = (kind: string) => schemas[kind]?.label ?? kind;
+
+  const run = async () => {
+    if (brief.trim().length < 4) {
+      toast.error("先说说你想做什么");
+      return;
+    }
+    setBusy(true);
+    try {
+      setDraft(await api.canvasAgentPlan({ brief: brief.trim(), model_key: modelKey }));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "生成失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ok = draft?.status === "ok";
+
+  return (
+    <div className="canvas-dialog-mask" onMouseDown={onClose}>
+      <div className="canvas-dialog agent" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="canvas-dialog-head">
+          <span className="canvas-dialog-title">AI 搭画布</span>
+          <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="agent-body">
+          <div className="field">
+            <label className="field-label">你想要什么</label>
+            <textarea
+              className="input agent-brief"
+              rows={2}
+              autoFocus
+              value={brief}
+              placeholder="例如：做一个 60 秒竖屏短剧，三幕结构，从一句话创意开始"
+              onChange={(e) => setBrief(e.target.value)}
+            />
+            <div className="agent-examples">
+              {AGENT_EXAMPLES.map((ex) => (
+                <button key={ex} type="button" className="agent-example" onClick={() => setBrief(ex)}>
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="field-label">用哪个模型搭（可留空，自动挑一个可用的文本模型）</label>
+            <ModelSelect models={textModels} value={modelKey} onChange={setModelKey} placeholder="自动选择" />
+          </div>
+
+          {draft && (
+            <div className="agent-result">
+              {ok ? (
+                <>
+                  <div className="agent-summary">{draft.summary || "已按你的需求搭好草稿"}</div>
+                  <DraftMiniMap draft={draft} labelOf={labelOf} />
+                  <div className="agent-node-list">
+                    {draft.nodes.map((n) => (
+                      <div key={n.id} className="agent-node-row">
+                        <span className="agent-node-kind">{labelOf(n.kind)}</span>
+                        <span className="agent-node-prompt">{String(n.data.prompt ?? "") || "（未写要求）"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="agent-fail">
+                  <div className="agent-fail-title">{AGENT_FAIL_TITLE[draft.status]}</div>
+                  {draft.nextAction ? <div className="agent-fail-next">{draft.nextAction}</div> : null}
+                </div>
+              )}
+
+              {draft.warnings.length > 0 && (
+                <ul className="agent-lines warn">
+                  {draft.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
+              {draft.notes.length > 0 && (
+                <>
+                  <div className="agent-lines-title">我对模型给的东西做了这些改动</div>
+                  <ul className="agent-lines">
+                    {draft.notes.map((n, i) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {ok && (
+                <div className="agent-caveat">
+                  这只是草稿：落定之后每个节点的要求都可以再改，也可以先只跑前面几步看看效果。
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="canvas-dialog-foot">
+          <span className="canvas-dialog-hint">
+            {ok ? `${draft.nodes.length} 个节点 · 还没放到画布上` : "生成不影响现有画布"}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            关闭
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void run()} disabled={busy}>
+            {busy ? <Spinner /> : <Sparkles size={14} />}
+            {draft ? "重新生成" : "生成草稿"}
+          </button>
+          {ok && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => onApply(draft)}>
+              放到画布上
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- 运行整图的二次确认（扣费前先说清楚） ---------------- */
+
+const PREVIEW_KIND_LABEL: Record<string, string> = {
+  text: "文本",
+  image: "图片",
+  video: "视频",
+  workflow: "本机工作流",
+};
+
+function kindSummary(kinds: Record<string, number>): string {
+  return Object.entries(kinds)
+    .map(([k, n]) => `${PREVIEW_KIND_LABEL[k] ?? k} ${n}`)
+    .join(" · ");
+}
+
+/**
+ * 「运行整图」前的确认弹窗。
+ *
+ * 整图会把图里每个节点都重跑一遍 —— 包括已经有产物的那些，每条都是真花钱的调用。
+ * 所以点下去之前先把「会派几个任务、哪些会被重做、哪个现在就会挂」摆出来，
+ * 而不是等跑完在任务中心里才发现花多了。
+ */
+function RunConfirmDialog({
+  preview,
+  busy,
+  onConfirm,
+  onClose,
+}: {
+  preview: CanvasPreview;
+  busy: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const { totals } = preview;
+  // 只列需要解释的节点：一次多条（批量扇出）、已有产物（会被重做）、必挂、条数待定
+  const rows = preview.nodes.filter(
+    (n) => n.error || n.count === null || (n.count ?? 0) > 1 || n.hasOutput
+  );
+  const detail: Record<string, string> = {};
+  rows.forEach((n) => {
+    if (n.error) detail[n.id] = "现在就会失败";
+    else if (n.count === null) detail[n.id] = "条数待定";
+    else detail[n.id] = `${n.count} 条 · ${kindSummary(n.kinds)}`;
+  });
+
+  return (
+    <div className="canvas-dialog-mask" onMouseDown={onClose}>
+      <div className="canvas-dialog run-confirm" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="canvas-dialog-head">
+          <span className="canvas-dialog-title">运行整图 · 先看一眼花费</span>
+          <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="run-confirm-body">
+          <div className="run-confirm-total">
+            这一跑会执行 <b>{totals.steps}</b> 个节点
+            {totals.tasks > 0 ? (
+              <>
+                ，至少 <b>{totals.tasks}</b> 次模型调用
+              </>
+            ) : null}
+            {totals.pendingNodes > 0 ? (
+              <>，另有 {totals.pendingNodes} 个节点的次数要等上游跑完才知道</>
+            ) : null}
+            。
+          </div>
+
+          {preview.notes.length > 0 && (
+            <ul className="agent-lines warn">
+              {preview.notes.map((n, i) => (
+                <li key={i}>{n.text}</li>
+              ))}
+            </ul>
+          )}
+
+          {rows.length > 0 && (
+            <div className="run-confirm-nodes">
+              {rows.map((n) => (
+                <div key={n.id} className={`run-confirm-row${n.error ? " bad" : ""}`}>
+                  <span className="run-confirm-label">{n.label}</span>
+                  <span className="run-confirm-detail">{detail[n.id]}</span>
+                  {n.hasOutput ? (
+                    <span className="run-confirm-badge">已有 {n.outputCount} 个产物，会重做</span>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="run-confirm-caveat">
+            {totals.blockedNodes > 0
+              ? "标了「现在就会失败」的节点这一跑会跳过，其余照跑；建议先补齐配置再跑。"
+              : "想省钱的话，可以先用单个节点上的「运行」只补跑没出好的那几步。"}
+          </div>
+        </div>
+
+        <div className="canvas-dialog-foot">
+          <span className="canvas-dialog-hint">预估与实际派发用的是同一段逻辑</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            先不跑
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {busy ? <Spinner /> : <Play size={14} />}
+            开始运行
           </button>
         </div>
       </div>
@@ -1357,6 +2022,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [assetKind, setAssetKind] = useState<AssetKind>("all");
   const [railTab, setRailTab] = useState<"elements" | "assets">("elements");
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [pickerFor, setPickerFor] = useState<{ nodeId: string; slot?: "first" | "last" } | null>(null);
   const [lightbox, setLightbox] = useState<LightboxItem | null>(null);
   const [editorFor, setEditorFor] = useState<DocEditRequest | null>(null);
@@ -1364,6 +2031,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
   const [running, setRunning] = useState(false);
+  // 整图运行前的预估结果（非 null 时弹确认框）
+  const [runPreview, setRunPreview] = useState<CanvasPreview | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(() => prefs.paletteOpen.get() ?? true);
   // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）。
@@ -1545,6 +2214,107 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [schemas, models, setNodes, setEdges, toast]
   );
 
+  /**
+   * 把一批外来的节点与连线落到画布上（AI 草稿与分享导入共用这一份）。
+   *
+   * 三件必须做对的事，两个来源都得满足，所以只写一遍：
+   * - **与已有内容错开**：外来坐标都从固定原点算起，直接落上去会正好压在旧节点上，
+   *   用户看到的是「画布被搞乱了」。整体平移到现有内容右侧。
+   * - **id 重新盖章**：同一张画布可以反复导入，id 撞车会让 ReactFlow 把两批节点搅在一起。
+   * - **按类型补模型**：外来内容里没有 model_key（本机的服务编号对别人没意义），
+   *   落进来时按节点类型补一个本机可用的。
+   * 落定后才 setDirty，自动保存接手——外来内容本身从不经过服务端。
+   */
+  const mergeCanvasContent = useCallback(
+    (
+      incomingNodes: { id: string; type: string; position: { x: number; y: number }; data: CanvasNodeData }[],
+      incomingEdges: { source: string; target: string; sourceHandle?: string | null; targetHandle?: string | null }[],
+    ): number => {
+      const usable = incomingNodes.filter((n) => schemas[n.type]);
+      if (usable.length === 0) return 0;
+
+      const stamp = Date.now().toString(36);
+      const existing = nodesRef.current;
+      let shift = { x: 0, y: 0 };
+      if (existing.length > 0) {
+        const inMinX = Math.min(...usable.map((n) => n.position.x));
+        const inMinY = Math.min(...usable.map((n) => n.position.y));
+        const targetX = Math.max(...existing.map((n) => n.position.x)) + 340;
+        const targetY = Math.min(...existing.map((n) => n.position.y));
+        shift = { x: targetX - inMinX, y: targetY - inMinY };
+      }
+      const newId = (raw: string) => `im_${raw}_${stamp}`;
+      const kindOf = new Map(usable.map((n) => [n.id, n.type]));
+
+      const added: Node<CanvasNodeData>[] = usable.map((n) => ({
+        id: newId(n.id),
+        type: "contract",
+        position: { x: n.position.x + shift.x, y: n.position.y + shift.y },
+        data: {
+          ...n.data,
+          model_key: modelKeyForNodeType(n.type, models),
+          schema: schemas[n.type],
+          nodeType: n.type,
+        } as CanvasNodeData,
+      }));
+
+      const addedEdges: Edge[] = incomingEdges.flatMap((e, i) => {
+        const from = kindOf.get(e.source);
+        const to = kindOf.get(e.target);
+        if (!from || !to) return [];
+        return [
+          {
+            id: `im_e_${i}_${stamp}`,
+            source: newId(e.source),
+            sourceHandle: e.sourceHandle || schemas[from].handles.sources?.[0]?.id || "out-text",
+            target: newId(e.target),
+            targetHandle: e.targetHandle || schemas[to].handles.targets?.[0]?.id || "in-text",
+          },
+        ];
+      });
+
+      setNodes((prev) => [...prev, ...added]);
+      setEdges((prev) => [...prev, ...addedEdges]);
+      setSelectedId(added[0]?.id ?? null);
+      setDirty(true);
+      return added.length;
+    },
+    [models, schemas, setEdges, setNodes]
+  );
+
+  const applyAgentDraft = useCallback(
+    (draft: CanvasAgentDraft) => {
+      const count = mergeCanvasContent(
+        draft.nodes.map((n) => ({ id: n.id, type: n.kind, position: n.position, data: n.data })),
+        draft.edges.map((e) => ({ source: e.from, target: e.to })),
+      );
+      setAgentOpen(false);
+      toast.success(`已放上 ${count} 个节点，可以逐个改，也可以直接运行`);
+    },
+    [mergeCanvasContent, toast]
+  );
+
+  const applyImportedDoc = useCallback(
+    (doc: CanvasDoc) => {
+      const count = mergeCanvasContent(
+        doc.nodes.map((n) => ({
+          id: n.id,
+          type: n.type,
+          position: n.position,
+          data: n.data as CanvasNodeData,
+        })),
+        doc.edges,
+      );
+      setShareOpen(false);
+      if (count === 0) {
+        toast.error("这份分享里没有本版本认识的节点");
+        return;
+      }
+      toast.success(`已导入 ${count} 个节点`);
+    },
+    [mergeCanvasContent, toast]
+  );
+
   // 双击空白画布弹添加菜单（dola-v2 交互）；双击节点不弹
   const onPaneDoubleClick = useCallback((e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest(".react-flow__node")) return;
@@ -1670,11 +2440,32 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [dirty, nodes, projectId, refreshStatus, saveDoc, toast]
   );
 
+  /**
+   * 点「运行整图」：先让后端算一遍这一跑的形状（纯读），再弹确认框。
+   * 整图会把已有产物也重做一遍 —— 这属于「花出去就回不来」的动作，先给人看一眼。
+   */
   const runAll = async () => {
     if (dirty && !(await saveDoc())) return;
     setRunning(true);
     try {
+      const preview = await api.previewCanvas(projectId);
+      if (preview.totals.steps === 0) {
+        toast.info("画布上还没有可执行的节点");
+        return;
+      }
+      setRunPreview(preview);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "预估失败");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const confirmRunAll = async () => {
+    setRunning(true);
+    try {
       await api.runCanvas(projectId);
+      setRunPreview(null);
       toast.success("整图执行已启动");
       await refreshStatus();
     } catch (e) {
@@ -1943,6 +2734,22 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             </button>
             <button
               className="btn btn-ghost btn-sm"
+              onClick={() => setAgentOpen(true)}
+              title="用一句话描述你想要什么，让 AI 把节点拓扑搭出来（只出草稿，确认后才落到画布上）"
+            >
+              <Wand2 size={14} />
+              AI 搭画布
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setShareOpen(true)}
+              title="把这个画布分享给别人（分享码或 .json 文件），或导入别人分享的画布"
+            >
+              <Share2 size={14} />
+              分享
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
               onClick={() => setAddMenu({ x: window.innerWidth / 2 - 110, y: 180 })}
               title="添加节点"
             >
@@ -2130,6 +2937,45 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             onSave={(text) => saveDocText(editorFor.nodeId, text)}
             onClear={() => saveDocText(editorFor.nodeId, "")}
             onClose={() => setEditorFor(null)}
+          />
+        )}
+
+        {agentOpen && (
+          <AgentDialog
+            textModels={models.filter((m) => m.modality === "text")}
+            schemas={schemas}
+            onApply={applyAgentDraft}
+            onClose={() => setAgentOpen(false)}
+          />
+        )}
+
+        {shareOpen && (
+          <ShareDialog
+            // 传当前画布状态而不是项目 id：用户想分享的是屏幕上看到的东西
+            doc={{
+              schemaVersion: 1,
+              nodes: toCanvasDocNodes(nodes as DocNodeInput[]),
+              edges: edges.map((e) => ({
+                id: e.id,
+                source: e.source,
+                target: e.target,
+                sourceHandle: e.sourceHandle ?? null,
+                targetHandle: e.targetHandle ?? null,
+              })),
+              viewport: getViewport(),
+            }}
+            defaultTitle={projectName}
+            onApply={applyImportedDoc}
+            onClose={() => setShareOpen(false)}
+          />
+        )}
+
+        {runPreview && (
+          <RunConfirmDialog
+            preview={runPreview}
+            busy={running}
+            onConfirm={confirmRunAll}
+            onClose={() => setRunPreview(null)}
           />
         )}
 

@@ -241,6 +241,71 @@ export interface CanvasNodeData {
   [k: string]: unknown;
 }
 
+/**
+ * AI 搭画布：一份**未落库**的草稿。
+ *
+ * `status` 是机器可读的结果（不是给人看的文案），前端据此决定给什么下一步：
+ * ok 有草稿可落 / need_input 需求太短 / need_credentials 没有可用的文本模型 /
+ * unparsable 模型没给合法 JSON / upstream_error 上游调用失败。
+ */
+export interface CanvasAgentNode {
+  id: string;
+  kind: string;
+  data: CanvasNodeData;
+  /** 后端按拓扑算好的落位（不问模型要坐标，所以它一定是整齐的） */
+  position: { x: number; y: number };
+}
+
+export interface CanvasAgentDraft {
+  status: "ok" | "need_input" | "need_credentials" | "unparsable" | "upstream_error";
+  summary: string;
+  nodes: CanvasAgentNode[];
+  edges: { from: string; to: string }[];
+  /** 后端在修复模型输出时做的改动（丢掉的节点/连线、被改回默认的参数） */
+  notes: string[];
+  /** 下手之前就该知道的事（缺模型、批量节点的花费、视频慢且贵） */
+  warnings: string[];
+  /** 这份草稿需要哪些能力 */
+  requires: string[];
+  /** requires 里本机没有的 */
+  missing: string[];
+  nextAction: string;
+}
+
+/* ---------------- 社区分享 ---------------- */
+
+export interface ShareLicense {
+  key: string;
+  label: string;
+}
+
+export interface ShareExportResult {
+  snapshot: Record<string, unknown>;
+  /** 压缩后的分享码，可以直接贴进聊天窗口 */
+  code: string;
+  /** 太长就别用分享码了（聊天窗口贴不下、还容易被截断），改用 .json 文件 */
+  codeTooLong: boolean;
+  codeLength: number;
+}
+
+export interface ShareImportResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  title: string;
+  description: string;
+  license: string;
+  /** 授权范围的人话解释（后端给的，前端不自己维护一份） */
+  licenseText: string;
+  author: string;
+  createdAt: string;
+  appVersion: string;
+  requires: { nodeKinds?: string[]; modalities?: string[] };
+  missingNodeKinds: string[];
+  missingModalities: string[];
+  doc: CanvasDoc;
+}
+
 /** 日志与诊断报告 */
 export interface LogFileInfo {
   name: string;
@@ -346,6 +411,44 @@ export interface CanvasDoc {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   viewport: { x?: number; y?: number; zoom?: number };
+}
+
+/** 整图执行前的预估（「运行整图」二次确认弹窗用） */
+export interface CanvasPreviewNode {
+  id: string;
+  type: string;
+  label: string;
+  /** 这一跑会派几个任务；null = 此刻算不出来（要等上游先跑） */
+  count: number | null;
+  kinds: Record<string, number>;
+  /** 已经有产物（整图会把它们重做一遍） */
+  hasOutput: boolean;
+  outputCount: number;
+  /** 条数待定：这些上游节点这次才会产出 */
+  waiting: string[];
+  /** 已经能判定必挂的原因 */
+  error: string;
+}
+
+export interface CanvasPreviewNote {
+  level: "blocker" | "warning" | "info";
+  text: string;
+}
+
+export interface CanvasPreview {
+  nodes: CanvasPreviewNode[];
+  totals: {
+    tasks: number;
+    steps: number;
+    byKind: Record<string, number>;
+    pendingNodes: number;
+    rerunNodes: number;
+    blockedNodes: number;
+  };
+  reused: { assetId: number; name: string; count: number }[];
+  notes: CanvasPreviewNote[];
+  /** 这一跑会不会真调外部模型（全本机 ComfyUI 时为 false） */
+  billable: boolean;
 }
 
 export interface CanvasNodeStatus {
