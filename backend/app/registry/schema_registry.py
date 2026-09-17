@@ -405,8 +405,13 @@ register(
                 "key": "ark", "name": "火山方舟 Ark", "kind": "ark",
                 "base_url": "https://ark.cn-beijing.volces.com/api/v3", "sort_order": 6,
                 "hint": "豆包 Seedream 图片 / Seedance 视频，模型名填具体版本 ID",
-                # 方舟的 Key 是 UUID 形状
-                "key_pattern": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                # 方舟现在的 Key 是 `ark-<uuid>-<尾码>`，老版本发的是裸 UUID，两种都认。
+                # 这条规则是拿真实 Key 试出来的：第一版只认裸 UUID，结果用户粘进来
+                # 认不出来，还白拿他的 Key 去试了 OpenAI / DeepSeek / Kimi 三家。
+                "key_pattern": (
+                    r"^ark-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}-[A-Za-z0-9]+$"
+                    r"|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+                ),
                 "models_json": [
                     {"name": "doubao-seedream-4-0-250828", "modality": "image", "label": "豆包 Seedream 4.0"},
                     {"name": "doubao-seedance-1-0-pro-250528", "modality": "video", "label": "豆包 Seedance 1.0 Pro"},

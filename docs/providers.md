@@ -26,7 +26,7 @@
 ## 火山方舟 Ark（豆包图片 / 视频）
 
 - Base URL：`https://ark.cn-beijing.volces.com/api/v3`
-- API Key：在[火山方舟控制台](https://console.volcengine.com/ark)创建的 API Key
+- API Key：在[火山方舟控制台](https://console.volcengine.com/ark)创建的 API Key，形如 `ark-<uuid>-<尾码>`（老账号可能还是裸 UUID，两种都认）
 - 模型名：填写你开通的**具体模型版本 ID**，例如：
   - 图片：`doubao-seedream-4-0-250828`（能力选「图片」）
   - 视频：`doubao-seedance-1-0-pro-250528`（能力选「视频」）

@@ -128,6 +128,22 @@ async def setup(
         raise AdapterError("请先粘贴 API Key")
 
     candidates, recognized = await _candidates(db, key, provider_key)
+    if not recognized:
+        # 认不出归属就**一个都不试**，直接把候选交回给用户挑。
+        # 两个理由，第二条更要紧：
+        # 一是快——按形状猜三家要串行跑三个真实请求，白等五秒；
+        # 二是**不能拿用户的凭据去试不相干的服务商**：这串 Key 可能属于任何一家，
+        # 拿它去敲 OpenAI / DeepSeek / Kimi 的门，等于把他的密钥发给了三家他没用过的公司。
+        logger.info("快速接入：认不出 Key 的归属，列出 %s 个候选等用户挑", len(candidates))
+        return {
+            "ok": False,
+            "recognized": False,
+            "forced": False,
+            "service": None,
+            "tried": [],
+            "candidates": [_card(p) for p in candidates],
+        }
+
     tried: list[dict] = []
     for preset in candidates[:MAX_PROBES]:
         ok, message = await _probe(preset, key)

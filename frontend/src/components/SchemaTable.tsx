@@ -340,6 +340,11 @@ export default function SchemaTable({ spec }: { spec: TableSpecMeta }) {
                 onChange={(v) => setField(field.name, v)}
               />
               {field.help && <div className="field-hint">{field.help}</div>}
+              {/* 「标识」是各表里唯一的那类字段，撞车时后端只会回一句「已被另一行占用」。
+                  在这里先说清楚，省得用户填完才被拒——这是最高频的一次保存失败。 */}
+              {field.name === "key" && (
+                <div className="field-hint">必填，且在同一张表里不能重复（想改已有那行请直接编辑它）</div>
+              )}
             </div>
           ))}
         </Modal>

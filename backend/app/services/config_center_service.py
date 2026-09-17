@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -203,7 +204,7 @@ async def create_row(
         await db.flush()
     except Exception as e:  # noqa: BLE001
         await db.rollback()
-        raise ConfigError(f"保存失败：{_friendly_db_error(e)}") from e
+        raise ConfigError(_save_error(spec, obj, e)) from e
     after = serialize_row(spec, obj)
     await _audit(db, spec.name, obj.id, "create", None, after, actor)
     await db.commit()
@@ -238,7 +239,7 @@ async def update_row(
         await db.flush()
     except Exception as e:  # noqa: BLE001
         await db.rollback()
-        raise ConfigError(f"保存失败：{_friendly_db_error(e)}") from e
+        raise ConfigError(_save_error(spec, obj, e)) from e
     after = serialize_row(spec, obj)
     await _audit(db, spec.name, obj.id, "update", before, after, actor)
     await db.commit()
@@ -307,6 +308,36 @@ def _friendly_db_error(exc: Exception) -> str:
     if "UNIQUE" in text.upper():
         return "存在重复的唯一标识，请修改后重试"
     return text or exc.__class__.__name__
+
+
+# SQLite 的报错形如：UNIQUE constraint failed: prompts.key
+_UNIQUE_RE = re.compile(r"UNIQUE constraint failed:\s*\w+\.(\w+)", re.I)
+
+
+def _save_error(spec: "TableSpec", obj: Any, exc: Exception) -> str:
+    """把落库失败翻译成「哪个字段、哪个值、跟谁撞了、接下来做什么」。
+
+    原来只回一句「保存失败：存在重复的唯一标识，请修改后重试」——
+    用户既不知道是哪个字段重复，也不知道跟哪一行撞了，只能干瞪眼。
+    用户名重复是最常见的保存失败（标识写成了已存在的那一个），
+    所以这里把字段名与值都点出来，并把「想改哪一行」也说了。
+
+    消息里带上用户自己填的值是安全的：那是他自己刚输入的，不是我们的数据。
+    """
+    text = str(getattr(exc, "orig", exc))
+    m = _UNIQUE_RE.search(text)
+    if not m:
+        return f"保存失败：{_friendly_db_error(exc)}"
+    column = m.group(1)
+    field = next((f for f in spec.fields if f.name == column), None)
+    label = (getattr(field, "label", "") or column) if field else column
+    raw = getattr(obj, column, "")
+    value = str(raw).strip() if raw is not None else ""
+    shown = f"「{value}」" if value else ""
+    return (
+        f"「{label}」{shown}已经被另一行占用了（{spec.label}里不能重复）。"
+        f"换一个{label}再保存；如果想改的是已有那一行，请到列表里直接编辑它。"
+    )
 
 
 # ============================================================

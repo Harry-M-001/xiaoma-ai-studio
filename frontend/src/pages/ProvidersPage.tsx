@@ -352,7 +352,7 @@ export default function ProvidersPage() {
           <input
             className="input"
             type="password"
-            placeholder="sk-... / 32位ID.密钥 / UUID 形状的 Key 都认"
+            placeholder="sk-… / ark-… / 32位ID.密钥 这类形状都认"
             value={keyInput}
             onChange={(e) => setKeyInput(e.target.value)}
             onKeyDown={(e) => {
@@ -372,8 +372,12 @@ export default function ProvidersPage() {
                 <b>{t.name}</b>：{t.message}
               </div>
             ))}
-            <div style={{ marginTop: 6 }}>
-              {setupResult.recognized ? "换一个服务商再试：" : "认不出归属，指定一个服务商再试："}
+            <div style={{ marginTop: setupResult.tried.length ? 6 : 0 }}>
+              {setupResult.tried.length === 0
+                ? "认不出这串 Key 属于哪一家，所以也没有拿它到处试。选一个服务商，我来试通："
+                : setupResult.recognized
+                  ? "换一个服务商再试："
+                  : "认不出归属，指定一个服务商再试："}
             </div>
             <div className="quick-setup-candidates">
               {setupResult.candidates.map((c) => (
