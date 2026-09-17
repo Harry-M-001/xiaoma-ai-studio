@@ -182,3 +182,41 @@ async def list_provider_presets(db: AsyncSession = Depends(get_db)) -> list[dict
         }
         for p in rows.scalars().all()
     ]
+
+
+# 首屏引导用的三项能力：够判断「能不能开始创作」了。
+# 顺序固定，前端直接按这个顺序拼文案。
+SETUP_MODALITIES = ("text", "image", "video")
+
+
+@router.get("/setup-status")
+async def setup_status(db: AsyncSession = Depends(get_db)) -> dict:
+    """首次进入时的「该配什么」状态：有没有服务、各能力有几个可用模型、本机有没有 Ollama。
+
+    单独做一个接口而不是让前端拉 `/api/providers` 自己算：Ollama 探测是**服务端**的动作
+    （浏览器探不到本机 11434 之外的网络位置，也不该去探），而且它带缓存，只有服务端放得住。
+    """
+    from app.services import ollama_service, provider_store
+
+    rows = await provider_store.list_services(db)
+    options = provider_store.list_model_options(rows)
+    counts: dict[str, int] = {}
+    for o in options:
+        counts[o.modality] = counts.get(o.modality, 0) + 1
+
+    ollama = await ollama_service.detect()
+    connected = await provider_store.find_by_base_url(db, f"{ollama['baseUrl']}/v1")
+
+    return {
+        "services": len(rows),
+        "enabledServices": len([r for r in rows if r.enabled]),
+        "modelCounts": counts,
+        "ready": bool(options),
+        "missing": [m for m in SETUP_MODALITIES if not counts.get(m)],
+        # 服务名与模型名把「已接入但一个模型都没填」这种半配置状态也暴露出来
+        "servicesDetail": [
+            {"id": r.id, "name": r.name, "enabled": bool(r.enabled), "models": len(provider_store.parse_models(r.models_json))}
+            for r in rows
+        ],
+        "ollama": {**ollama, "connected": connected is not None},
+    }

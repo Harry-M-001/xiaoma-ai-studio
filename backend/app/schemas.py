@@ -57,6 +57,14 @@ class ProviderTestIn(BaseModel):
     model: str | None = None
 
 
+class QuickSetupIn(BaseModel):
+    """粘贴一个 Key 就接入。"""
+
+    api_key: str = Field(..., min_length=1, description="用户粘贴的 API Key")
+    provider_key: str = Field("", description="指定服务商预设的 key；留空表示自动识别")
+    force: bool = Field(False, description="连通测试没过也照样保存（给测试方式不适配的服务商留的出口）")
+
+
 class ModelOption(BaseModel):
     key: str  # "service_id:model_name"，前端选择后原样回传
     service_id: int

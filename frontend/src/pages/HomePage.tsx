@@ -10,6 +10,7 @@ import {
   Video,
 } from "lucide-react";
 import { api } from "../api";
+import { createDemoProject } from "../demoProject";
 import type { Project } from "../types";
 import { Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -27,16 +28,21 @@ const ENTRIES: { route: string; icon: React.ReactNode; title: string; desc: stri
 
 export default function HomePage({
   onNavigate,
+  onOpenCanvas,
+  onGoProviders,
   brandName,
   brandSub,
 }: {
   onNavigate: Nav;
+  onOpenCanvas?: (p: { id: number; name: string }) => void;
+  onGoProviders?: () => void;
   brandName: string;
   brandSub: string;
 }) {
   const toast = useToast();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [creating, setCreating] = useState(false);
+  const [demoBusy, setDemoBusy] = useState(false);
 
   useEffect(() => {
     api
@@ -59,6 +65,22 @@ export default function HomePage({
     }
   };
 
+  /** 建一个铺好链的示例项目并直接进画布 */
+  const startDemo = async () => {
+    setDemoBusy(true);
+    try {
+      const demo = await createDemoProject();
+      setProjects(await api.listProjects());
+      toast.success(`示例已建好（${demo.levelLabel}）：点画布上方的「运行整图」就能看到产出`);
+      onOpenCanvas?.(demo);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "示例创建失败");
+      if (e instanceof Error && e.message.includes("模型")) onGoProviders?.();
+    } finally {
+      setDemoBusy(false);
+    }
+  };
+
   return (
     <div className="page home-page">
       <section className="home-hero card">
@@ -75,6 +97,10 @@ export default function HomePage({
             <button className="btn btn-primary" onClick={() => onNavigate("image")}>
               开始创作
               <ArrowRight size={15} />
+            </button>
+            <button className="btn btn-ghost" onClick={startDemo} disabled={demoBusy}>
+              {demoBusy ? <Spinner /> : <Sparkles size={15} />}
+              从示例开始
             </button>
             <button className="btn btn-ghost" onClick={quickCreate} disabled={creating}>
               {creating ? <Spinner /> : <Plus size={15} />}

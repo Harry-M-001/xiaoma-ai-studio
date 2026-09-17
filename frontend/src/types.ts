@@ -259,6 +259,56 @@ export interface StyleOption {
   name: string;
 }
 
+/** 快速接入的一个候选服务商 */
+export interface QuickSetupCandidate {
+  key: string;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  hint: string;
+  models: ModelSpec[];
+}
+
+/** 快速接入时对某个候选做过的一次连通试探 */
+export interface QuickSetupAttempt {
+  key: string;
+  name: string;
+  baseUrl: string;
+  ok: boolean;
+  message: string;
+}
+
+export interface QuickSetupResult {
+  ok: boolean;
+  /** true = 从 Key 形状认出了归属；false = 没认出来，candidates 是全量候选 */
+  recognized: boolean;
+  /** true = 连通测试没过但用户坚持保存 */
+  forced: boolean;
+  service: Provider | null;
+  tried: QuickSetupAttempt[];
+  candidates: QuickSetupCandidate[];
+}
+
+export interface OllamaStatus {
+  running: boolean;
+  baseUrl: string;
+  models: string[];
+  /** 探测失败的原因（没装 / 没启动都算正常，这里只是给个说法） */
+  error: string;
+  connected: boolean;
+}
+
+/** 首屏引导状态 */
+export interface SetupStatus {
+  services: number;
+  enabledServices: number;
+  modelCounts: Record<string, number>;
+  ready: boolean;
+  missing: string[];
+  servicesDetail: { id: number; name: string; enabled: boolean; models: number }[];
+  ollama: OllamaStatus;
+}
+
 export interface CanvasNode {
   id: string;
   type: string;

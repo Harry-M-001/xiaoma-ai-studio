@@ -58,113 +58,19 @@ import type {
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
+// 自动链的拓扑与铺链逻辑在 canvasChain.ts：示例模板要用同一套形状，
+// 抽出去之后两边不会各自漂移。
+import {
+  ASSET_IMAGE_KIND,
+  CHAIN_LEVELS,
+  STORYBOARD_IMAGE_KIND,
+  buildChainNodes,
+  missingModelMessage,
+  toCanvasDocNodes,
+} from "../canvasChain";
 
 /** 自动链文档节点类型（需要调 LLM 写正文） */
 const DOC_KINDS = new Set(["idea", "novel", "script", "storyboard", "assetSheet"]);
-
-/** 资产链节点：逐行批量出图，产物自动进资产库供下游按名引用 */
-const ASSET_IMAGE_KIND = "assetImage";
-
-/** 分镜图节点：逐镜批量出图 */
-const STORYBOARD_IMAGE_KIND = "storyboardImage";
-
-/**
- * 自动链档位：一次铺多长的链。
- * 越往后越贵（资产设定图一行一张图、分镜图一镜一张图），所以默认只铺 L1。
- *
- * L3 起拓扑不再是直线（分镜图要同时吃分镜表和资产图），所以连线和落位都显式写出来，
- * 不靠「数组相邻即相连」推。
- */
-interface ChainLevel {
-  key: string;
-  label: string;
-  hint: string;
-  nodes: { type: string; col: number; row: number; data?: Partial<CanvasNodeData> }[];
-  edges: [string, string][];
-}
-
-/** L3 的落位与连线。L4 是在它基础上再接视频，抽出来免得抄两遍、以后改一处漏一处。 */
-const L3_NODES: ChainLevel["nodes"] = [
-  { type: "idea", col: 0, row: 0 },
-  { type: "novel", col: 1, row: 0 },
-  { type: "script", col: 2, row: 0 },
-  { type: "storyboard", col: 3, row: 0 },
-  { type: "assetSheet", col: 4, row: 0 },
-  { type: "assetImage", col: 5, row: 0 },
-  { type: "storyboardImage", col: 4, row: 1 },
-];
-
-const L3_EDGES: ChainLevel["edges"] = [
-  ["idea", "novel"],
-  ["novel", "script"],
-  ["script", "storyboard"],
-  ["storyboard", "assetSheet"],
-  ["assetSheet", "assetImage"],
-  // 分镜图要两个上游：分镜（镜头表）+ 资产图（等它先跑完，提及注入才有图可挂）
-  ["storyboard", "storyboardImage"],
-  ["assetImage", "storyboardImage"],
-];
-
-const CHAIN_LEVELS: ChainLevel[] = [
-  {
-    key: "L1",
-    label: "L1 文本链",
-    hint: "创意 → 小说 → 剧本 → 分镜（只出一份 Markdown，最省钱）",
-    nodes: [
-      { type: "idea", col: 0, row: 0 },
-      { type: "novel", col: 1, row: 0 },
-      { type: "script", col: 2, row: 0 },
-      { type: "storyboard", col: 3, row: 0 },
-    ],
-    edges: [
-      ["idea", "novel"],
-      ["novel", "script"],
-      ["script", "storyboard"],
-    ],
-  },
-  {
-    key: "L2",
-    label: "L2 +资产链",
-    hint: "文本链之后再铺 资产表 → 资产设定图，下游提示词提到角色名会自动挂设定图",
-    nodes: [
-      { type: "idea", col: 0, row: 0 },
-      { type: "novel", col: 1, row: 0 },
-      { type: "script", col: 2, row: 0 },
-      { type: "storyboard", col: 3, row: 0 },
-      { type: "assetSheet", col: 4, row: 0 },
-      { type: "assetImage", col: 5, row: 0 },
-    ],
-    edges: [
-      ["idea", "novel"],
-      ["novel", "script"],
-      ["script", "storyboard"],
-      ["storyboard", "assetSheet"],
-      ["assetSheet", "assetImage"],
-    ],
-  },
-  {
-    key: "L3",
-    label: "L3 +分镜图",
-    hint: "再加「分镜图」：按镜头表逐镜出图，每镜自动挂它提到的角色设定图",
-    nodes: L3_NODES,
-    edges: L3_EDGES,
-  },
-  {
-    key: "L4",
-    label: "L4 +逐镜视频",
-    hint: "全链打通：逐镜出图后再逐镜生视频，相邻两镜首尾相连。最贵的一档，建议先跑通 L3 再铺",
-    nodes: [
-      ...L3_NODES,
-      { type: "video", col: 5, row: 1, data: { shotVideo: "chain", mode: "first_last" } },
-    ],
-    edges: [
-      ...L3_EDGES,
-      // 视频同样要两个上游：分镜（每镜的动作与时长）+ 分镜图（每镜的首帧图）
-      ["storyboard", "video"],
-      ["storyboardImage", "video"],
-    ],
-  },
-];
 
 /** 资产设定图的生成范围档位 */
 const ASSET_SCOPES: [string, string][] = [
@@ -1628,71 +1534,29 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
   // 一键铺自动链：拓扑是固定模板，不需要 LLM 生成
   // L1 = 创意 → 小说 → 剧本 → 分镜；L2 接资产表 → 资产设定图；L3 再接分镜图（有分叉）；
-  // L4 再接视频（逐镜出片，首尾相连）
+  // L4 再接视频（逐镜出片，首尾相连）。形状在 canvasChain.ts，这里只管落位与提示。
   const buildAutoChain = useCallback(
     (levelKey: string) => {
       const level = CHAIN_LEVELS.find((l) => l.key === levelKey) ?? CHAIN_LEVELS[0];
-      const types = level.nodes.map((n) => n.type);
-      const missing = types.filter((t) => !schemas[t]);
-      if (missing.length > 0) {
+      const built = buildChainNodes(level.key, schemas, models);
+      if (built.unknownTypes.length > 0) {
         toast.error("自动链节点未就绪，请检查后端是否已升级");
         return;
       }
-      const textModelKey = models.find((m) => m.modality === "text")?.key ?? "";
-      if (!textModelKey) {
-        toast.error("还没有可用的文本模型，请先在「模型服务」里添加");
+      if (built.missing.length > 0) {
+        toast.error(missingModelMessage(built.missing));
         return;
       }
-      const imageModelKey = models.find((m) => m.modality === "image")?.key ?? "";
-      if (types.includes(ASSET_IMAGE_KIND) && !imageModelKey) {
-        toast.error("资产设定图需要图片模型，请先在「模型服务」里添加");
-        return;
-      }
-      if (types.includes(STORYBOARD_IMAGE_KIND) && !imageModelKey) {
-        toast.error("分镜图需要图片模型，请先在「模型服务」里添加");
-        return;
-      }
-      const videoModelKey = models.find((m) => m.modality === "video")?.key ?? "";
-      if (types.includes("video") && !videoModelKey) {
-        toast.error("逐镜出视频需要视频模型，请先在「模型服务」里添加");
-        return;
-      }
-      const modelKeyFor = (t: string) => {
-        if (t === "video") return videoModelKey;
-        if (t === ASSET_IMAGE_KIND || t === STORYBOARD_IMAGE_KIND) return imageModelKey;
-        return textModelKey;
-      };
-      const stamp = Date.now().toString(36);
-      const originX = 80;
-      const originY = 140;
-      const stepX = 300;
-      const stepY = 240;
-      const idOf = (t: string) => `chain_${t}_${stamp}`;
-      const created = level.nodes.map(({ type, col, row, data: extra }, i) => ({
-        id: idOf(type),
-        type: "contract",
-        position: { x: originX + col * stepX, y: originY + row * stepY },
-        selected: i === 0,
-        data: {
-          prompt: "",
-          model_key: modelKeyFor(type),
-          schema: schemas[type],
-          nodeType: type,
-          ...extra,
-        } as CanvasNodeData,
-      }));
-      const newEdges: Edge[] = level.edges.map(([from, to], i) => ({
-        id: `chain_e_${i}_${stamp}`,
-        source: idOf(from),
-        sourceHandle: schemas[from].handles.sources?.[0]?.id ?? "out-text",
-        target: idOf(to),
-        targetHandle: schemas[to].handles.targets?.[0]?.id ?? "in-text",
-      }));
-      setNodes((prev) => [...prev, ...created]);
-      setEdges((prev) => [...prev, ...newEdges]);
-      setSelectedId(created[0].id);
+      setNodes((prev) => [...prev, ...(built.nodes as Node<CanvasNodeData>[])]);
+      setEdges((prev) => [...prev, ...(built.edges as Edge[])]);
+      const first = built.nodes[0];
+      if (first) setSelectedId(first.id);
       setDirty(true);
-      toast.success(`已铺好自动链（${level.label}）：${types.map((t) => schemas[t].label).join(" → ")}`);
+      toast.success(
+        `已铺好自动链（${level.label}）：${level.nodes
+          .map((n) => schemas[n.type].label)
+          .join(" → ")}`,
+      );
     },
     [schemas, models, setNodes, setEdges, toast]
   );
@@ -1744,12 +1608,9 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     try {
       const doc: CanvasDoc = {
         schemaVersion: 1,
-        nodes: nodes.map((n) => ({
-          id: n.id,
-          type: String(n.data.nodeType ?? ""),
-          position: n.position,
-          data: { ...n.data } as CanvasNodeData,
-        })),
+        // 与「示例项目」共用同一份整形逻辑（见 canvasChain.toCanvasDocNodes）：
+        // type 要用真实节点类型而不是画布内部的 "contract"，schema 属运行时缓存不落库
+        nodes: toCanvasDocNodes(nodes),
         edges: edges.map((e) => ({
           id: e.id,
           source: e.source,
@@ -1759,12 +1620,6 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
         })),
         viewport: toObject().viewport as Viewport,
       };
-      // 清掉运行时注入字段
-      doc.nodes.forEach((n) => {
-        const d = n.data as Record<string, unknown>;
-        delete d.schema;
-        delete d.status;
-      });
       await api.saveCanvas(projectId, doc);
       setDirty(false);
       setSavedTick(Date.now());

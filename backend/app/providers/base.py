@@ -40,10 +40,22 @@ def summarize_upstream_error(resp: httpx.Response) -> tuple[str, str]:
     """
     status = resp.status_code
     hint = ""
-    if status in (401, 403):
-        hint = "（API Key 无效或无权限）"
+    if status == 400:
+        hint = "（上游拒绝了这次请求：多半是模型名写错，或该模型不认这组参数）"
+    elif status == 401:
+        hint = "（API Key 校验失败：确认 Key 复制完整、且与这个服务商的地址配套）"
+    elif status == 403:
+        hint = "（没有权限：这个 Key 可能没开通该模型，或账号被限制）"
     elif status == 404:
-        hint = "（接口地址不存在，请检查 Base URL 是否填到 /v1 一级）"
+        hint = "（地址或模型不存在：检查 Base URL 是否填到 /v1 这一级，模型名是否写对）"
+    elif status == 413:
+        hint = "（请求体过大：提示词或参考图超出了上游限制）"
+    elif status == 429:
+        hint = "（触发限流或额度不足：稍后重试，或到服务商控制台看余额与配额）"
+    elif status in (500, 502, 503, 504):
+        hint = "（上游服务异常：通常是服务商侧的问题，稍后重试；持续失败可先换一个模型）"
+    elif status >= 500:
+        hint = "（上游服务异常：稍后重试）"
 
     err_type = ""
     err_code = ""
@@ -218,6 +230,31 @@ def network_error_detail(exc: Exception, url: str = "") -> str:
     内网网关地址。日志只要「哪种错 + 打到哪个主机」，所以这里把 host 单独取出来。
     """
     return f"{type(exc).__name__} host={url_host(url) or '-'}"
+
+
+def network_error_message(exc: Exception) -> str:
+    """给「连不上」配一句能照做的下一步。
+
+    只说「网络请求失败」等于没说：用户能做的判断只有「地址写错了 / 服务没启动 / 网络不通」，
+    而这三件事的排查动作完全不同。这里按异常类型给一句对应的动作，异常类型名保留在尾部
+    （方便他拿这个词去搜），URL 之类的细节留给日志。
+    """
+    name = type(exc).__name__
+    # 先判 ConnectTimeout：它同时是 TimeoutException 与连接类错误，
+    # 顺序写反会把「超时」说成「连不上」，两句建议的排查方向恰好相反
+    if isinstance(exc, httpx.ConnectTimeout):
+        hint = "连接超时：地址可能不可达（本机服务确认已启动，云服务确认网络或代理可用）"
+    elif isinstance(exc, httpx.TimeoutException):
+        hint = "请求超时：服务没在超时时间内响应，稍后重试"
+    elif isinstance(exc, httpx.ConnectError):
+        hint = "连不上这个地址：确认地址没写错、服务已启动（本机服务看端口有没有在听）"
+    elif isinstance(exc, httpx.ProxyError):
+        hint = "代理出错：检查系统代理设置，或把该地址排除在代理之外"
+    elif isinstance(exc, httpx.HTTPError):
+        hint = "网络层出错，稍后重试"
+    else:
+        return f"请求失败（{name}）"
+    return f"{hint}（{name}）"
 
 
 def unsupported(modality: str) -> AdapterError:

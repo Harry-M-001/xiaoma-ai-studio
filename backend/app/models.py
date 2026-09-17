@@ -290,6 +290,9 @@ class ProviderPreset(Base):
     # [{"name": "...", "modality": "text|image|video", "label": "..."}]
     models_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     hint: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # 「粘贴一个 Key 自动接入」用来认归属：「|」分隔的若干正则，命中任意一条即算认出来。
+    # 留空表示这个服务商不从 Key 形状上认（例如本地 Ollama 压根不需要 Key）。
+    key_pattern: Mapped[str] = mapped_column(String(300), nullable=False, default="")
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

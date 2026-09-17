@@ -18,6 +18,7 @@ from app.providers.base import (
     AdapterError,
     BaseAdapter,
     VideoStatus,
+    network_error_message,
     network_error_detail,
     summarize_upstream_error,
     unsupported,
@@ -36,7 +37,7 @@ async def iter_chat_sse(
         resp = await client.post(url, headers=headers, json=body)
     except httpx.HTTPError as e:
         raise AdapterError(
-            f"网络请求失败：{e}", log_detail=network_error_detail(e, url)
+            network_error_message(e), log_detail=network_error_detail(e, url)
         ) from e
 
     if resp.status_code != 200:
@@ -89,7 +90,7 @@ class OpenAICompatAdapter(BaseAdapter):
             resp = await client.get(url, headers=self.headers())
         except httpx.HTTPError as e:
             raise AdapterError(
-                f"网络请求失败：{e}", log_detail=network_error_detail(e, url)
+                network_error_message(e), log_detail=network_error_detail(e, url)
             ) from e
         if resp.status_code == 200:
             return
@@ -171,7 +172,7 @@ class OpenAICompatAdapter(BaseAdapter):
             )
         except httpx.HTTPError as e:
             raise AdapterError(
-                f"网络请求失败：{e}",
+                network_error_message(e),
                 log_detail=network_error_detail(e, f"{self.base_url}/images/generations"),
             ) from e
         if resp.status_code != 200:

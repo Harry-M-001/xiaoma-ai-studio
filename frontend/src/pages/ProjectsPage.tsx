@@ -1,14 +1,22 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
+import { FolderOpen, MoreHorizontal, Pencil, Plus, Sparkles, Trash2 } from "lucide-react";
 import { api } from "../api";
+import { createDemoProject } from "../demoProject";
 import type { Project } from "../types";
 import { Empty, Modal, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
-export default function ProjectsPage({ onOpenCanvas }: { onOpenCanvas?: (p: Project) => void }) {
+export default function ProjectsPage({
+  onOpenCanvas,
+  onGoProviders,
+}: {
+  onOpenCanvas?: (p: { id: number; name: string }) => void;
+  onGoProviders?: () => void;
+}) {
   const toast = useToast();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [creating, setCreating] = useState(false);
+  const [demoBusy, setDemoBusy] = useState(false);
   const [formName, setFormName] = useState("");
   const [formDesc, setFormDesc] = useState("");
   const [saving, setSaving] = useState(false);
@@ -83,17 +91,40 @@ export default function ProjectsPage({ onOpenCanvas }: { onOpenCanvas?: (p: Proj
     else toast.info(`「${p.name}」的画布编辑器即将上线`);
   };
 
+  /** 建一个铺好链的示例项目并直接进画布——比「先建空项目再想」少走一步 */
+  const startDemo = async () => {
+    setDemoBusy(true);
+    try {
+      const demo = await createDemoProject();
+      await load();
+      toast.success(`示例已建好（${demo.levelLabel}）：点画布上方的「运行整图」就能看到产出`);
+      onOpenCanvas?.(demo);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "示例创建失败");
+      // 缺模型是最常见的失败原因，直接把「该去哪儿」也做了
+      if (e instanceof Error && e.message.includes("模型")) onGoProviders?.();
+    } finally {
+      setDemoBusy(false);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
         <div>
           <div className="page-title">项目</div>
-          <div className="page-desc">一次完整作品的容器。画布编辑器重做后将在这里接入，现阶段可先建项目规划作品。</div>
+          <div className="page-desc">一次完整作品的容器。每个项目内置一张可视化画布，从一句话创意铺到成片。</div>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>
-          <Plus size={16} />
-          新建项目
-        </button>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn btn-ghost" onClick={startDemo} disabled={demoBusy}>
+            {demoBusy ? <Spinner /> : <Sparkles size={16} />}
+            从示例开始
+          </button>
+          <button className="btn btn-primary" onClick={openCreate}>
+            <Plus size={16} />
+            新建项目
+          </button>
+        </div>
       </div>
 
       {projects === null ? (
@@ -105,7 +136,13 @@ export default function ProjectsPage({ onOpenCanvas }: { onOpenCanvas?: (p: Proj
           <Empty
             icon={<FolderOpen />}
             title="还没有项目"
-            desc="新建一个项目，把一次完整创作（角色设定、分镜、成片）组织起来。"
+            desc="新建一个项目，把一次完整创作（角色设定、分镜、成片）组织起来；或者点「从示例开始」直接看一条铺好的链长什么样。"
+            action={
+              <button className="btn btn-primary" onClick={startDemo} disabled={demoBusy}>
+                {demoBusy ? <Spinner /> : <Sparkles size={15} />}
+                从示例开始
+              </button>
+            }
           />
         </div>
       ) : (

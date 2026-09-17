@@ -11,6 +11,7 @@ import type {
   LogsStatus,
   ModalityMeta,
   ModelOption,
+  ModelSpec,
   NavMeta,
   ParamOptionItem,
   PromptItem,
@@ -22,7 +23,10 @@ import type {
   CanvasDoc,
   CanvasNodeSchema,
   CanvasNodeStatus,
+  OllamaStatus,
+  QuickSetupResult,
   SchemaRow,
+  SetupStatus,
   StyleOption,
   TableSpecMeta,
   Task,
@@ -110,6 +114,18 @@ export const api = {
     }),
   listModels: (modality?: string) =>
     request<ModelOption[]>(`/api/providers/models${modality ? `?modality=${modality}` : ""}`),
+  /** 粘贴一个 Key 自动接入（后端会先试一次真实请求，通了才存） */
+  quickSetup: (payload: { api_key: string; provider_key?: string; force?: boolean }) =>
+    request<QuickSetupResult>("/api/providers/quick-setup", { method: "POST", body: json(payload) }),
+  /** 本机 Ollama 检测（服务端探 127.0.0.1:11434，带缓存） */
+  ollamaStatus: (refresh = false) =>
+    request<OllamaStatus>(`/api/providers/ollama${refresh ? "?refresh=true" : ""}`),
+  ollamaConnect: () => request<{ ok: boolean; service: Provider; models: ModelSpec[] }>(
+    "/api/providers/ollama",
+    { method: "POST" },
+  ),
+  /** 首屏引导状态：有没有服务、各能力有几个模型、本机有没有 Ollama */
+  setupStatus: () => request<SetupStatus>("/api/meta/setup-status"),
 
   // ---------- 对话 ----------
   listSessions: () => request<ChatSession[]>("/api/chat/sessions"),

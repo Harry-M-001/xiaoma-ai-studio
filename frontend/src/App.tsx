@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Puzzle } from "lucide-react";
 import Sidebar, { type RouteKey } from "./components/Sidebar";
 import LoginGate from "./components/LoginGate";
+import SetupBanner from "./components/SetupBanner";
 import { ToastProvider } from "./components/Toast";
 import { Empty } from "./components/common";
 import { api, authToken, cfgBool, cfgString } from "./api";
@@ -181,6 +182,11 @@ function Shell() {
   const brandSub = cfgString(config, "app.subtitle", "个人 AI 创作工作台");
   const logoText = cfgString(config, "app.logo_text", "马");
 
+  const openCanvas = (p: { id: number; name: string }) => {
+    setCanvasProject({ id: p.id, name: p.name });
+    setRoute("canvas");
+  };
+
   const renderPage = () => {
     // 导航里注册了前端没有实现的模块：显示「尚未安装」占位，而不是崩溃
     if (!KNOWN_ROUTES.has(route)) {
@@ -208,6 +214,8 @@ function Shell() {
         return (
           <HomePage
             onNavigate={setRoute}
+            onOpenCanvas={openCanvas}
+            onGoProviders={() => setRoute("providers")}
             brandName={brandName}
             brandSub={brandSub}
           />
@@ -215,10 +223,8 @@ function Shell() {
       case "projects":
         return (
           <ProjectsPage
-            onOpenCanvas={(p) => {
-              setCanvasProject({ id: p.id, name: p.name });
-              setRoute("canvas");
-            }}
+            onOpenCanvas={openCanvas}
+            onGoProviders={() => setRoute("providers")}
           />
         );
       case "canvas":
@@ -277,7 +283,10 @@ function Shell() {
         onToggleCollapsed={() => setCollapsed((c) => !c)}
         badgeRoutes={updateAvailable ? ["settings"] : undefined}
       />
-      <main className="main">{renderPage()}</main>
+      <main className="main">
+        <SetupBanner route={route} onNavigate={setRoute} />
+        {renderPage()}
+      </main>
     </div>
   );
 }

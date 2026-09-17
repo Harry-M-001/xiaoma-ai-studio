@@ -10,20 +10,24 @@ import {
   CircleCheck,
   CircleX,
   BookOpen,
+  RefreshCw,
 } from "lucide-react";
 import { api } from "../api";
 import type {
   Modality,
   ModalityMeta,
   ModelSpec,
+  OllamaStatus,
   Provider,
   ProviderInput,
   ProviderKind,
   ProviderKindMeta,
   ProviderPresetMeta,
+  QuickSetupResult,
 } from "../types";
 import { Empty, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
+import { notifyProvidersChanged } from "../providerEvents";
 import { Modal } from "../components/common";
 
 /** 服务类型接口不可用时的内置回落 */
@@ -67,11 +71,19 @@ export default function ProvidersPage() {
   const [providerKinds, setProviderKinds] = useState<ProviderKindMeta[]>(FALLBACK_KINDS);
   const [modalities, setModalities] = useState<ModalityMeta[]>(FALLBACK_MODALITIES);
   const [presetHint, setPresetHint] = useState("");
+  // 快速接入（粘贴 Key / 本机 Ollama）
+  const [keyInput, setKeyInput] = useState("");
+  const [settingUp, setSettingUp] = useState(false);
+  const [setupResult, setSetupResult] = useState<QuickSetupResult | null>(null);
+  const [ollama, setOllama] = useState<OllamaStatus | null>(null);
+  const [ollamaBusy, setOllamaBusy] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
       setProviders(await api.listProviders());
+      // 告诉横幅这类「看有没有模型」的组件：这里变了
+      notifyProvidersChanged();
     } finally {
       setLoading(false);
     }
@@ -79,6 +91,15 @@ export default function ProvidersPage() {
 
   useEffect(() => {
     load();
+  }, []);
+
+  // 本机 Ollama 检测（走服务端；浏览器自己探不到那个端口）。
+  // 失败就当没装——这条信息只是加分项，不该弹错误。
+  useEffect(() => {
+    api
+      .ollamaStatus()
+      .then(setOllama)
+      .catch(() => setOllama(null));
   }, []);
 
   // 预设 / 服务类型 / 能力类型：任一接口失败都独立回落到内置默认
@@ -249,6 +270,64 @@ export default function ProvidersPage() {
 
   const modalityLabel = (key: string) => modalities.find((m) => m.key === key)?.label ?? key;
 
+  /** 粘贴一个 Key：后端认归属 → 试真实请求 → 通了才存 */
+  const runQuickSetup = async (providerKey = "", force = false) => {
+    const key = keyInput.trim();
+    if (!key) {
+      toast.error("先把 API Key 粘进来");
+      return;
+    }
+    setSettingUp(true);
+    try {
+      const r = await api.quickSetup({ api_key: key, provider_key: providerKey, force });
+      setSetupResult(r);
+      if (r.ok) {
+        const name = r.service?.name ?? "";
+        toast.success(
+          r.forced
+            ? `已保存「${name}」，但连通测试没通过——记得点一次「测试连接」确认地址与 Key`
+            : `已接入「${name}」`,
+        );
+        setKeyInput("");
+        setSetupResult(null);
+        await load();
+        refreshOllama();
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "接入失败");
+    } finally {
+      setSettingUp(false);
+    }
+  };
+
+  const refreshOllama = () => {
+    api
+      .ollamaStatus(true)
+      .then(setOllama)
+      .catch(() => setOllama(null));
+  };
+
+  const connectOllama = async () => {
+    setOllamaBusy(true);
+    try {
+      const r = await api.ollamaConnect();
+      toast.success(`已接入本机 Ollama（${r.models.length} 个模型）`);
+      // 直接拿接口返回的结果把本地状态定下来：再发一次查询会有一小段
+      // 「刚接入完还显示未接入」的空窗（实测能撞上），而这里的信息本来就够
+      setOllama((prev) =>
+        prev
+          ? { ...prev, connected: true, running: true, models: r.models.map((m) => m.name) }
+          : prev,
+      );
+      await load();
+      refreshOllama();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "接入失败");
+    } finally {
+      setOllamaBusy(false);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-header">
@@ -260,6 +339,99 @@ export default function ProvidersPage() {
           <Plus size={16} />
           添加服务
         </button>
+      </div>
+
+      <div className="card quick-setup mb16">
+        <div>
+          <div className="field-label">粘贴一个 Key 就接入</div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+            自动认出这个 Key 是哪家的，用预设地址发一次<b>真实请求</b>，通了才保存——免得配了半天才发现拿错了服务商。
+          </div>
+        </div>
+        <div className="quick-setup-row">
+          <input
+            className="input"
+            type="password"
+            placeholder="sk-... / 32位ID.密钥 / UUID 形状的 Key 都认"
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") runQuickSetup();
+            }}
+          />
+          <button className="btn btn-primary" onClick={() => runQuickSetup()} disabled={settingUp}>
+            {settingUp ? <Spinner /> : <KeyRound size={15} />}
+            识别并接入
+          </button>
+        </div>
+
+        {setupResult && !setupResult.ok && (
+          <div className="quick-setup-attempt">
+            {setupResult.tried.map((t) => (
+              <div key={t.key}>
+                <b>{t.name}</b>：{t.message}
+              </div>
+            ))}
+            <div style={{ marginTop: 6 }}>
+              {setupResult.recognized ? "换一个服务商再试：" : "认不出归属，指定一个服务商再试："}
+            </div>
+            <div className="quick-setup-candidates">
+              {setupResult.candidates.map((c) => (
+                <button
+                  key={c.key}
+                  className="btn btn-ghost btn-sm"
+                  disabled={settingUp}
+                  onClick={() => runQuickSetup(c.key)}
+                  title={`${c.baseUrl}${c.hint ? ` · ${c.hint}` : ""}`}
+                >
+                  {c.name}
+                </button>
+              ))}
+              {setupResult.candidates[0] && (
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={settingUp}
+                  onClick={() => runQuickSetup(setupResult.candidates[0].key, true)}
+                  title="有些服务的连通测试方式不一样，测不过不代表不能用"
+                >
+                  测不过也保存为「{setupResult.candidates[0].name}」
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="ollama-line">
+          {ollama === null ? (
+            <span className="muted">本机 Ollama：没查到</span>
+          ) : ollama.running ? (
+            ollama.connected ? (
+              <>
+                <CircleCheck size={14} style={{ color: "var(--success)" }} />
+                本机 Ollama 已接入，{ollama.models.length} 个模型可用（不需要账号，完全本地跑）
+              </>
+            ) : (
+              <>
+                <Server size={14} />
+                检测到本机 Ollama，{ollama.models.length} 个模型：
+                <span className="muted">{ollama.models.slice(0, 4).join("、")}{ollama.models.length > 4 ? " …" : ""}</span>
+                <button className="btn btn-primary btn-sm" onClick={connectOllama} disabled={ollamaBusy}>
+                  {ollamaBusy ? <Spinner /> : <PlugZap size={14} />}
+                  一键接入
+                </button>
+              </>
+            )
+          ) : (
+            <>
+              <Server size={14} />
+              没检测到本机 Ollama（装了的话启动它再点一次检测，那条路不需要任何账号）
+            </>
+          )}
+          <button className="btn btn-ghost btn-sm" onClick={refreshOllama} disabled={ollamaBusy}>
+            <RefreshCw size={13} />
+            重新检测
+          </button>
+        </div>
       </div>
 
       <div className="guide">

@@ -55,6 +55,11 @@ def to_out(row: ProviderService) -> ProviderOut:
     )
 
 
+# 「快速接入」那边要拿预设里的模型清单，走这个公开入口，
+# 免得跨模块去碰带下划线的内部函数。
+parse_models = _parse_models
+
+
 async def list_services(db: AsyncSession) -> list[ProviderService]:
     rows = await db.execute(
         select(ProviderService).order_by(ProviderService.sort_order, ProviderService.id)
@@ -101,6 +106,59 @@ def build_adapter(row: ProviderService) -> BaseAdapter:
     api_key = security.decrypt(row.api_key_enc)
     base_url = row.base_url or (DEFAULT_ARK_BASE if row.kind == "ark" else "")
     return adapters.build_adapter(row.kind, base_url, api_key)
+
+
+async def find_by_base_url(db: AsyncSession, base_url: str) -> ProviderService | None:
+    """按接入地址找服务。地址相同即视为同一个服务——重复加一份只会让模型下拉出现同名两份。"""
+    target = (base_url or "").strip().rstrip("/")
+    if not target:
+        return None
+    for row in await list_services(db):
+        if (row.base_url or "").strip().rstrip("/") == target:
+            return row
+    return None
+
+
+async def upsert_by_base_url(
+    db: AsyncSession,
+    *,
+    name: str,
+    kind: str,
+    base_url: str,
+    api_key: str,
+    models: list[ModelSpec],
+    sort_order: int = 0,
+) -> ProviderService:
+    """「快速接入」的落库口：地址已存在就更新 Key 并补齐模型，否则新建。
+
+    补模型而不是整体覆盖：用户可能在预设之外自己加过模型（比如某个中转站只开了一部分型号），
+    覆盖会把它们删掉。
+    """
+    row = await find_by_base_url(db, base_url)
+    if row is None:
+        return await create(
+            db,
+            ProviderIn(
+                name=name,
+                kind=kind,  # type: ignore[arg-type]
+                base_url=base_url,
+                api_key=api_key,
+                enabled=True,
+                sort_order=sort_order,
+                models=models,
+            ),
+        )
+    row.name = row.name or name
+    row.kind = kind
+    row.api_key_enc = security.encrypt(api_key.strip())
+    row.enabled = True
+    existing = {m.name for m in _parse_models(row.models_json)}
+    merged = _parse_models(row.models_json) + [m for m in models if m.name not in existing]
+    row.models_json = json.dumps([m.model_dump() for m in merged], ensure_ascii=False)
+    await db.commit()
+    await db.refresh(row)
+    return to_out(row)
+
 
 
 @dataclass

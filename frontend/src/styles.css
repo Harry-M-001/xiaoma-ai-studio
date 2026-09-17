@@ -1063,6 +1063,7 @@ input, textarea, select { font-family: inherit; }
 .row { display: flex; gap: 10px; align-items: center; }
 .row-between { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .mt8 { margin-top: 8px; } .mt16 { margin-top: 16px; } .mt24 { margin-top: 24px; }
+.mb16 { margin-bottom: 16px; }
 .muted { color: var(--text-3); }
 .flex1 { flex: 1; min-width: 0; }
 
@@ -1264,6 +1265,41 @@ input, textarea, select { font-family: inherit; }
 .task-shot {
   padding: 1px 7px; border-radius: 4px; font-size: 11px;
   color: var(--primary); background: var(--primary-soft);
+}
+
+/* ============ 首屏引导横幅 ============ */
+/* 默认是「提醒」强度（缺某个能力），没接入任何服务时升到「阻断」强度：
+   那两种情况用户的下一步动作完全不同，视觉上不该长一样。 */
+.setup-banner {
+  display: flex; align-items: flex-start; gap: 12px;
+  margin: 14px 32px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  background: var(--warning-soft);
+  color: var(--text);
+}
+.setup-banner--strong {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+.setup-banner-icon { flex-shrink: 0; margin-top: 2px; color: var(--warning); }
+.setup-banner--strong .setup-banner-icon { color: var(--primary); }
+.setup-banner-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.setup-banner-title { font-size: 13.5px; font-weight: 600; }
+.setup-banner-desc { font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+.setup-banner-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+
+/* 快速接入卡片（模型服务页顶部） */
+.quick-setup { display: flex; flex-direction: column; gap: 10px; }
+.quick-setup-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.quick-setup-row .input { flex: 1; min-width: 260px; }
+.quick-setup-attempt { font-size: 12px; color: var(--text-2); }
+.quick-setup-attempt b { color: var(--text); }
+.quick-setup-candidates { display: flex; flex-wrap: wrap; gap: 6px; }
+.ollama-line {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12.5px; color: var(--text-2);
 }
 
 @media (max-width: 900px) {

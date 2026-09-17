@@ -9,8 +9,8 @@ from app.database import SessionLocal
 from app.deps import require_auth
 from app.providers.base import AdapterError
 from app.registry import adapters
-from app.schemas import ModelOption, ProviderIn, ProviderOut, ProviderTestIn
-from app.services import provider_store
+from app.schemas import ModelOption, ProviderIn, ProviderOut, ProviderTestIn, QuickSetupIn
+from app.services import ollama_service, provider_store, quick_setup
 
 router = APIRouter(prefix="/api/providers", tags=["providers"], dependencies=[Depends(require_auth)])
 
@@ -92,3 +92,35 @@ async def list_models(
 ) -> list[ModelOption]:
     rows = await provider_store.list_services(db)
     return provider_store.list_model_options(rows, modality=modality)
+
+
+# ---------- 快速接入：粘贴一个 Key / 接入本机 Ollama ----------
+
+
+@router.post("/quick-setup")
+async def quick_setup_route(payload: QuickSetupIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """粘贴一个 Key：自动认出归属 → 试一次真实请求 → 通了才写库。
+
+    失败时返回候选清单（而不是抛错），由用户挑一个再试——
+    DeepSeek 与通义千问这类 Key 形状完全相同，机器认不出来是正常的。
+    """
+    return await quick_setup.setup(
+        db,
+        api_key=payload.api_key,
+        provider_key=payload.provider_key,
+        force=payload.force,
+    )
+
+
+@router.get("/ollama")
+async def ollama_status(refresh: bool = False, db: AsyncSession = Depends(get_db)) -> dict:
+    """检测本机 Ollama。已经接入过就一并告诉前端，免得重复点。"""
+    info = await ollama_service.detect(force=refresh)
+    connected = await provider_store.find_by_base_url(db, f"{info['baseUrl']}/v1")
+    return {**info, "connected": connected is not None}
+
+
+@router.post("/ollama")
+async def ollama_connect(db: AsyncSession = Depends(get_db)) -> dict:
+    """一键接入本机 Ollama（零成本起步：不需要任何云账号）。"""
+    return await ollama_service.connect(db)

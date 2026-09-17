@@ -18,6 +18,7 @@ from app.providers.base import (
     AdapterError,
     BaseAdapter,
     VideoStatus,
+    network_error_message,
     network_error_detail,
     unsupported,
     url_host,
@@ -58,7 +59,7 @@ class ArkAdapter(BaseAdapter):
                 params={"limit": 1} if model is None else None,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code == 200:
             return
         if resp.status_code in (401, 403):
@@ -121,7 +122,7 @@ class ArkAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code != 200:
             raise_upstream_error(resp)
         data = resp.json()
@@ -204,7 +205,7 @@ class ArkAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code != 200:
             raise_upstream_error(resp)
         data = resp.json()

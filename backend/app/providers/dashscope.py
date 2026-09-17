@@ -25,6 +25,7 @@ from app.providers.base import (
     AdapterError,
     BaseAdapter,
     VideoStatus,
+    network_error_message,
     network_error_detail,
     unsupported,
     url_host,
@@ -66,7 +67,7 @@ class DashScopeAdapter(BaseAdapter):
                 f"{self.base_url}/tasks/0", headers={"Authorization": f"Bearer {self.api_key}"}
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         # 404/400 = 鉴权通过但任务不存在；401/403 = Key 无效
         if resp.status_code in (401, 403):
             raise AdapterError(f"API Key 校验失败：HTTP {resp.status_code}", log_detail=f"HTTP {resp.status_code} auth_failed host={url_host(self.base_url)}")
@@ -121,7 +122,7 @@ class DashScopeAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code not in (200, 201):
             raise_upstream_error(resp)
         task_id = (resp.json() or {}).get("output", {}).get("task_id")
@@ -235,7 +236,7 @@ class DashScopeAdapter(BaseAdapter):
                 json=body,
             )
         except httpx.HTTPError as e:
-            raise AdapterError(f"网络请求失败：{e}", log_detail=network_error_detail(e, self.base_url)) from e
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code not in (200, 201):
             raise_upstream_error(resp)
         task_id = (resp.json() or {}).get("output", {}).get("task_id")

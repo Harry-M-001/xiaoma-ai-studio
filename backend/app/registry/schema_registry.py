@@ -335,6 +335,10 @@ register(
             FieldSpec("models_json", "预设模型", "json", default=[],
                       help='形如 [{"name":"gpt-4o","modality":"text","label":"GPT-4o"}]'),
             FieldSpec("hint", "提示文案", "text"),
+            FieldSpec(
+                "key_pattern", "Key 识别规则", "string",
+                help="「|」分隔的若干正则，用于「粘贴 Key 自动接入」时认归属；留空表示不从形状上认",
+            ),
             FieldSpec("sort_order", "排序", "int", default=0),
             FieldSpec("enabled", "显示", "bool", default=True),
         ],
@@ -343,6 +347,9 @@ register(
                 "key": "openai", "name": "OpenAI", "kind": "openai",
                 "base_url": "https://api.openai.com/v1", "sort_order": 1,
                 "hint": "官方接口，模型名为 gpt-4o / gpt-image-1 等",
+                # 只认新式项目 Key（sk-proj-…）：老式 sk- 与一堆国内厂商撞形状，
+                # 硬认会把别家的 Key 配到 OpenAI 地址上去
+                "key_pattern": r"^sk-proj-[A-Za-z0-9_-]{20,}$",
                 "models_json": [
                     {"name": "gpt-4o", "modality": "text", "label": "GPT-4o"},
                     {"name": "gpt-4o-mini", "modality": "text", "label": "GPT-4o mini"},
@@ -353,6 +360,8 @@ register(
                 "key": "deepseek", "name": "DeepSeek", "kind": "openai",
                 "base_url": "https://api.deepseek.com/v1", "sort_order": 2,
                 "hint": "性价比高的中文文本模型",
+                # 与通义千问同为 sk-+32 位十六进制，形状上分不开，两个都会进候选
+                "key_pattern": r"^sk-[0-9a-f]{32}$",
                 "models_json": [
                     {"name": "deepseek-chat", "modality": "text", "label": "DeepSeek Chat"},
                     {"name": "deepseek-reasoner", "modality": "text", "label": "DeepSeek R1"},
@@ -362,6 +371,7 @@ register(
                 "key": "kimi", "name": "月之暗面 Kimi", "kind": "openai",
                 "base_url": "https://api.moonshot.cn/v1", "sort_order": 3,
                 "hint": "长上下文文本模型",
+                "key_pattern": r"^sk-[A-Za-z0-9]{48,}$",
                 "models_json": [
                     {"name": "moonshot-v1-8k", "modality": "text", "label": "Moonshot 8K"},
                     {"name": "moonshot-v1-32k", "modality": "text", "label": "Moonshot 32K"},
@@ -372,6 +382,7 @@ register(
                 "key": "qwen", "name": "通义千问", "kind": "openai",
                 "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "sort_order": 4,
                 "hint": "阿里云百炼的 OpenAI 兼容模式",
+                "key_pattern": r"^sk-[0-9a-f]{32}$",
                 "models_json": [
                     {"name": "qwen-plus", "modality": "text", "label": "Qwen Plus"},
                     {"name": "qwen-turbo", "modality": "text", "label": "Qwen Turbo"},
@@ -382,6 +393,8 @@ register(
                 "key": "zhipu", "name": "智谱 GLM", "kind": "openai",
                 "base_url": "https://open.bigmodel.cn/api/paas/v4", "sort_order": 5,
                 "hint": "文本与图片均可",
+                # 智谱是老式的「id.secret」两段式
+                "key_pattern": r"^[0-9a-f]{32}\.[A-Za-z0-9]{8,}$",
                 "models_json": [
                     {"name": "glm-4-plus", "modality": "text", "label": "GLM-4 Plus"},
                     {"name": "glm-4-flash", "modality": "text", "label": "GLM-4 Flash"},
@@ -392,6 +405,8 @@ register(
                 "key": "ark", "name": "火山方舟 Ark", "kind": "ark",
                 "base_url": "https://ark.cn-beijing.volces.com/api/v3", "sort_order": 6,
                 "hint": "豆包 Seedream 图片 / Seedance 视频，模型名填具体版本 ID",
+                # 方舟的 Key 是 UUID 形状
+                "key_pattern": r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
                 "models_json": [
                     {"name": "doubao-seedream-4-0-250828", "modality": "image", "label": "豆包 Seedream 4.0"},
                     {"name": "doubao-seedance-1-0-pro-250528", "modality": "video", "label": "豆包 Seedance 1.0 Pro"},
@@ -401,12 +416,15 @@ register(
                 "key": "openrouter", "name": "OpenRouter", "kind": "openai",
                 "base_url": "https://openrouter.ai/api/v1", "sort_order": 7,
                 "hint": "聚合网关，模型名如 anthropic/claude-3.5-sonnet",
+                "key_pattern": r"^sk-or-v1-[A-Za-z0-9]{16,}$",
                 "models_json": [],
             },
             {
                 "key": "ollama", "name": "本地 Ollama", "kind": "openai",
                 "base_url": "http://127.0.0.1:11434/v1", "sort_order": 8,
                 "hint": "完全本地运行，API Key 可任意填写",
+                # 不需要 Key，所以不从 Key 形状上认：它走「检测到本机 Ollama 就一键接入」
+                "key_pattern": "",
                 "models_json": [],
             },
         ],
