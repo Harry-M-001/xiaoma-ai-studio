@@ -21,6 +21,18 @@ const FALLBACK_RESOLUTION: ParamOptionItem[] = [
   { id: -1, value: "720p", label: "720p", meta: {}, sort_order: 1 },
 ];
 
+/**
+ * 空状态里的示例提示词。
+ *
+ * 视频比图片更贵更慢，第一次试的人最怕「等了两分钟，出来不是我想要的」——
+ * 给三条写清了「动作 + 运镜」的例子，比让人对着空白框猜有用。
+ */
+const PROMPT_EXAMPLES = [
+  "镜头缓慢推近，一只猫抬头看向窗外，暖光",
+  "雨后街道的霓虹倒影，镜头横移，电影感",
+  "云海翻涌的日出，航拍环绕，缓慢上升",
+];
+
 /** 在档位列表中选中：命中配置值则用它，否则回落到首个档位 */
 function pickValue(opts: ParamOptionItem[], preferred: string): string {
   if (opts.length === 0) return preferred;
@@ -309,6 +321,21 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
                 icon={<Film />}
                 title="视频任务将在这里出现"
                 desc="视频生成耗时较长，提交后可以离开本页，任务在后台运行，完成后自动入库。"
+                action={
+                  <div className="prompt-examples">
+                    <span className="prompt-examples-label">不知道写什么？点一条试试：</span>
+                    {PROMPT_EXAMPLES.map((ex) => (
+                      <button
+                        key={ex}
+                        type="button"
+                        className="prompt-example"
+                        onClick={() => setPrompt(ex)}
+                      >
+                        {ex}
+                      </button>
+                    ))}
+                  </div>
+                }
               />
             </div>
           )}

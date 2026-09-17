@@ -5,13 +5,14 @@ import {
   ImageIcon,
   ListChecks,
   MessageSquare,
+  Play,
   Plus,
   Sparkles,
   Video,
 } from "lucide-react";
 import { api } from "../api";
 import { createDemoProject } from "../demoProject";
-import type { Project } from "../types";
+import type { Project, SetupStatus } from "../types";
 import { formatDate, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
@@ -41,6 +42,7 @@ export default function HomePage({
 }) {
   const toast = useToast();
   const [projects, setProjects] = useState<Project[] | null>(null);
+  const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [creating, setCreating] = useState(false);
   const [demoBusy, setDemoBusy] = useState(false);
 
@@ -49,6 +51,11 @@ export default function HomePage({
       .listProjects()
       .then(setProjects)
       .catch(() => setProjects([]));
+    // 首页要知道「有没有可用模型」，才能把最主要的那个按钮放对
+    api
+      .setupStatus()
+      .then(setSetup)
+      .catch(() => setSetup(null));
   }, []);
 
   const quickCreate = async () => {
@@ -81,6 +88,31 @@ export default function HomePage({
     }
   };
 
+  /**
+   * 首页最主要的那个动作，按「你现在处在哪一步」决定——而不是固定成某个功能的入口。
+   *
+   * - 已经有作品：接着上一件做（这是老用户九成情况下想干的事）
+   * - 还没有作品但有模型：铺一条示例（新手最快看到成果的路径）
+   * - 连模型都没有：先去接入（否则点什么都只会撞到同一个错误）
+   *
+   * 判断依据全部来自已有的接口（项目列表 / setup-status），不额外问用户。
+   */
+  const recent = projects?.[0];
+  const primary = (() => {
+    if (recent && onOpenCanvas) {
+      return {
+        label: `继续「${recent.name}」`,
+        icon: <Play size={15} />,
+        run: () => onOpenCanvas(recent),
+        busy: false,
+      };
+    }
+    if (setup && !setup.ready && onGoProviders) {
+      return { label: "先接入一个模型", icon: <Plus size={15} />, run: onGoProviders, busy: false };
+    }
+    return { label: "从示例开始", icon: <Sparkles size={15} />, run: startDemo, busy: demoBusy };
+  })();
+
   return (
     <div className="page home-page">
       <section className="home-hero card">
@@ -90,17 +122,16 @@ export default function HomePage({
             <span className="home-hero-sub">{brandSub}</span>
           </h1>
           <p>
-            填一个 Base URL 和 API Key，接入任意模型：对话、生图、生视频、本地粗剪，
-            产物自动进本地资产库。数据全在你自己手里。
+            填一个 Base URL 和 API Key，接入任意模型：对话、生图、生视频、本地粗剪，产物自动进本地资产库。
           </p>
           <div className="home-hero-actions">
-            <button className="btn btn-primary" onClick={() => onNavigate("image")}>
+            <button className="btn btn-primary" onClick={primary.run} disabled={primary.busy}>
+              {primary.busy ? <Spinner /> : primary.icon}
+              <span className="home-hero-primary-label">{primary.label}</span>
+            </button>
+            <button className="btn btn-ghost" onClick={() => onNavigate("image")}>
               开始创作
               <ArrowRight size={15} />
-            </button>
-            <button className="btn btn-ghost" onClick={startDemo} disabled={demoBusy}>
-              {demoBusy ? <Spinner /> : <Sparkles size={15} />}
-              从示例开始
             </button>
             <button className="btn btn-ghost" onClick={quickCreate} disabled={creating}>
               {creating ? <Spinner /> : <Plus size={15} />}
@@ -116,8 +147,13 @@ export default function HomePage({
           <h2>创作入口</h2>
         </div>
         <div className="home-grid">
-          {ENTRIES.map((e) => (
-            <button key={e.route} className="home-card card" onClick={() => onNavigate(e.route)}>
+          {ENTRIES.map((e, i) => (
+            <button
+              key={e.route}
+              className="home-card card home-enter"
+              style={{ animationDelay: `${i * 40}ms` }}
+              onClick={() => onNavigate(e.route)}
+            >
               <div className="home-card-icon">{e.icon}</div>
               <div className="home-card-title">{e.title}</div>
               <div className="home-card-desc">{e.desc}</div>
@@ -140,13 +176,52 @@ export default function HomePage({
             </button>
           </div>
           <div className="home-projects">
-            {projects.slice(0, 4).map((p) => (
-              <button key={p.id} className="home-project card" onClick={() => onNavigate("projects")}>
+            {projects.slice(0, 4).map((p, i) => (
+              <button
+                key={p.id}
+                className="home-project card home-enter"
+                style={{ animationDelay: `${i * 40}ms` }}
+                // 点最近项目就直接进它的画布：以前这里只跳到项目列表，
+                // 想继续做的人还得多点一次（组件本来就拿到了 onOpenCanvas）
+                onClick={() => (onOpenCanvas ? onOpenCanvas(p) : onNavigate("projects"))}
+                title={onOpenCanvas ? "打开画布" : "查看全部项目"}
+              >
                 <div className="home-project-name">{p.name}</div>
                 <div className="home-project-desc">{p.description || "暂无描述"}</div>
-                <div className="home-project-time muted">{formatDate(p.updated_at)}</div>
+                <div className="home-project-foot">
+                  <span className="home-project-time muted">{formatDate(p.updated_at)}</span>
+                  <span className="home-project-go">
+                    打开画布
+                    <ArrowRight size={12} />
+                  </span>
+                </div>
               </button>
             ))}
+          </div>
+        </section>
+      )}
+
+      {projects && projects.length === 0 && (
+        <section className="home-section">
+          <div className="home-section-head">
+            <h2>最近项目</h2>
+          </div>
+          <div className="home-empty card">
+            <div className="home-empty-title">还没有作品</div>
+            <div className="home-empty-desc">
+              这里会列出你最近打开的项目。想要立刻看到成品，「从示例开始」会按你现有的模型铺好一条完整链路
+              （创意 → 小说 → 剧本 → 分镜 → 出图），然后点画布上方的「运行整图」就行。
+            </div>
+            <div className="home-empty-actions">
+              <button className="btn btn-primary btn-sm" onClick={startDemo} disabled={demoBusy}>
+                {demoBusy ? <Spinner /> : <Sparkles size={14} />}
+                铺一条示例
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={quickCreate} disabled={creating}>
+                {creating ? <Spinner /> : <Plus size={14} />}
+                我要自己建
+              </button>
+            </div>
           </div>
         </section>
       )}

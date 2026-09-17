@@ -18,6 +18,18 @@ const FALLBACK_COUNT: ParamOptionItem[] = [
   { id: -1, value: "1", label: "1 张", meta: {}, sort_order: 1 },
 ];
 
+/**
+ * 空状态里的示例提示词。
+ *
+ * 第一次进来的人面对的是「左边一排参数、右边一片空白」，最容易卡在「画面描述该写什么」这一步——
+ * 给三条点一下就能用的例子，比再写一句「请描述你想生成的画面」有用得多。
+ */
+const PROMPT_EXAMPLES = [
+  "黄昏的海边，一匹小马站在浅滩上，电影感光影，高细节",
+  "赛博朋克城市夜景，霓虹倒影，广角镜头，雨后",
+  "水彩风格的山谷日出，柔和色调，画面留白",
+];
+
 /** 在档位列表中选中：命中配置值则用它，否则回落到首个档位 */
 function pickValue(opts: ParamOptionItem[], preferred: string): string {
   if (opts.length === 0) return preferred;
@@ -411,6 +423,23 @@ export default function ImagePage({ onGoSettings }: { onGoSettings: () => void }
                 icon={<Images />}
                 title="作品将在这里出现"
                 desc="在左侧写好画面描述，点击「生成图片」。生成的图片会自动保存到资产库。"
+                action={
+                  mode === "single" ? (
+                    <div className="prompt-examples">
+                      <span className="prompt-examples-label">不知道写什么？点一条试试：</span>
+                      {PROMPT_EXAMPLES.map((ex) => (
+                        <button
+                          key={ex}
+                          type="button"
+                          className="prompt-example"
+                          onClick={() => setPrompt(ex)}
+                        >
+                          {ex}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null
+                }
               />
             </div>
           )}
