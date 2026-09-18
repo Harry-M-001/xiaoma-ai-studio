@@ -182,6 +182,8 @@ function parseCamera(o: Record<string, unknown>, id: string): CameraObject {
     composition: str(o.composition, "rule_of_thirds"),
     shotType: str(o.shotType, "medium_shot"),
     roll: clampNum(o.roll, -45, 45, 0),
+    // 指向哪个对象要等所有对象都解析完才知道，这一步先只判类型（见 parseDirectorDoc 里的收口）
+    trackTargetId: typeof o.trackTargetId === "string" ? o.trackTargetId : null,
   };
 }
 
@@ -231,11 +233,20 @@ export function parseDirectorDoc(raw: string): DirectorDoc | null {
   const activeCameraId =
     activeRaw && ids.has(activeRaw) ? activeRaw : firstCam ? firstCam.id : null;
 
+  // 机位的「跟随目标」同理：只能指向角色或元素。悬空引用留着不会报错，
+  // 只会在渲染时静默失效——那种问题查起来最费劲，所以在这里一次性清干净。
+  const followable = new Set(objects.filter((x) => x.kind !== "camera").map((x) => x.id));
+  const cleaned = objects.map((x) =>
+    x.kind === "camera" && x.trackTargetId && !followable.has(x.trackTargetId)
+      ? { ...x, trackTargetId: null }
+      : x,
+  );
+
   return {
     version: DOC_VERSION,
     scene: parseScene(o.scene),
     lights: parseLights(o.lights),
-    objects,
+    objects: cleaned,
     groups,
     activeCameraId,
   };

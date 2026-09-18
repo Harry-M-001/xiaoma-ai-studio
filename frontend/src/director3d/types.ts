@@ -12,11 +12,18 @@
  *  - 对象只有三种 kind：actor（素模角色）/ prop（几何元素）/ camera（机位）。
  *    角色与元素的区别只在「有没有骨架与姿态」，渲染与拾取路径完全一致。
  *
- * v1 相对参考实现**刻意砍掉**的部分（都在路线图里，不是忘了）：
- *  - 导入 GLB/GLTF 模型（需要模型加载器与 blob 生命周期管理，先不做）；
- *  - 对象分组（group/ungroup）——数据结构里保留 groupId，但界面还没做；
- *  - 跟随目标（trackTargetId）——同理只保留字段。
- * 留字段不留界面是为了「以后加功能不用迁移老数据」。
+ * v1 相对参考实现（dola-v2 的 DirectorStudio）**没有做**的部分，逐条列清（不是忘了）：
+ *  - **画布节点形态**：参考实现里一个 3D 场景挂在画布节点上、随项目走；本项目是「导演台页的
+ *    第二个页签 + 本机存档」，场景不进项目文件（换机器用导出/导入 JSON）。这是**架构差异**，
+ *    不是缺个按钮——要改成节点形态得同时动注册表、节点 schema 与运行链。
+ *  - 本地上传 GLB/GLTF 模型：参考实现用 `URL.createObjectURL` 拿 blob 地址，**只在本次会话有效**，
+ *    序列化时要剔除地址只留文件名（所以重开显示「模型未加载·请重新上传」，不用占位几何体冒充成功）。
+ *    这一整套 blob 生命周期管理没做，所以 `PropShape` 里没有 `model`。
+ *  - 空对象占位（参考实现 `PropShape` 里的 `null`：小八面体线框，可选中可定位、无实体视觉）。
+ *  - 群众阵列：一次按 行列数 × 间距 × 体型 铺 N×M 个人（参考实现上限 20×20）。
+ *  - 对象分组（打组/解组/重命名）：`groupId` 与 `groups` 都**只在数据结构里留着**，界面没做。
+ *  - 机位跟随目标：字段留着（`trackTargetId`），界面没做。
+ * 留字段不留界面是为了「以后加功能不用迁移老数据」，也为了**导入参考实现导出的场景时这层信息不丢**。
  */
 
 /** 三维向量。three 里到处是这个形状，但**不进渲染层**——数据层不该依赖 three */
@@ -130,6 +137,11 @@ export interface CameraObject extends BaseObject {
   shotType: string;
   /** 荷兰角倾斜，度。0 = 水平 */
   roll: number;
+  /**
+   * 跟随目标（角色/元素），v1 界面未开放、字段先留着。
+   * 校验时若指向一个不存在的对象会被清成 null——悬空引用留在存档里只会在渲染时静默失效。
+   */
+  trackTargetId: string | null;
 }
 
 export type DirectorObject = ActorObject | PropObject | CameraObject;
@@ -463,6 +475,7 @@ export function makeCamera(index: number, pos: Vec3, lookAt: Vec3): CameraObject
     composition: "rule_of_thirds",
     shotType: "medium_shot",
     roll: 0,
+    trackTargetId: null,
   };
 }
 

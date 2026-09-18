@@ -122,6 +122,27 @@ const noCam = parseDirectorDoc(
 );
 eq('一个机位都没有 → null', noCam.activeCameraId, null);
 
+// ---- 机位的跟随目标（v1 没有界面，但字段与校验都要对：导入别的实现导出的场景时不能丢/不能悬空）
+const target = makeProp(1, { x: 1, y: 0, z: 0 });
+const camFollow = makeCamera(2, { x: 0, y: 1, z: 6 }, { x: 0, y: 1, z: 0 });
+camFollow.trackTargetId = target.id;
+const okFollow = parseDirectorDoc(
+  JSON.stringify({ ...blind, objects: [target, camFollow], activeCameraId: camFollow.id }),
+);
+eq('跟随目标指向存在的元素 → 保留', okFollow.objects[1].trackTargetId, target.id);
+const camGhost = makeCamera(3, { x: 0, y: 1, z: 6 }, { x: 0, y: 1, z: 0 });
+camGhost.trackTargetId = 'gone';
+const ghostFollow = parseDirectorDoc(
+  JSON.stringify({ ...blind, objects: [camGhost], activeCameraId: camGhost.id }),
+);
+eq('跟随目标悬空 → 清成 null', ghostFollow.objects[0].trackTargetId, null);
+const camToCam = makeCamera(4, { x: 0, y: 1, z: 6 }, { x: 0, y: 1, z: 0 });
+camToCam.trackTargetId = camGhost.id;
+const camFollowCam = parseDirectorDoc(
+  JSON.stringify({ ...blind, objects: [camGhost, camToCam], activeCameraId: camToCam.id }),
+);
+eq('跟随目标指向机位 → 清成 null（只能跟角色/元素）', camFollowCam.objects[1].trackTargetId, null);
+
 // ---- 分组
 const grp = parseDirectorDoc(
   JSON.stringify({ ...blind, groups: [{ id: 'g1', name: 'x' }, { name: 'noid' }, 7] }),
