@@ -39,6 +39,8 @@ import type {
   QuickSetupResult,
   SchemaRow,
   SetupStatus,
+  SpeechResult,
+  SpeechVoices,
   StyleOption,
   TableSpecMeta,
   Task,
@@ -331,6 +333,12 @@ export const api = {
       `/api/canvas/${projectId}/nodes/${encodeURIComponent(nodeId)}/animatic`,
       { method: "POST" },
     ),
+  // ---- 配音（语音合成）----
+  /** 音色快捷选项与这一段的上限（音色不做白名单，允许手填别家的 id） */
+  speechVoices: () => request<SpeechVoices>("/api/audio/voices"),
+  /** 合成一段语音：同步返回，产物已落成音频资产 */
+  speech: (payload: { text: string; model_key: string; voice?: string; speed?: number }) =>
+    request<SpeechResult>("/api/audio/speech", { method: "POST", body: json(payload) }),
   canvasStatus: (projectId: number) =>
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),

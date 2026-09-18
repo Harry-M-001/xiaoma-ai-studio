@@ -310,13 +310,18 @@ def _stub_storage(by_name: dict[str, Path], root: Path) -> Iterator[None]:
 
 @contextlib.contextmanager
 def _stub_ffmpeg(fake_out: Path, captured: dict) -> Iterator[None]:
-    """接管「渲染」这一步：只记录收到什么，产出 fake_out 这个文件。"""
+    """接管「渲染」这一步：只记录收到什么，产出 fake_out 这个文件。
+
+    `audio` 也要收下：出片前要不要先做旁白这件事就靠它判断
+    （没勾旁白时必须一个字节都没合成）。
+    """
     real_render = ffmpeg_service.render_animatic
     real_save = ffmpeg_service._save_asset_file
 
-    async def fake_render(items, *, out_size):  # noqa: ANN001
+    async def fake_render(items, *, out_size, audio=None):  # noqa: ANN001
         captured["items"] = items
         captured["out_size"] = out_size
+        captured["audio"] = audio
         return fake_out
 
     ffmpeg_service.render_animatic = fake_render
@@ -398,7 +403,9 @@ def test_renders_from_the_storyboard_plan_and_registers_a_video_asset():
             assert items[1][1].spec.kind == animatic.PAN_RIGHT
             assert [c.seconds for _p, c, _s in items] == [4, 3]
             assert captured["out_size"] == (1280, 720)
+            assert captured["audio"] is None, "没勾旁白却先去做了一条音轨（那是付费调用）"
             assert report["shots"] == 2 and report["seconds"] == 7
+            assert report["narration"] == {"enabled": False}, report["narration"]
 
             async with maker() as db:
                 rows = (await db.execute(select(Asset).where(Asset.kind == "video"))).scalars().all()

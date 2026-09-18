@@ -23,6 +23,7 @@ const K = {
   draftPrompt: "xm_draft_prompt",
   draftFirstFrame: "xm_draft_first_frame",
   model: (modality: string) => `xm_model_${modality}`,
+  voice: "xm_speech_voice",
   /**
    * 3D 导演台的场景文档。它严格说不是「界面偏好」而是**用户内容**，
    * 但仍放在这个文件里：规矩的价值在「只有一个口子」，另开一个口子就等于没有规矩。
@@ -129,6 +130,18 @@ export const prefs = {
     set: (modality: string, key: string) => {
       if (key) writeRaw(K.model(modality), key);
       else dropRaw(K.model(modality));
+    },
+  },
+
+  /**
+   * 上次用的音色（配音页预填用）。
+   * 留空是**合法值**：表示「用服务默认音色」，所以空串不写盘、直接清掉键。
+   */
+  voice: {
+    get: () => readRaw(K.voice) ?? "",
+    set: (v: string) => {
+      if (v) writeRaw(K.voice, v);
+      else dropRaw(K.voice);
     },
   },
 

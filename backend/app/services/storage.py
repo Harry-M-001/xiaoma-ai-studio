@@ -18,6 +18,16 @@ _EXT_BY_CT = {
     "video/mp4": "mp4",
     "video/webm": "webm",
     "video/quicktime": "mov",
+    # 音频这几个扩展名不是装饰：`/media/` 是 StaticFiles 按扩展名猜 MIME 的，
+    # 存成 .bin 会让 `<audio>` 拿不到 audio/*，进度条与时长全废。
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/mp4": "m4a",
+    "audio/aac": "aac",
+    "audio/ogg": "ogg",
+    "audio/flac": "flac",
 }
 
 
@@ -91,6 +101,8 @@ def guess_kind(content_type: str) -> str:
         return "image"
     if ct.startswith("video/"):
         return "video"
+    if ct.startswith("audio/"):
+        return "audio"
     return "other"
 
 
@@ -100,3 +112,12 @@ def ext_for_video_url(url: str) -> str:
         if tail.endswith("." + ext):
             return ext
     return "mp4"
+
+
+def audio_ext(content_type: str) -> str:
+    """音频扩展名。认不出来的类型按 mp3 处理。
+
+    宁可猜错也不能落成 `.bin`：`/media/` 按扩展名给 MIME，`.bin` 会让浏览器拿到
+    `application/octet-stream`，`<audio>` 直接不认（后端一声不吭，用户只看到「放不了」）。
+    """
+    return _ext(content_type, "mp3")

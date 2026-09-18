@@ -333,6 +333,80 @@ async def merge_videos(paths: list[Path]) -> Path:
         list_file.unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------- 音频
+
+_TIMEOUT_MUX = 600
+
+
+async def probe_audio_seconds(path: Path) -> float | None:
+    """音频时长（秒）。读不出来返回 None。
+
+    **不抛异常**：时长只用来在界面上显示、以及在报告里对帐（旁白比画面长多久）。
+    为了一个装饰性数字把整个配音/出片流程判失败，代价完全不成比例。
+    """
+    _, ffprobe = await _resolve_binaries()
+    if not ffprobe:
+        return None
+    cmd = [
+        ffprobe, "-v", "error",
+        "-print_format", "json",
+        "-show_format", "-show_streams",
+        str(path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_PROBE)
+        data = json.loads(out.decode("utf-8", "replace"))
+    except (FileNotFoundError, asyncio.TimeoutError, json.JSONDecodeError, OSError):
+        return None
+    fmt = data.get("format", {})
+    audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+    duration = fmt.get("duration") or audio.get("duration")
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+async def mux_audio(video: Path, audio: Path) -> Path:
+    """把一条音轨封进无声成片，返回新文件路径。
+
+    四个参数都是有意的：
+
+    - `-c:v copy`：画面已经渲染好了，再编一遍只会掉质量、多花时间；
+    - `-c:a aac`：mp4 容器里兼容性最好的一档（用户手上的音轨可能是 wav/mp3）；
+    - `-af apad`：旁白比画面**短**时用静音补到画面结束。没有它，`-shortest`
+      会在旁白读完那一刻把整个输出截断——用户要的是一条 9 秒的样片，
+      配上一段 4 秒的旁白就只剩 4 秒画面，这个代价完全不成比例；
+    - `-shortest`：旁白比画面**长**时在画面结束处收尾（报告里会说清楚截了多久）。
+      **不做静默拉伸**：把旁白拉慢去凑时长，听起来会很怪。
+    """
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，无法把旁白合进样片")
+    out = _out_path("mp4")
+    ok, err = await _run(
+        [
+            ffmpeg, "-y",
+            "-i", str(video),
+            "-i", str(audio),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy", "-c:a", "aac",
+            "-af", "apad",
+            "-shortest",
+            str(out),
+        ],
+        _TIMEOUT_MUX,
+    )
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        out.unlink(missing_ok=True)
+        raise RuntimeError(f"把旁白合进样片失败：{err}")
+    return out
+
+
 # ---------------------------------------------------------------- 静图缓动样片
 
 
@@ -351,6 +425,7 @@ async def render_animatic(
     items: list[tuple[Path, animatic.AnimaticClip, tuple[int, int]]],
     *,
     out_size: tuple[int, int],
+    audio: Path | None = None,
 ) -> Path:
     """把「图片 + 镜头参数」逐镜渲染成缓动片段，再合成一条样片。
 
@@ -360,6 +435,9 @@ async def render_animatic(
 
     合成的活交给 `merge_videos`（流拷贝 → 带音轨重编码 → 无音轨重编码三级回退），
     本模块不再写第四套合并逻辑。
+
+    `audio` 给的是旁白音轨。**单镜片段保持 `-an`、只在最后封一次音轨**：
+    给每镜都塞一条空音轨，会让合并走到「带音轨重编码」那一档，白白多编一遍画面。
     """
     if not items:
         raise RuntimeError("没有可渲染的镜头")
@@ -391,7 +469,15 @@ async def render_animatic(
             parts.append(out)
 
         merged = await merge_videos(parts)
-        logger.info("静图样片渲染完成：%s 镜 → %s", len(parts), merged.name)
+        if audio is not None:
+            voiced = await mux_audio(merged, audio)
+            # 无声那版是中间产物，封完就删：它已经没用了，留着只会让用户困惑
+            merged.unlink(missing_ok=True)
+            merged = voiced
+        logger.info(
+            "静图样片渲染完成：%s 镜 → %s%s",
+            len(parts), merged.name, "（带旁白）" if audio is not None else "",
+        )
         return merged
     finally:
         shutil.rmtree(work, ignore_errors=True)

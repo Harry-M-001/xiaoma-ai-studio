@@ -895,6 +895,8 @@ input, textarea, select { font-family: inherit; }
 .field { margin-bottom: 16px; }
 .field-label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 7px; color: var(--text-2); }
 .field-hint { font-size: 12px; color: var(--text-3); margin-top: 6px; }
+.field-hint.danger { color: var(--danger); }
+.field-hint-inline { font-weight: 400; font-size: 12px; color: var(--text-3); margin-left: 6px; }
 .input, .textarea, .select {
   width: 100%;
   min-width: 0;
@@ -1270,6 +1272,22 @@ input, textarea, select { font-family: inherit; }
 .asset-doc-thumb svg { width: 28px; height: 28px; }
 .asset-doc-thumb em { font-style: normal; }
 .lightbox-media-doc { place-items: stretch; }
+
+/* ============ 音频（配音产物） ============ */
+
+.asset-audio-thumb {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  color: var(--text-3); font-size: 11px;
+}
+.asset-audio-thumb svg { width: 28px; height: 28px; }
+.asset-audio-thumb em { font-style: normal; }
+.lightbox-audio {
+  display: flex; flex-direction: column; align-items: center; gap: 22px;
+  width: min(420px, 100%); padding: 34px 28px; border-radius: var(--radius-lg);
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg);
+  color: var(--primary);
+}
+.lightbox-audio audio { width: 100%; }
 .lightbox-doc {
   margin: 0; width: min(860px, 100%); max-height: 100%; overflow: auto;
   padding: 20px 22px; background: var(--surface); border: 1px solid var(--border);
@@ -1397,6 +1415,47 @@ input, textarea, select { font-family: inherit; }
 }
 .prompt-actions .icon-btn { margin-left: auto; }
 .prompt-actions .icon-btn + .icon-btn { margin-left: 0; }
+
+/* ============ 配音（TTS 试听） ============ */
+
+.speech-voices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.speech-voice {
+  padding: 4px 11px; border-radius: 999px; cursor: pointer;
+  font-size: 12px; color: var(--text-2);
+  background: var(--surface-3); border: 1px solid var(--border);
+}
+.speech-voice:hover { color: var(--text); border-color: var(--primary); }
+.speech-voice.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+.speech-player { width: 100%; margin-top: 12px; height: 38px; }
+
+.speech-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding-bottom: 12px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
+}
+.speech-head h3 { font-size: 14px; font-weight: 700; }
+.speech-head .field-hint { margin-top: 0; }
+
+.speech-empty {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 18px 2px; font-size: 12.5px; line-height: 1.7; color: var(--text-3);
+}
+.speech-empty svg { flex: 0 0 auto; margin-top: 2px; }
+
+.speech-list { display: flex; flex-direction: column; gap: 8px; }
+.speech-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.speech-item.active { border-color: var(--primary); background: var(--primary-soft); }
+.speech-item-main { flex: 1; min-width: 0; }
+.speech-item-name { font-size: 13px; font-weight: 650; color: var(--text-2); }
+.speech-item-meta { font-size: 11.5px; font-weight: 400; color: var(--text-3); margin-left: 8px; }
+.speech-item-text {
+  font-size: 12.5px; color: var(--text-3); margin-top: 3px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.speech-item-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
 .config-panel { display: flex; flex-direction: column; gap: 16px; }
 .config-section { overflow: hidden; }

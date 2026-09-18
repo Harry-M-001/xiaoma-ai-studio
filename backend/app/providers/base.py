@@ -106,10 +106,28 @@ class VideoStatus:
     error: str | None = None
 
 
+@dataclass
+class SpeechResult:
+    """一段语音合成的产物。
+
+    `content_type` 由上游响应头带回来（OpenAI 兼容服务通常回 `audio/mpeg`，
+    也有回 `audio/wav` 的）；扩展名跟着它走，否则存成 `.bin` 之后连
+    `<audio>` 都没法可靠地拖动进度——MIME 链断在浏览器那一侧，后端什么都不报。
+    """
+
+    audio: bytes
+    content_type: str = "audio/mpeg"
+
+
 def normalize_base_url(url: str) -> str:
     """去掉末尾斜杠与用户误填的完整端点后缀，只保留 API 根路径。"""
     base = (url or "").strip().rstrip("/")
-    for suffix in ("/chat/completions", "/images/generations", "/contents/generations/tasks"):
+    for suffix in (
+        "/chat/completions",
+        "/images/generations",
+        "/contents/generations/tasks",
+        "/audio/speech",
+    ):
         if base.endswith(suffix):
             base = base[: -len(suffix)]
     return base.rstrip("/")
@@ -211,6 +229,25 @@ class BaseAdapter(ABC):
     @abstractmethod
     async def poll_video(self, remote_id: str) -> VideoStatus:
         """查询视频任务状态。"""
+
+    # ---- 语音合成 ----
+
+    @abstractmethod
+    async def synthesize_speech(
+        self,
+        *,
+        model: str,
+        text: str,
+        voice: str = "",
+        speed: float = 1.0,
+    ) -> SpeechResult:
+        """把一段文本合成成语音。
+
+        `voice` 是**服务商自己的**音色标识（如 alloy / zh-CN-XiaoxiaoNeural），
+        留空表示用该服务的默认音色。各家音色名不通用、也会陆续新增，所以这里
+        不做白名单校验，原样透传给上游——校验写死了，用户只能等我们发版。
+        不支持的实现应给出可读错误（raise AdapterError）。
+        """
 
 
 def url_host(url: str) -> str:

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Download, FileText, Images, Library, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
+import { AudioLines, Download, FileText, Images, Library, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
 import { api } from "../api";
 import type { Asset } from "../types";
 import { Empty, formatSize, formatTime, Spinner } from "../components/common";
@@ -11,6 +11,7 @@ const FILTERS = [
   { label: "全部", value: "" },
   { label: "图片", value: "image" },
   { label: "视频", value: "video" },
+  { label: "音频", value: "audio" },
   { label: "文档", value: "document" },
 ];
 const PAGE = 60;
@@ -139,6 +140,13 @@ export default function AssetsPage() {
                     <span className="asset-doc-thumb">
                       <FileText />
                       <em>Markdown 文稿</em>
+                    </span>
+                  ) : a.kind === "audio" ? (
+                    // 音频用「波形条 + 时长」当缩略图：它没有画面可显示，
+                    // 但直接塞一个 <audio controls> 会把卡片撑变形
+                    <span className="asset-audio-thumb">
+                      <AudioLines />
+                      <em>{a.duration ? `${a.duration} 秒` : "音频"}</em>
                     </span>
                   ) : (
                     <img src={a.url} alt={a.original_name} loading="lazy" />

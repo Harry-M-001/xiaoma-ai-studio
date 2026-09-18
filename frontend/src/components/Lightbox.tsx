@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X, Download } from "lucide-react";
+import { AudioLines, X, Download } from "lucide-react";
 import { Dialog } from "./Dialog";
 
 export default function Lightbox({
@@ -14,6 +14,7 @@ export default function Lightbox({
   onClose: () => void;
 }) {
   const isDoc = kind === "document";
+  const isAudio = kind === "audio";
   const [text, setText] = useState<string | null>(null);
 
   // Markdown 产物按纯文本读出展示（不同系统对 .md 的 MIME 处理不一致，不能靠 iframe）
@@ -37,7 +38,7 @@ export default function Lightbox({
   return (
     <Dialog
       onClose={onClose}
-      label={isDoc ? "文稿预览" : kind === "video" ? "视频预览" : "图片预览"}
+      label={isDoc ? "文稿预览" : kind === "video" ? "视频预览" : isAudio ? "音频试听" : "图片预览"}
       maskClassName="lightbox"
       className="lightbox-inner"
     >
@@ -58,6 +59,12 @@ export default function Lightbox({
           <pre className="lightbox-doc">{text ?? "加载中…"}</pre>
         ) : kind === "video" ? (
           <video src={url} controls autoPlay />
+        ) : isAudio ? (
+          // 音频没有画面：给它一块安静的卡片 + 控件，别拿它当图片渲染
+          <div className="lightbox-audio">
+            <AudioLines size={40} />
+            <audio src={url} controls autoPlay />
+          </div>
         ) : (
           <img src={url} alt="预览" />
         )}

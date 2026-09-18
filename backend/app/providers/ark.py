@@ -17,6 +17,7 @@ import httpx
 from app.providers.base import (
     AdapterError,
     BaseAdapter,
+    SpeechResult,
     VideoStatus,
     network_error_message,
     network_error_detail,
@@ -240,3 +241,8 @@ class ArkAdapter(BaseAdapter):
         # queued / running
         progress = 30 if status == "running" else 10
         return VideoStatus(status="processing", progress=progress)
+
+    async def synthesize_speech(self, **kwargs) -> SpeechResult:
+        # 方舟的语音合成不在这一套鉴权里（豆包语音是另一个服务、另一套 appid/token），
+        # 所以不在这里硬做：要走语音请单独配一个 OpenAI 兼容的服务。
+        raise unsupported("语音合成（方舟的语音是另一套服务，请用 OpenAI 兼容类型接入）")

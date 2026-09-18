@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, PlainSerializer
 
@@ -265,6 +265,32 @@ class AssetOut(BaseModel):
     duration: int | None = None
     task_id: int | None = None
     created_at: UtcDateTime
+
+
+def asset_to_out(a: Any) -> AssetOut:
+    """把 `Asset` 行转成对外的形状。
+
+    放在这里（而不是某个路由里）是因为它现在有两个调用方：生成/资产库接口，以及配音接口。
+    复制一份必然漂移——新增一个字段就会有一处漏掉，而漏掉的表现是「某个页面看不到时长」
+    这种查起来最费劲的一类问题。
+    """
+    return AssetOut(
+        id=a.id,
+        kind=a.kind,
+        url=f"/media/{a.filename}",
+        original_name=a.original_name,
+        content_type=a.content_type,
+        size=a.size,
+        source=a.source,
+        name=a.name or "",
+        category=a.category or "",
+        prompt=a.prompt,
+        width=a.width,
+        height=a.height,
+        duration=a.duration,
+        task_id=a.task_id,
+        created_at=a.created_at,
+    )
 
 
 class AssetList(BaseModel):

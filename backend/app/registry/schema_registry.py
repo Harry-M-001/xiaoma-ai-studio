@@ -138,6 +138,10 @@ register(
              "value": "16:9", "sort_order": 18, "description": ""},
             {"key": "defaults.video_resolution", "group_name": "defaults", "label": "默认视频清晰度", "value_type": "string",
              "value": "720p", "sort_order": 19, "description": ""},
+            {"key": "defaults.speech_model", "group_name": "defaults", "label": "默认语音模型", "value_type": "string",
+             "value": "", "sort_order": 20,
+             "description": "格式 服务ID:模型名。给样片配旁白时用它；留空则在你只有一个语音模型时自动用它"
+                            "（有多个语音模型时必须先在这里选一个，免得替你猜错还花钱）"},
             # ---- 限制 ----
             {"key": "limits.upload_max_mb", "group_name": "limits", "label": "上传大小上限（MB）", "value_type": "int",
              "value": 10, "sort_order": 21, "description": "单文件上传体积上限"},
@@ -282,8 +286,8 @@ register(
             {"key": "text", "label": "文本", "icon": "message", "sort_order": 1},
             {"key": "image", "label": "图片", "icon": "image", "sort_order": 2},
             {"key": "video", "label": "视频", "icon": "video", "sort_order": 3},
-            # 预留示例：把 enabled 打开即可启用音频能力
-            {"key": "audio", "label": "音频", "icon": "audio", "sort_order": 4, "enabled": False},
+            # 音频（语音合成）：老库那一行是预留位、关着的，由迁移 0015 打开
+            {"key": "audio", "label": "音频", "icon": "audio", "sort_order": 4},
         ],
     )
 )
@@ -316,12 +320,13 @@ register(
             {"key": "chat", "label": "文本对话", "icon": "message", "route": "chat", "group_name": "main", "sort_order": 2},
             {"key": "image", "label": "图片生成", "icon": "image", "route": "image", "group_name": "main", "sort_order": 3},
             {"key": "video", "label": "视频生成", "icon": "video", "route": "video", "group_name": "main", "sort_order": 4},
-            {"key": "assets", "label": "资产库", "icon": "library", "route": "assets", "group_name": "main", "sort_order": 5},
-            {"key": "prompts", "label": "提示词库", "icon": "sparkles", "route": "prompts", "group_name": "main", "sort_order": 6},
-            {"key": "tasks", "label": "任务中心", "icon": "tasks", "route": "tasks", "group_name": "main", "sort_order": 7},
-            {"key": "director", "label": "导演台", "icon": "clapperboard", "route": "director", "group_name": "main", "sort_order": 8},
-            {"key": "workflow", "label": "工作流", "icon": "workflow", "route": "workflow", "group_name": "main", "sort_order": 9, "enabled": False},
-            {"key": "community", "label": "社区", "icon": "community", "route": "community", "group_name": "main", "sort_order": 10, "enabled": False, "requires_auth": True},
+            {"key": "speech", "label": "配音", "icon": "audio", "route": "speech", "group_name": "main", "sort_order": 5},
+            {"key": "assets", "label": "资产库", "icon": "library", "route": "assets", "group_name": "main", "sort_order": 6},
+            {"key": "prompts", "label": "提示词库", "icon": "sparkles", "route": "prompts", "group_name": "main", "sort_order": 7},
+            {"key": "tasks", "label": "任务中心", "icon": "tasks", "route": "tasks", "group_name": "main", "sort_order": 8},
+            {"key": "director", "label": "导演台", "icon": "clapperboard", "route": "director", "group_name": "main", "sort_order": 9},
+            {"key": "workflow", "label": "工作流", "icon": "workflow", "route": "workflow", "group_name": "main", "sort_order": 10, "enabled": False},
+            {"key": "community", "label": "社区", "icon": "community", "route": "community", "group_name": "main", "sort_order": 11, "enabled": False, "requires_auth": True},
             {"key": "providers", "label": "模型服务", "icon": "settings", "route": "providers", "group_name": "settings", "sort_order": 1},
             {"key": "settings", "label": "系统设置", "icon": "sliders", "route": "settings", "group_name": "settings", "sort_order": 2},
         ],

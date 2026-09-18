@@ -28,6 +28,7 @@ from app.schemas import (
     TaskRetryIn,
     VideoGenerateIn,
     VideoPreflightIn,
+    asset_to_out,
 )
 from app.services import log_service, option_service, preflight, storage
 from app.services.runner import runner
@@ -96,23 +97,8 @@ async def _task_to_out(db: AsyncSession, task: Task) -> TaskOut:
 
 
 def _asset_to_out(a: Asset) -> AssetOut:
-    return AssetOut(
-        id=a.id,
-        kind=a.kind,
-        url=f"/media/{a.filename}",
-        original_name=a.original_name,
-        content_type=a.content_type,
-        size=a.size,
-        source=a.source,
-        name=a.name or "",
-        category=a.category or "",
-        prompt=a.prompt,
-        width=a.width,
-        height=a.height,
-        duration=a.duration,
-        task_id=a.task_id,
-        created_at=a.created_at,
-    )
+    # 转换只留一份（在 schemas 里）：配音接口也用同一个，多一处复制就多一处漂移
+    return asset_to_out(a)
 
 
 # ---------- 生成前软校验 ----------

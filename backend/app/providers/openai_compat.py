@@ -4,6 +4,7 @@
 智谱、OpenRouter 以及各类中转站。覆盖：
 - 文本：POST {base}/chat/completions（SSE 流式）
 - 图片：POST {base}/images/generations（同步，b64/url 均可解析）
+- 语音：POST {base}/audio/speech（同步，直接返回音频二进制）
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import httpx
 from app.providers.base import (
     AdapterError,
     BaseAdapter,
+    SpeechResult,
     VideoStatus,
     network_error_message,
     network_error_detail,
@@ -76,6 +78,22 @@ def raise_upstream_error(resp: httpx.Response) -> None:
     """
     message, log_detail = summarize_upstream_error(resp)
     raise AdapterError(message, log_detail=log_detail)
+
+
+_AUDIO_CT_FALLBACK = "audio/mpeg"
+
+
+def _audio_content_type(resp: httpx.Response) -> str:
+    """从响应头取音频类型；**只认 audio/* 这一族**，其余一律按 mp3 处理。
+
+    有的服务在这一栏回 `application/octet-stream`（甚至 `binary/octet-stream`）。
+    那不是音频身份：拿它去存文件只会得到 `.bin`，`/media/` 于是给它
+    `application/octet-stream`，`<audio>` 直接不认、进度条也拖不动，而后端一声不吭。
+    与其一个个去列「哪些不算」，不如反过来只认「哪些算」——按最通用的 mp3 存，
+    至少能播。
+    """
+    raw = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+    return raw if raw.startswith("audio/") else _AUDIO_CT_FALLBACK
 
 
 class OpenAICompatAdapter(BaseAdapter):
@@ -204,3 +222,51 @@ class OpenAICompatAdapter(BaseAdapter):
 
     async def poll_video(self, remote_id: str) -> VideoStatus:
         raise unsupported("视频")
+
+    async def synthesize_speech(
+        self,
+        *,
+        model: str,
+        text: str,
+        voice: str = "",
+        speed: float = 1.0,
+    ) -> SpeechResult:
+        """POST {base}/audio/speech（与 OpenAI、硅基流动、各家中转站同一套口径）。
+
+        两个刻意的取舍：
+
+        - **请求 mp3**：兼容面最广；有的服务只认 `mp3` / `opus` 这几个名字，
+          写 `wav` 反而容易 400。真拿到别的类型也不用慌，跟着响应头存。
+        - **voice 留空就不带这个字段**：让服务端用它自己的默认音色。硬塞一个
+          `alloy` 进去只会让不认这个名字的服务直接报错。
+        """
+        if not self.base_url or not self.api_key:
+            raise AdapterError(
+                "该服务尚未填写 Base URL 或 API Key",
+                log_detail="config_invalid missing_credentials",
+            )
+        client = await self.client()
+        body: dict[str, Any] = {"model": model, "input": text, "response_format": "mp3"}
+        if voice:
+            body["voice"] = voice
+        # 语速用默认值时不带这个字段：不是所有兼容服务都认它，带了就是替用户冒险
+        if abs(float(speed) - 1.0) > 1e-6:
+            body["speed"] = round(float(speed), 2)
+        url = f"{self.base_url}/audio/speech"
+        try:
+            resp = await client.post(
+                url, headers={**self.headers(), "Content-Type": "application/json"}, json=body
+            )
+        except httpx.HTTPError as e:
+            raise AdapterError(
+                network_error_message(e), log_detail=network_error_detail(e, url)
+            ) from e
+        if resp.status_code != 200:
+            raise_upstream_error(resp)
+        audio = resp.content
+        if not audio:
+            raise AdapterError(
+                "上游返回了空音频，请重试或换一个音色",
+                log_detail="empty_result status=200 body=0B",
+            )
+        return SpeechResult(audio=audio, content_type=_audio_content_type(resp))

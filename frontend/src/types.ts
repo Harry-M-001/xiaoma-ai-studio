@@ -146,6 +146,31 @@ export interface Asset {
   created_at: string;
 }
 
+// ---------- 配音（语音合成） ----------
+
+/** 音色快捷选项。只是快捷选项、不是白名单：界面允许直接手填别家的音色 id */
+export interface SpeechVoicePreset {
+  id: string;
+  label: string;
+}
+
+export interface SpeechVoices {
+  presets: SpeechVoicePreset[];
+  maxChars: number;
+  speedRange: [number, number];
+  speedDefault: number;
+}
+
+export interface SpeechResult {
+  asset: Asset;
+  chars: number;
+  seconds: number | null;
+  modelKey: string;
+  model: string;
+  voice: string;
+  speed: number;
+}
+
 /* ---------------- 配置域（后端注册表驱动，前端不写死清单） ---------------- */
 
 /** 公开配置：键 → 值。如 app.name / defaults.temperature / limits.upload_max_mb */
@@ -232,6 +257,10 @@ export interface CanvasNodeData {
   sampleShotSeconds?: number;
   /** 静图样片：分镜表没写运镜时怎么办（空 = 轻微推近 / static = 固定不动） */
   sampleDefaultMove?: string;
+  /** 静图样片：把分镜表的「台词」读成旁白合进片子（会额外用掉一次语音合成） */
+  sampleNarration?: boolean;
+  /** 静图样片旁白的音色；留空 = 用语音服务的默认音色 */
+  sampleVoice?: string;
   /**
    * 最近一次出的样片。存在节点上（不是临时状态）——
    * 刷新页面后那条片子还在，不用为了再看一眼重新渲染一次。
@@ -562,6 +591,19 @@ export interface CanvasAnimaticReport {
   size: [number, number];
   fps: number;
   bytes: number;
+  /** 旁白：关着时只有 enabled=false，其余字段不出现 */
+  narration: {
+    enabled: boolean;
+    assetId?: number;
+    url?: string;
+    chars?: number;
+    /** 念了几句（分镜表里有台词的镜数） */
+    lines?: number;
+    seconds?: number | null;
+    voice?: string;
+    /** 旁白比画面长之类的提醒；没有问题就是空串 */
+    note?: string;
+  };
 }
 
 export interface CanvasAnimaticResult {

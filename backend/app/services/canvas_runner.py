@@ -22,12 +22,14 @@ import json
 import logging
 import time
 import uuid
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
 from app.models import Asset, ComfyWorkflow, Project, ProviderService, Task
+from app.providers.base import AdapterError
 from app.registry.canvas_nodes import (
     NODE_SCHEMAS,
     is_asset_image,
@@ -45,6 +47,8 @@ from app.services import (
     image_size,
     provider_store,
     run_budget,
+    speech,
+    speech_service,
     storage,
     storyboard_lint,
     storyboard_sheet,
@@ -1413,6 +1417,70 @@ class AnimaticInputError(ValueError):
 _ANIMATIC_LOCK = asyncio.Lock()
 
 
+async def _animatic_narration(
+    db: AsyncSession,
+    *,
+    data: dict,
+    shots: list,
+    clips: list,
+    video_seconds: int,
+) -> tuple[Path | None, dict]:
+    """按需要在出片前把旁白做好，返回 (音轨路径, 写进报告的那一段)。
+
+    三条口径：
+
+    - **只念台词，不念画面描述。** 画面描述是给生图模型的提示词（「中景，角色站在
+      花园中央，缓缓抬头」），念出来是制作说明而不是旁白。一句台词都没有时直接报错
+      并告诉用户去哪儿补，而不是拿画面描述凑一段——那样他会听到一版莫名其妙的解说词。
+    - **先做旁白再渲染。** 语音合成是一次付费调用：配置不对、台词为空这些情况要在
+      几分钟的渲染之前就报出来。
+    - **旁白只是一条整轨，不与镜头逐一对齐。** 逐镜对齐要按每镜时长做静音填充，
+      留给按角色分配音色那一步（数字人）；这一版如实说明「旁白比画面长多少秒」。
+    """
+    if not data.get("sampleNarration"):
+        return None, {"enabled": False}
+
+    by_no = {str(getattr(s, "no", "")): s for s in shots}
+    used = [by_no[str(c.shot_no)] for c in clips if str(c.shot_no) in by_no]
+    text, lines = speech.narration_from_shots(used)
+    if not lines:
+        raise AnimaticInputError(
+            "这份分镜表里一句台词都没有，配不了旁白。"
+            "可以先去「分镜」节点给每镜补一行「台词：…」，或者把旁白关掉"
+        )
+
+    model_key = await speech_service.default_model_key(db)
+    try:
+        asset, meta = await speech_service.synthesize_to_asset(
+            db,
+            model_key=model_key,
+            text=text,
+            voice=speech.sanitize_voice(data.get("sampleVoice")),
+            source="animatic",
+            name=f"样片旁白 · {lines} 句",
+            note="来自分镜表的台词，整段一条（未按镜头逐句对齐）",
+        )
+    except AdapterError as e:
+        # 上游/配置类问题按「输入不对」上报（400），别让它变成一句 500
+        raise AnimaticInputError(f"配旁白失败：{e}") from e
+
+    note = speech.truncation_note(audio_seconds=meta["seconds"], video_seconds=video_seconds)
+    logger.info(
+        "样片旁白已生成：%s 句 / %s 字 / %s 秒（音色 %s）",
+        lines, meta["chars"], f"{meta['seconds']:.1f}" if meta["seconds"] else "?", meta["voice"] or "默认",
+    )
+    return storage.abs_path(asset.filename), {
+        "enabled": True,
+        "assetId": asset.id,
+        "url": f"/media/{asset.filename}",
+        "chars": meta["chars"],
+        "lines": lines,
+        "seconds": meta["seconds"],
+        "voice": meta["voice"] or "服务默认音色",
+        "note": note,
+    }
+
+
 async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
     """从「分镜图」节点出一版静图缓动样片：零生成成本，先审节奏。
 
@@ -1506,7 +1574,15 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
                 long_side=animatic.sanitize_long_side(data.get("sampleRes")),
             )
 
-            out_path = await ffmpeg_service.render_animatic(items, out_size=out_size)
+            # 旁白要在渲染之前做完：语音合成是一次付费调用，先做就能在配置不对、
+            # 台词为空这些情况下立刻报错，而不是让人先等几分钟渲染再失败。
+            audio_path, narration = await _animatic_narration(
+                db, data=data, shots=shots, clips=plan.clips, video_seconds=plan.seconds
+            )
+
+            out_path = await ffmpeg_service.render_animatic(
+                items, out_size=out_size, audio=audio_path
+            )
 
             rel = ffmpeg_service._save_asset_file(out_path, "mp4")
             record = Asset(
@@ -1530,10 +1606,12 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
             report["size"] = [out_size[0], out_size[1]]
             report["fps"] = animatic.FPS
             report["bytes"] = record.size
+            report["narration"] = narration
             logger.info(
-                "画布 %s 节点 %s 出样片：%s 镜 / %s 秒 / %sx%s（跳过 %s 镜）",
+                "画布 %s 节点 %s 出样片：%s 镜 / %s 秒 / %sx%s（跳过 %s 镜%s）",
                 project_id, node_id, len(plan.clips), plan.seconds,
                 out_size[0], out_size[1], len(plan.skipped),
+                "，带旁白" if narration.get("enabled") else "",
             )
             return record, report
 

@@ -11,6 +11,7 @@ import type { AppInfo, ConfigMap, NavMeta } from "./types";
 import ChatPage from "./pages/ChatPage";
 import ImagePage from "./pages/ImagePage";
 import VideoPage from "./pages/VideoPage";
+import SpeechPage from "./pages/SpeechPage";
 import AssetsPage from "./pages/AssetsPage";
 import PromptsPage from "./pages/PromptsPage";
 import TasksPage from "./pages/TasksPage";
@@ -37,6 +38,7 @@ const DEFAULT_NAV: NavMeta[] = [
   { key: "chat", label: "文本对话", icon: "message", route: "chat", group: "main", requires_auth: false },
   { key: "image", label: "图片生成", icon: "image", route: "image", group: "main", requires_auth: false },
   { key: "video", label: "视频生成", icon: "video", route: "video", group: "main", requires_auth: false },
+  { key: "speech", label: "配音", icon: "audio", route: "speech", group: "main", requires_auth: false },
   { key: "assets", label: "资产库", icon: "library", route: "assets", group: "main", requires_auth: false },
   { key: "prompts", label: "提示词库", icon: "sparkles", route: "prompts", group: "main", requires_auth: false },
   { key: "tasks", label: "任务中心", icon: "tasks", route: "tasks", group: "main", requires_auth: false },
@@ -46,7 +48,7 @@ const DEFAULT_NAV: NavMeta[] = [
 ];
 
 /** 前端已实现的页面路由；导航里出现的其它 route 视为「未安装模块」 */
-const KNOWN_ROUTES = new Set(["home", "projects", "canvas", "chat", "image", "video", "assets", "prompts", "tasks", "director", "providers", "settings"]);
+const KNOWN_ROUTES = new Set(["home", "projects", "canvas", "chat", "image", "video", "speech", "assets", "prompts", "tasks", "director", "providers", "settings"]);
 
 /** route → modules.* 开关键，用于按配置关闭模块 */
 const MODULE_KEYS: Record<string, string> = {
@@ -243,6 +245,8 @@ function Shell() {
         return <ImagePage onGoSettings={() => setRoute("providers")} />;
       case "video":
         return <VideoPage onGoSettings={() => setRoute("providers")} />;
+      case "speech":
+        return <SpeechPage onGoSettings={() => setRoute("providers")} />;
       case "assets":
         return <AssetsPage />;
       case "prompts":

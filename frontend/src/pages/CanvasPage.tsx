@@ -1173,6 +1173,8 @@ function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
   const res = Number(data.sampleRes ?? 1280);
   const seconds = Number(data.sampleShotSeconds ?? 3);
   const holdStill = String(data.sampleDefaultMove ?? "") === "static";
+  const narrate = Boolean(data.sampleNarration);
+  const voice = String(data.sampleVoice ?? "");
 
   const run = async () => {
     if (!ctx || busy) return;
@@ -1182,16 +1184,18 @@ function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
 
   const skipped = report?.skipped ?? [];
   const truncated = report?.truncated ?? [];
+  const narration = report?.narration;
 
   return (
     <div className="canvas-sample">
       <div className="canvas-inline canvas-refhead">
         <label className="field-label">静图样片</label>
-        <span className="canvas-sample-tag">零生成成本</span>
+        {/* 开了旁白就不是「零成本」了：这句话不能含糊，它决定用户点不点 */}
+        <span className="canvas-sample-tag">{narrate ? "本地渲染 + 1 次配音" : "零生成成本"}</span>
       </div>
       <div className="canvas-float-hint">
         按分镜表的时长与运镜把上面这些图串成一条片子，先看节奏再决定要不要出视频。
-        本地渲染，不调模型、不花钱。
+        本地渲染，不调模型、不花钱{narrate ? "；开了旁白会额外调用一次语音合成（按所选服务计费）" : ""}。
       </div>
 
       <div className="canvas-inline canvas-sample-opts">
@@ -1252,6 +1256,37 @@ function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
         </label>
       </div>
 
+      <div className="canvas-inline canvas-sample-opts">
+        <label className="canvas-sample-check" title="把分镜表里的「台词」读成一条旁白，合进样片">
+          <input
+            type="checkbox"
+            checked={narrate}
+            onChange={(e) => ctx?.updateNode(id, { sampleNarration: e.target.checked })}
+          />
+          加旁白
+        </label>
+        {narrate && (
+          <label>
+            音色
+            <input
+              className="input"
+              value={voice}
+              placeholder="留空 = 服务默认音色"
+              onChange={(e) => ctx?.updateNode(id, { sampleVoice: e.target.value })}
+              title="填服务商的音色名（如 alloy / zh-CN-XiaoxiaoNeural）；留空用服务默认音色"
+            />
+          </label>
+        )}
+      </div>
+
+      {narrate && (
+        <div className="canvas-float-hint">
+          旁白念的是分镜表里每镜的「台词」那一栏（写成「（无）」的镜头会跳过），
+          整段念成一条音轨、不与镜头逐一对齐——逐句对齐留给「按角色配音」那一步。
+          没写台词的分镜表会直接报错提醒你先去补。
+        </div>
+      )}
+
       <button
         type="button"
         className="btn btn-ghost btn-block"
@@ -1284,6 +1319,15 @@ function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
               {truncated.map((t) => `镜头${t}`).join("、")}
             </span>
           )}
+          {narration?.enabled && (
+            <span>
+              旁白：{narration.lines} 句 · {narration.chars} 字
+              {narration.seconds ? ` · ${narration.seconds.toFixed(1)}s` : ""}（音色 {narration.voice}）
+            </span>
+          )}
+          {narration?.enabled && narration.note ? (
+            <span className="warn">{narration.note}</span>
+          ) : null}
         </div>
       )}
 

@@ -19,6 +19,7 @@ import httpx
 from app.providers.base import (
     AdapterError,
     BaseAdapter,
+    SpeechResult,
     VideoStatus,
     network_error_detail,
     unsupported,
@@ -167,6 +168,9 @@ class ComfyUIAdapter(BaseAdapter):
 
     async def poll_video(self, remote_id: str) -> VideoStatus:
         raise unsupported("直接生视频（ComfyUI 请通过工作流节点执行）")
+
+    async def synthesize_speech(self, **kwargs: Any) -> SpeechResult:
+        raise unsupported("语音合成（ComfyUI 走工作流，不在适配器层做）")
 
     # ---- 工作流原语 ----
 

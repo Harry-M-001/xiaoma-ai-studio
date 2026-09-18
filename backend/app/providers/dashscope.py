@@ -24,6 +24,7 @@ import httpx
 from app.providers.base import (
     AdapterError,
     BaseAdapter,
+    SpeechResult,
     VideoStatus,
     network_error_message,
     network_error_detail,
@@ -269,6 +270,11 @@ class DashScopeAdapter(BaseAdapter):
         # PENDING / RUNNING
         progress = 30 if status == "RUNNING" else 10
         return VideoStatus(status="processing", progress=progress)
+
+    async def synthesize_speech(self, **kwargs) -> SpeechResult:
+        # 百炼的语音合成走的是另一套接口与参数（不是 OpenAI 的 /audio/speech），
+        # 想要语音请用 OpenAI 兼容类型接入百炼的 compatible-mode 地址。
+        raise unsupported("语音合成（请用 OpenAI 兼容类型接入百炼 compatible-mode 地址）")
 
 
 def _ratio_of(w: int, h: int) -> str:
