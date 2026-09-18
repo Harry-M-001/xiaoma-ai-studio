@@ -181,6 +181,10 @@ register(
              "value": True, "sort_order": 39, "description": "关闭后导航与页面隐藏"},
             {"key": "safety.confirm_before_generate", "group_name": "safety", "label": "生成前二次确认", "value_type": "bool",
              "value": True, "sort_order": 1, "description": "开启后，提交图片 / 视频生成前弹窗确认，防止误点烧钱"},
+            {"key": "safety.run_call_budget", "group_name": "safety", "label": "整图运行调用上限", "value_type": "int",
+             "value": 0, "sort_order": 2,
+             "description": "「运行整图」一次最多调用多少次模型；0 = 不限制。超过时确认弹窗要求再确认一次，"
+                            "接口也会拒绝没有确认过的请求（单节点运行不受此限）"},
             # ---- 在线更新 ----
             {"key": "update.repo", "group_name": "update", "label": "更新源仓库（GitHub）", "value_type": "string",
              "value": "Harry-M-001/xiaoma-ai-studio", "sort_order": 41,

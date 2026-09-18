@@ -77,6 +77,9 @@ class Task(Base):
     canvas_node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 「重新生成」出来的任务记下原任务 id，便于在任务中心区分是重跑还是首次
     retry_of_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 「一次运行」的标识：整图运行 / 单节点运行各生成一个，把这一跑派出的任务串起来，
+    # 事后才能算出「这一次实际派了多少、成了几条」（见 services/run_summary.py）
+    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

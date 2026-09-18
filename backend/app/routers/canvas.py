@@ -42,6 +42,9 @@ class CanvasDocIn(BaseModel):
 
 class RunNodeIn(BaseModel):
     node_id: str | None = None  # 不传 = 整图执行
+    # 预算闸：整图运行超限时，客户端要把预览里的调用次数回传过来表示「已确认」。
+    # 不传（=0）时只要没超限照样放行，所以老调用方不受影响。
+    ack_calls: int = 0
 
 
 class AgentPlanIn(BaseModel):
@@ -207,21 +210,59 @@ async def run_canvas(
         raise HTTPException(status_code=404, detail="画布不存在")
 
     if payload.node_id:
+        run_id = canvas_runner.new_run_id()
         try:
-            tasks = await canvas_runner.run_single_node(project_id, payload.node_id)
+            tasks = await canvas_runner.run_single_node(project_id, payload.node_id, run_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return {
             "mode": "node",
             "nodeId": payload.node_id,
+            "runId": run_id,
             # 资产设定图节点一行一个任务，所以除了首个任务 id，还把总数带回去
             "taskId": tasks[0].id if tasks else None,
             "taskIds": [t.id for t in tasks],
             "taskCount": len(tasks),
         }
 
-    canvas_runner.start_full_graph(project_id)
-    return {"mode": "graph", "nodeId": None, "taskId": None, "taskIds": [], "taskCount": 0}
+    # 预算闸：整图运行是「一次点击派出几十次调用」的入口。
+    # 这里**重新算一遍**预估而不是信前端传来的数字——预览之后用户可能又改了画布，
+    # 拿过期的确认值放行等于没设闸。只在超限时才要求回传（ack=0 的老调用方照旧可用）。
+    preview = await canvas_runner.preview_graph(project_id)
+    state = preview.get("gate") or {}
+    if state.get("exceeds") and int(payload.ack_calls or 0) < int(state.get("calls") or 0):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"这一跑会调用 {state.get('calls')} 次，超过你设的上限 {state.get('limit')} 次"
+                f"（「系统设置 → 安全 → 整图运行调用上限」）。"
+                f"确认要跑就把 ack_calls 设成 {state.get('calls')} 再请求。"
+            ),
+        )
+
+    estimate_calls = (preview.get("totals") or {}).get("calls", 0)
+    run_id = canvas_runner.start_full_graph(project_id, expected=estimate_calls)
+    return {
+        "mode": "graph",
+        "nodeId": None,
+        "runId": run_id,
+        "taskId": None,
+        "taskIds": [],
+        "taskCount": 0,
+        "estimate": {"calls": estimate_calls},
+    }
+
+
+@router.get("/{project_id}/run-summary")
+async def run_summary(project_id: int, run_id: str = "") -> dict:
+    """跑完之后对一次账：这一跑实际派了多少次、成了几条、失败几条、出了多少产物。
+
+    与 `/preview`（跑之前的预估）配对使用；`finished` 为 false 时前端继续轮询。
+    """
+    try:
+        return await canvas_runner.run_summary(project_id, run_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/{project_id}/status")

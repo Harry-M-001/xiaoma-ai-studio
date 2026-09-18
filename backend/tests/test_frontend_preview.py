@@ -87,7 +87,10 @@ def test_dialog_surfaces_the_cost_and_the_redo():
     """弹窗必须把「要花几次调用」和「哪些产物会被重做」摆出来。"""
     src = _page()
     dialog = src[src.index("function RunConfirmDialog(") : src.index("/** 节点属性浮框")]
-    assert "totals.tasks" in dialog, "弹窗没有显示这一跑会派多少任务"
+    assert "totals.calls" in dialog, "弹窗没有显示这一跑会花几次调用"
+    # 「任务数」与「调用次数」同源但语义不同（一个图片节点的 n 张图是一次请求）：
+    # 这里的文案必须说「次」，不能写成「个任务」
+    assert "次模型调用" in dialog, "花费没有说成「调用次数」"
     assert "totals.steps" in dialog, "弹窗没有显示会执行几个节点"
     assert "hasOutput" in dialog and "会重做" in dialog, (
         "弹窗没有提示「已有产物会被重做」——整图最贵的一笔就是它"
@@ -96,10 +99,14 @@ def test_dialog_surfaces_the_cost_and_the_redo():
 
 
 def test_pages_do_not_call_legacy_blocking_run():
-    """`runCanvas(projectId)` 不带 nodeId 的位置只应有确认回调一处。"""
+    """整图启动只应有确认回调一处（形态是 `runCanvas(projectId, undefined, ack)`）。"""
     src = _page()
-    hits = re.findall(r"api\.runCanvas\(\s*projectId\s*\)", src)
+    hits = re.findall(r"api\.runCanvas\(\s*projectId\s*,\s*undefined", src)
     assert len(hits) == 1, f"整图启动入口有 {len(hits)} 处，二次确认会被绕过"
+    # 不带 nodeId 也不带确认值的老形态不该再存在：那正是能绕过确认的那一种
+    assert not re.findall(r"api\.runCanvas\(\s*projectId\s*\)", src), (
+        "还有旧的不带确认值的整图调用，闸门会被绕过"
+    )
 
 
 def test_api_and_route_agree():

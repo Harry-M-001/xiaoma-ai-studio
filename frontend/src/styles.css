@@ -579,6 +579,30 @@ input, textarea, select { font-family: inherit; }
   border: 1px solid var(--border-strong); background: var(--warning-soft); color: var(--text-2);
 }
 .run-confirm-caveat { font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
+/* 预算闸：超限时要把「这一跑要调用几次」和要求确认放在一起，别让它混在告警列表里 */
+.run-confirm-gate {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--warning); background: var(--warning-soft);
+  font-size: 12px; line-height: 1.7; color: var(--text);
+  cursor: pointer;
+}
+.run-confirm-gate input { margin-top: 3px; flex-shrink: 0; accent-color: var(--primary); }
+.run-confirm-gate b { color: var(--text); }
+
+/* 跑完之后的实际账 */
+.run-report-headline {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  font-size: 12.5px; line-height: 1.7; color: var(--text);
+  border: 1px solid var(--border-strong); background: var(--surface-2);
+}
+.run-report-headline.ok { border-color: var(--success); background: var(--success-soft); }
+.run-report-headline.ok svg { color: var(--success); }
+.run-report-headline.warn { border-color: var(--warning); background: var(--warning-soft); }
+.run-report-headline.warn svg { color: var(--warning); }
+.run-report-headline svg { flex-shrink: 0; }
+.run-report-bad { color: var(--danger); }
 
 /* ============ 分镜体检（零成本的镜头语言检查） ============ */
 

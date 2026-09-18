@@ -28,6 +28,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  AlertTriangle,
   CheckCircle2,
   FileText,
   Film,
@@ -55,6 +56,7 @@ import type {
   Asset,
   CanvasAgentDraft,
   CanvasAnimaticReport,
+  CanvasRunSummary,
   CanvasDoc,
   CanvasLint,
   CanvasNodeData,
@@ -1320,6 +1322,9 @@ function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
  * 整图会把图里每个节点都重跑一遍 —— 包括已经有产物的那些，每条都是真花钱的调用。
  * 所以点下去之前先把「会派几个任务、哪些会被重做、哪个现在就会挂」摆出来，
  * 而不是等跑完在任务中心里才发现花多了。
+ *
+ * **超配额时还要多一步**：勾选之后才能按「开始运行」，并把调用次数回传给接口
+ * （服务端会按此刻的画布再算一遍，预览之后改过画布的话旧数字挡不住）。
  */
 function RunConfirmDialog({
   preview,
@@ -1329,10 +1334,11 @@ function RunConfirmDialog({
 }: {
   preview: CanvasPreview;
   busy: boolean;
-  onConfirm: () => void;
+  onConfirm: (ackCalls: number) => void;
   onClose: () => void;
 }) {
-  const { totals } = preview;
+  const { totals, gate } = preview;
+  const [acked, setAcked] = useState(false);
   // 只列需要解释的节点：一次多条（批量扇出）、已有产物（会被重做）、必挂、条数待定
   const rows = preview.nodes.filter(
     (n) => n.error || n.count === null || (n.count ?? 0) > 1 || n.hasOutput
@@ -1343,6 +1349,7 @@ function RunConfirmDialog({
     else if (n.count === null) detail[n.id] = "条数待定";
     else detail[n.id] = `${n.count} 条 · ${kindSummary(n.kinds)}`;
   });
+  const needAck = Boolean(gate?.exceeds);
 
   return (
     <Dialog
@@ -1361,9 +1368,9 @@ function RunConfirmDialog({
         <div className="run-confirm-body">
           <div className="run-confirm-total">
             这一跑会执行 <b>{totals.steps}</b> 个节点
-            {totals.tasks > 0 ? (
+            {totals.calls > 0 ? (
               <>
-                ，至少 <b>{totals.tasks}</b> 次模型调用
+                ，至少 <b>{totals.calls}</b> 次模型调用
               </>
             ) : null}
             {totals.pendingNodes > 0 ? (
@@ -1371,6 +1378,21 @@ function RunConfirmDialog({
             ) : null}
             。
           </div>
+
+          {needAck && (
+            <label className="run-confirm-gate">
+              <input
+                type="checkbox"
+                checked={acked}
+                onChange={(e) => setAcked(e.target.checked)}
+              />
+              <span>
+                这一跑已知就要调用 <b>{gate.calls}</b> 次，超过你设的上限{" "}
+                <b>{gate.limit}</b> 次（「系统设置 → 安全 → 整图运行调用上限」里可调）。
+                我知道，仍然要跑。
+              </span>
+            </label>
+          )}
 
           {preview.notes.length > 0 && (
             <ul className="agent-lines warn">
@@ -1409,8 +1431,8 @@ function RunConfirmDialog({
           <button
             type="button"
             className="btn btn-primary btn-sm"
-            onClick={onConfirm}
-            disabled={busy}
+            onClick={() => onConfirm(needAck ? gate.ack : 0)}
+            disabled={busy || (needAck && !acked)}
           >
             {busy ? <Spinner /> : <Play size={14} />}
             开始运行
@@ -1418,6 +1440,112 @@ function RunConfirmDialog({
         </div>
     </Dialog>
   );
+}
+
+/**
+ * 跑完之后的「实际账」。
+ *
+ * 为什么要单独看一眼：预估是「至少几次」，实际可能因为重试、上游切块、某个环节被跳过
+ * 而不同。差得多的时候必须说出来，不然用户对这张表的信任就停在第一次「怎么和我算的不一样」。
+ */
+function RunReportDialog({
+  summary,
+  estimate,
+  onClose,
+}: {
+  summary: CanvasRunSummary;
+  estimate: number;
+  onClose: () => void;
+}) {
+  const delta = summary.calls - estimate;
+  const level = summary.failed > 0 || Math.abs(delta) >= 3 ? "warn" : "ok";
+  const products = [
+    summary.products.images ? `${summary.products.images} 张图` : "",
+    summary.products.videos
+      ? `${summary.products.videos} 段视频${summary.products.videoSeconds ? `（共 ${summary.products.videoSeconds} 秒）` : ""}`
+      : "",
+    summary.products.documents ? `${summary.products.documents} 份正文` : "",
+  ].filter(Boolean);
+
+  return (
+    <Dialog
+      onClose={onClose}
+      label="这一跑的实际账"
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog run-report"
+    >
+      <div className="canvas-dialog-head">
+        <span className="canvas-dialog-title">这一跑的实际账</span>
+        <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="run-confirm-body">
+        <div className={`run-report-headline ${level}`}>
+          {level === "ok" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}
+          <span>
+            实际调用 <b>{summary.calls}</b> 次
+            {estimate > 0 ? `（预估 ${estimate} 次）` : ""}
+            {delta === 0
+              ? "，和预估一致。"
+              : delta > 0
+                ? `，比预估多 ${delta} 次。`
+                : `，比预估少 ${-delta} 次。`}
+          </span>
+        </div>
+
+        <div className="run-confirm-total">
+          成功 <b>{summary.completed}</b> 条
+          {summary.failed > 0 ? (
+            <>
+              ，失败 <b className="run-report-bad">{summary.failed}</b> 条
+            </>
+          ) : (
+            "，没有失败"
+          )}
+          {products.length > 0 ? <>，产出 {products.join("、")}</> : null}
+          {summary.elapsedSec !== null ? <>，耗时 {formatDuration(summary.elapsedSec)}</> : null}。
+        </div>
+
+        {summary.failed > 0 && (
+          <div className="run-confirm-caveat">
+            失败的任务不会因为失败就不计费 —— 去「任务中心」看那几条的报错，
+            多半是模型或参数的问题，改完单独重跑那一步即可。
+          </div>
+        )}
+
+        {summary.nodes.length > 1 && (
+          <div className="run-confirm-nodes">
+            {summary.nodes.map((n) => (
+              <div key={n.id} className={`run-confirm-row${n.failed ? " bad" : ""}`}>
+                <span className="run-confirm-label">{n.label}</span>
+                <span className="run-confirm-detail">{n.calls} 次</span>
+                {n.failed ? (
+                  <span className="run-confirm-badge">{n.failed} 条失败</span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="canvas-dialog-foot">
+        <span className="canvas-dialog-hint">账按我们自己发出去的调用算，不含供应商侧的用量上报</span>
+        <button type="button" className="btn btn-primary btn-sm" onClick={onClose}>
+          知道了
+        </button>
+      </div>
+    </Dialog>
+  );
+}
+
+/** 秒数说成人话：90 → 「1 分 30 秒」 */
+function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  return `${m} 分 ${s % 60} 秒`;
 }
 
 /** 节点属性浮框：features 驱动，渲染在被选中节点下方（dola-v2 交互） */
@@ -2344,6 +2472,11 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [linting, setLinting] = useState(false);
   // 正在出样片的节点 id：渲染是本地 CPU 活，一次只跑一条（服务端也会挡）
   const [sampling, setSampling] = useState("");
+  // 整图跑完之后的「实际账」：非 null 时弹出来（预估一起显示，才能看出差多少）
+  const [runReport, setRunReport] = useState<CanvasRunSummary | null>(null);
+  const [runEstimate, setRunEstimate] = useState(0);
+  // 盯这一跑的轮询句柄（组件卸载时要清掉）
+  const runWatcher = useRef<number | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(() => prefs.paletteOpen.get() ?? true);
   // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）。
@@ -2713,6 +2846,14 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     return () => window.clearTimeout(t);
   }, [savedTick]);
 
+  // 离开画布时把「盯这一跑」的轮询停掉，别让它在后台一直问
+  useEffect(() => {
+    return () => {
+      if (runWatcher.current) window.clearInterval(runWatcher.current);
+      runWatcher.current = null;
+    };
+  }, []);
+
   // 未保存离开页面时拦截
   useEffect(() => {
     if (!dirty) return;
@@ -2788,18 +2929,56 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     }
   };
 
-  const confirmRunAll = async () => {
+  const confirmRunAll = async (ackCalls: number) => {
     setRunning(true);
     try {
-      await api.runCanvas(projectId);
+      const r = await api.runCanvas(projectId, undefined, ackCalls);
       setRunPreview(null);
       toast.success("整图执行已启动");
       await refreshStatus();
+      // 记下这一跑的预估与实际账：约 3 秒看一眼，跑完弹「实际账」
+      if (r.runId) {
+        setRunEstimate(r.estimate?.calls ?? 0);
+        watchRun(r.runId);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "启动失败");
     } finally {
       setRunning(false);
     }
+  };
+
+  /**
+   * 盯住这一跑：跑完了把「实际账」弹出来。
+   *
+   * 为什么要等它跑完而不是立刻查：任务还在跑的时候数字只有一半，拿半截数字当结论
+   * 比不显示更糟。上限 12 分钟，到点就收手（别让一个卡住的任务把轮询挂一辈子）。
+   */
+  const watchRun = (runId: string) => {
+    if (runWatcher.current) window.clearInterval(runWatcher.current);
+    let tries = 0;
+    runWatcher.current = window.setInterval(() => {
+      tries += 1;
+      void (async () => {
+        let stop = false;
+        try {
+          const s = await api.runSummary(projectId, runId);
+          if (s.finished) {
+            setRunReport(s);
+            stop = true;
+          }
+        } catch {
+          // 查不到就别再问了（任务记录被清理、项目被删等等），账只是附赠的一句话
+          stop = true;
+        }
+        if (tries > 240) stop = true; // 12 分钟还跑不完就别再轮询了
+        if (stop && runWatcher.current) {
+          window.clearInterval(runWatcher.current);
+          runWatcher.current = null;
+        }
+        await refreshStatus();
+      })();
+    }, 3000);
   };
 
   const deleteSelected = () => {
@@ -3364,6 +3543,15 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             busy={running}
             onConfirm={confirmRunAll}
             onClose={() => setRunPreview(null)}
+          />
+        )}
+
+        {runReport && (
+          <RunReportDialog
+            summary={runReport}
+            // 预估取「受理时响应里那个」；刷新过页面就用这一跑自己记着的那个
+            estimate={runEstimate || runReport.expected}
+            onClose={() => setRunReport(null)}
           />
         )}
 

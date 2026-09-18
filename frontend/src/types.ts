@@ -453,16 +453,58 @@ export interface CanvasPreview {
   nodes: CanvasPreviewNode[];
   totals: {
     tasks: number;
+    /** 调用次数（= 任务数；语义不同，文案要说「次」） */
+    calls: number;
     steps: number;
     byKind: Record<string, number>;
     pendingNodes: number;
     rerunNodes: number;
     blockedNodes: number;
   };
+  /** 预算闸：整图运行是否超过「调用上限」（超了要在弹窗里再确认一次） */
+  gate: CanvasRunGate;
   reused: { assetId: number; name: string; count: number }[];
   notes: CanvasPreviewNote[];
   /** 这一跑会不会真调外部模型（全本机 ComfyUI 时为 false） */
   billable: boolean;
+}
+
+/**
+ * 预算闸状态。
+ *
+ * `exceeds` 与 `uncertain` 必须分开看：前者是**已经确定**超了（要求再确认一次），
+ * 后者只是「还有节点的次数要等上游跑完」。把后者也当成超限，会让一个还没跑过的
+ * 项目永远点不动「运行整图」。
+ */
+export interface CanvasRunGate {
+  limit: number;
+  calls: number;
+  pendingNodes: number;
+  exceeds: boolean;
+  uncertain: boolean;
+  /** 超限时要回传给接口的确认值（就是调用次数） */
+  ack: number;
+}
+
+/** 跑完之后的对账：这一跑实际调用几次、成了几条、失败几条、出了多少产物 */
+export interface CanvasRunSummary {
+  runId: string;
+  calls: number;
+  byKind: Record<string, number>;
+  completed: number;
+  failed: number;
+  running: number;
+  /** 只有「已有任务都结束」且「整图本身走完了」才为 true：整图是边跑边派任务的 */
+  finished: boolean;
+  /** 这一跑还在进行中（含「第一个节点跑完了、后面的还没派」这段空档） */
+  active: boolean;
+  /** 服务端受理时算出的预估调用次数；刷新页面后靠它把预估带回来 */
+  expected: number;
+  products: { images: number; videos: number; documents: number; videoSeconds: number };
+  nodes: { id: string; label: string; calls: number; failed: number }[];
+  startedAt: string | null;
+  endedAt: string | null;
+  elapsedSec: number | null;
 }
 
 /** 分镜静态体检查出的一个问题（形状与生成前的 preflight 告警一致，可复用同一个组件画） */

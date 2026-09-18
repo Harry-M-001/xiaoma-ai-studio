@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +44,7 @@ from app.services import (
     ffmpeg_service,
     image_size,
     provider_store,
+    run_budget,
     storage,
     storyboard_lint,
     storyboard_sheet,
@@ -1049,10 +1051,11 @@ async def _build_node_tasks(
     ]
 
 
-async def run_single_node(project_id: int, node_id: str) -> list[Task]:
+async def run_single_node(project_id: int, node_id: str, run_id: str = "") -> list[Task]:
     """运行单个节点：上游取最近成功产物，缺产物直接报错。
 
     返回本次派发出的全部任务（资产设定图节点会有多个）。
+    `run_id` 由调用方给（API 层在受理请求时生成），用于事后把「这一跑」的任务串起来。
     """
     async with SessionLocal() as db:
         project = await db.get(Project, project_id)
@@ -1073,11 +1076,69 @@ async def run_single_node(project_id: int, node_id: str) -> list[Task]:
             raise ValueError(f"上游节点（{'、'.join(missing)}）还没有产物，请先运行它们")
 
         tasks = await _build_node_tasks(db, project_id, doc, node, upstream)
+        await _stamp_run(db, tasks, run_id)
 
     for task in tasks:
         # 队列满时由 runner 把这条任务标失败并写明原因（提示口径统一在 runner 里）
         await runner.start_or_fail(task.kind, task.id)
     return tasks
+
+
+def new_run_id() -> str:
+    """生成一次运行的标识。
+
+    不用自增序号：任务表里没有「运行」这张表，标识要能由任意一处生成而不需要先查库；
+    uuid 足够短、不撞，也能直接放进 URL query。
+    """
+    return uuid.uuid4().hex[:12]
+
+
+# 在跑的整图：run_id → {projectId, expected, done}。
+#
+# 为什么非要有这块内存状态：整图是**边跑边派**任务的（第 2 个节点要等第 1 个跑完
+# 才知道派几条），所以「已有任务都结束了」并不等于「这一跑结束了」——只看任务表
+# 会在第一个节点跑完时误判成跑完，把「实际 1 次（预估 2 次）」这种半截数字当结论弹给用户。
+# 用内存而不是建表：它只回答「这一跑还在不在进行」，进程重启后本来也就没有这一跑了。
+_ACTIVE_RUNS: dict[str, dict] = {}
+_MAX_ACTIVE_RUNS = 50
+
+
+def _register_run(run_id: str, project_id: int, expected: int) -> None:
+    _ACTIVE_RUNS[run_id] = {
+        "projectId": project_id,
+        "expected": max(0, int(expected or 0)),
+        "done": False,
+    }
+    # 只留最近这些：run_id 是查账用的，跑过几十次之后没人会再去翻最老的那一跑
+    while len(_ACTIVE_RUNS) > _MAX_ACTIVE_RUNS:
+        _ACTIVE_RUNS.pop(next(iter(_ACTIVE_RUNS)))
+
+
+def _finish_run(run_id: str) -> None:
+    if run_id in _ACTIVE_RUNS:
+        _ACTIVE_RUNS[run_id]["done"] = True
+
+
+def run_progress(run_id: str) -> dict:
+    """这一跑还在进行吗、受理时估了多少次（不是这一跑就当作早已结束）。"""
+    state = _ACTIVE_RUNS.get(run_id)
+    if state is None:
+        return {"active": False, "expected": 0}
+    return {"active": not state["done"], "expected": state["expected"]}
+
+
+async def _stamp_run(db: AsyncSession, tasks: list[Task], run_id: str) -> None:
+    """把这一批任务标上「属于哪一跑」。
+
+    放在建完任务之后统一盖戳（而不是在建任务的每一处都传 run_id）：
+    建任务的代码路径有六条（文档/图片/视频/资产图/分镜图/逐镜出片/工作流），
+    逐条改容易漏；这里只有一个入口，漏不掉。
+    """
+    if not run_id or not tasks:
+        return
+    for t in tasks:
+        t.run_id = run_id
+    await db.commit()
 
 
 # 一张素材被这一跑引用这么多次以上，才值得在确认弹窗里点名（更低的次数属正常搭配）
@@ -1186,6 +1247,11 @@ async def preview_graph(project_id: int) -> dict:
                 + "。请先按节点上的提示补齐配置，否则整图会在这里断掉。",
             }
         )
+    # 预算闸：整图运行是「一次点击派出几十次调用」的入口，超限时要在确认弹窗里
+    # 明确说出来（前端据此要求再确认一次，后端在受理时会再核一遍）
+    state = run_budget.gate(total_tasks, len(pending), limit=run_budget.call_budget())
+    if state["exceeds"] or state["uncertain"]:
+        notes.append({"level": "warning", "text": run_budget.gate_message(state)})
     if billable and (total_tasks or pending or blocked):
         seg: list[str] = []
         if total_tasks:
@@ -1217,12 +1283,17 @@ async def preview_graph(project_id: int) -> dict:
         "nodes": items,
         "totals": {
             "tasks": total_tasks,
+            # 「调用次数」= 任务数：文档节点一次调用产出一个任务（分块则一块一个），
+            # 图片节点的 n 张是同一次请求（算一次），视频一段一次。所以这两个数同源，
+            # 但语义不同——前端文案要说「次」而不是「个任务」。
+            "calls": total_tasks,
             "steps": step_nodes,
             "byKind": by_kind,
             "pendingNodes": len(pending),
             "rerunNodes": len(rerun),
             "blockedNodes": len(blocked),
         },
+        "gate": state,
         "reused": reused,
         "notes": notes,
         "billable": billable,
@@ -1467,8 +1538,17 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
             return record, report
 
 
-async def _run_full_graph(project_id: int) -> None:
+async def _run_full_graph(project_id: int, run_id: str = "") -> None:
     """整图执行：后台协程按拓扑序逐节点跑，上游失败则下游跳过。"""
+    try:
+        await _walk_graph(project_id, run_id)
+    finally:
+        # 不管中间炸成什么样，都要把这一跑标成「结束了」——
+        # 漏了这一步，前端会一直以为还在跑，永远不弹那一跑的实际账。
+        _finish_run(run_id)
+
+
+async def _walk_graph(project_id: int, run_id: str) -> None:
     async with SessionLocal() as db:
         project = await db.get(Project, project_id)
         if project is None or not project.canvas_json:
@@ -1496,6 +1576,7 @@ async def _run_full_graph(project_id: int) -> None:
             try:
                 upstream = await _resolve_upstream(db, project_id, doc, nid)
                 tasks = await _build_node_tasks(db, project_id, doc, node, upstream)
+                await _stamp_run(db, tasks, run_id)
             except Exception as e:  # noqa: BLE001 - 单节点失败不中断整图
                 failed.add(nid)
                 logger.warning("画布 %s 节点 %s 准备失败：%s", project_id, nid, e)
@@ -1530,6 +1611,94 @@ async def _run_full_graph(project_id: int) -> None:
             logger.warning("画布 %s 节点 %s 等待超时", project_id, nid)
 
 
-def start_full_graph(project_id: int) -> None:
-    """启动整图执行（不阻塞请求）。"""
-    asyncio.get_event_loop().create_task(_run_full_graph(project_id))
+def start_full_graph(project_id: int, expected: int = 0) -> str:
+    """启动整图执行（不阻塞请求），返回这一跑的 run_id。
+
+    `expected` 是受理时算出来的预估调用次数。要在这里记下来，是因为整图**边跑边派**：
+    只按已存在的任务判断「跑完了没有」会在第一个节点结束时误判（见 `_ACTIVE_RUNS`）。
+    """
+    run_id = new_run_id()
+    _register_run(run_id, project_id, expected)
+    asyncio.get_event_loop().create_task(_run_full_graph(project_id, run_id))
+    return run_id
+
+
+async def run_summary(project_id: int, run_id: str) -> dict:
+    """这一跑（run_id）的实际账：派了多少次、成了几条、失败几条、出了多少产物。
+
+    「实际」的口径是**我们自己发出去的调用**（一个任务一次调用），不是供应商回的用量：
+    我们发了几次是可数的、也是我们要为之后果负责的那部分；上游报不报 token 由它决定，
+    报了我们也不用（没有价格表，换不成钱）。
+
+    全跑完之前也能调：`finished` 为 False 时前端会继续轮询，而不是拿半截数字当结论。
+    """
+    if not run_id:
+        raise ValueError("缺少 run_id")
+    progress = run_progress(run_id)
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(Task)
+                .where(Task.run_id == run_id, Task.canvas_project_id == project_id)
+                .order_by(Task.id.asc())
+            )
+        ).scalars().all()
+        if not rows:
+            raise ValueError("这一跑没有对应的任务记录（run_id 不对，或记录已被清理）")
+
+        task_ids = [t.id for t in rows]
+        assets = (
+            await db.execute(select(Asset).where(Asset.task_id.in_(task_ids)))
+        ).scalars().all()
+
+        project = await db.get(Project, project_id)
+        labels: dict[str, str] = {}
+        if project and project.canvas_json:
+            for n in json.loads(project.canvas_json).get("nodes", []):
+                labels[str(n.get("id"))] = NODE_SCHEMAS.get(
+                    normalize_type(n.get("type") or ""), {}
+                ).get("label") or str(n.get("type") or "")
+
+    by_kind: dict[str, int] = {}
+    status_count: dict[str, int] = {}
+    per_node: dict[str, dict] = {}
+    for t in rows:
+        by_kind[t.kind] = by_kind.get(t.kind, 0) + 1
+        status_count[t.status] = status_count.get(t.status, 0) + 1
+        nid = str(t.canvas_node_id or "")
+        slot = per_node.setdefault(nid, {"id": nid, "label": labels.get(nid, "未归属"), "calls": 0, "failed": 0})
+        slot["calls"] += 1
+        if t.status in ("failed", "cancelled"):
+            slot["failed"] += 1
+
+    done = sum(status_count.get(s, 0) for s in ("completed", "failed", "cancelled"))
+    running = len(rows) - done
+    video_seconds = sum(int(a.duration or 0) for a in assets if a.kind == "video")
+    started = min((t.created_at for t in rows if t.created_at), default=None)
+    ended = max((t.completed_at for t in rows if t.completed_at), default=None)
+    elapsed = int((ended - started).total_seconds()) if (started and ended) else None
+
+    return {
+        "runId": run_id,
+        "calls": len(rows),
+        "byKind": by_kind,
+        "status": status_count,
+        "completed": status_count.get("completed", 0),
+        "failed": sum(status_count.get(s, 0) for s in ("failed", "cancelled")),
+        "running": running,
+        # 两个条件都要满足：已有的任务都结束了，**并且**这一跑本身已经走完整图。
+        # 少了后半句，整图跑到第一个节点结束时就会被当成跑完（它是边跑边派的）。
+        "finished": running == 0 and not progress["active"],
+        "active": progress["active"],
+        "expected": progress["expected"],
+        "products": {
+            "images": sum(1 for a in assets if a.kind == "image"),
+            "videos": sum(1 for a in assets if a.kind == "video"),
+            "documents": sum(1 for a in assets if a.kind == "document"),
+            "videoSeconds": video_seconds,
+        },
+        "nodes": sorted(per_node.values(), key=lambda x: (-x["calls"], x["id"])),
+        "startedAt": started.isoformat() if started else None,
+        "endedAt": ended.isoformat() if ended else None,
+        "elapsedSec": elapsed,
+    }

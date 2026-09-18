@@ -33,6 +33,7 @@ import type {
   CanvasAgentDraft,
   CanvasAnimaticResult,
   CanvasLint,
+  CanvasRunSummary,
   CanvasPreview,
   OllamaStatus,
   QuickSetupResult,
@@ -289,18 +290,32 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ nodes: doc.nodes, edges: doc.edges, viewport: doc.viewport }),
     }),
-  runCanvas: (projectId: number, nodeId?: string) =>
+  /**
+   * 运行节点 / 整图。
+   *
+   * `ackCalls` 只在整图运行超过配额上限时才需要：把确认弹窗里看到的调用次数回传过去。
+   * 服务端会**按此刻的画布重算一遍**再比（预览之后改过画布的话，旧数字挡不住）。
+   */
+  runCanvas: (projectId: number, nodeId?: string, ackCalls = 0) =>
     request<{
       mode: string;
       nodeId: string | null;
+      /** 这一跑的标识：拿它去查「实际派了多少」（见 runSummary） */
+      runId?: string;
       taskId: number | null;
       /** 资产设定图一次会派发多个任务（一行资产一个） */
       taskIds?: number[];
       taskCount?: number;
+      estimate?: { calls: number };
     }>(`/api/canvas/${projectId}/run`, {
       method: "POST",
-      body: JSON.stringify({ node_id: nodeId ?? null }),
+      body: JSON.stringify({ node_id: nodeId ?? null, ack_calls: ackCalls }),
     }),
+  /** 跑完之后对一次账：这一跑实际调用几次、成了几条、失败几条、出了多少产物 */
+  runSummary: (projectId: number, runId: string) =>
+    request<CanvasRunSummary>(
+      `/api/canvas/${projectId}/run-summary?run_id=${encodeURIComponent(runId)}`,
+    ),
   // 整图执行前的预估：会派多少任务、花多少次调用（纯读，不建任务）
   previewCanvas: (projectId: number) =>
     request<CanvasPreview>(`/api/canvas/${projectId}/preview`),
