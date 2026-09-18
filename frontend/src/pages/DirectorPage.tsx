@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -18,6 +18,15 @@ import { downloadUrl } from "../components/TaskCard";
 import { Empty, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
+/**
+ * 3D 导演台**必须懒加载**：它背后是 three（约 1MB），而绝大多数打开导演台的人
+ * 是来粗剪视频的。放在这里 lazy 一下，不进主包也不进这个页面本身。
+ */
+const DirectorStudio3D = lazy(() => import("../director3d/DirectorStudio3D"));
+
+/** 本机场景的作用域。3D 预演暂时是「一台机器一份草稿」，换机器用导出/导入 JSON */
+const SCENE_SCOPE = "local";
+
 function fmt(t: number): string {
   if (!Number.isFinite(t)) return "--:--";
   const m = Math.floor(t / 60);
@@ -26,7 +35,8 @@ function fmt(t: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${ms}`;
 }
 
-export default function DirectorPage({ onNavigate }: { onNavigate: (route: string) => void }) {
+/** 视频粗剪：导入 → 入出点 → 截片段 → 排序合并 → AI 改造 */
+function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   const toast = useToast();
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -156,7 +166,7 @@ export default function DirectorPage({ onNavigate }: { onNavigate: (route: strin
   const canExtract = current != null && inPoint != null && !extracting;
 
   return (
-    <div className="page">
+    <>
       <div className="page-header">
         <div>
           <div className="page-title">导演台</div>
@@ -351,6 +361,41 @@ export default function DirectorPage({ onNavigate }: { onNavigate: (route: strin
           )}
         </div>
       </div>
+    </>
+  );
+}
+
+/**
+ * 导演台（页面壳）：上面两个页签——「视频粗剪」与「3D 预演」。
+ *
+ * 为什么不把 3D 预演单开一个导航项：导航是数据驱动的（注册表里有种子数据），
+ * 加一项要动种子、路由白名单、模块开关三处；而这两件事本来就是同一件事的两半
+ * （先摆好空间关系，再剪成片），放在一个入口下更顺。
+ */
+export default function DirectorPage({ onNavigate }: { onNavigate: (route: string) => void }) {
+  const [tab, setTab] = useState<"clip" | "3d">("clip");
+
+  return (
+    <div className={tab === "3d" ? "page director-3d-page" : "page"}>
+      <div className="director-tabs">
+        <button type="button" className={tab === "clip" ? "on" : ""} onClick={() => setTab("clip")}>
+          <Scissors size={14} /> 视频粗剪
+        </button>
+        <button type="button" className={tab === "3d" ? "on" : ""} onClick={() => setTab("3d")}>
+          <Clapperboard size={14} /> 3D 预演
+        </button>
+      </div>
+
+      {tab === "clip" ? (
+        <ClipEditor onNavigate={onNavigate} />
+      ) : (
+        <div className="director-3d-host">
+          <Suspense fallback={<div className="director-3d-loading">正在加载 3D 模块…</div>}>
+            {/* key 绑定作用域：将来支持多场景时换 scope 会强制重挂载，不会串档 */}
+            <DirectorStudio3D key={SCENE_SCOPE} scope={SCENE_SCOPE} onClose={() => setTab("clip")} />
+          </Suspense>
+        </div>
+      )}
     </div>
   );
 }

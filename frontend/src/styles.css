@@ -1070,6 +1070,24 @@ input, textarea, select { font-family: inherit; }
 .director-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 960px) { .director-layout { grid-template-columns: 1fr; } }
 
+/* 导演台的两个页签（视频粗剪 / 3D 预演）。放在全局表里而不是 3D 模块的样式表里：
+   页签属于页面本身，而 3D 那份 CSS 是随懒加载 chunk 走的——放错地方会出现
+   「第一次进来页签没样式、切到 3D 再切回来才正常」这种诡异现象。 */
+.director-tabs { display: flex; gap: 6px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+.director-tabs button {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--text-3); font-size: 13.5px; font-weight: 600;
+  padding: 9px 12px; border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.director-tabs button:hover { color: var(--text); }
+.director-tabs button.on { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* 3D 页签要占满可视高度：3D 视口按容器尺寸算画布，容器为 0 高就是一片空白 */
+.page.director-3d-page { padding: 20px 24px 0; display: flex; flex-direction: column; overflow: hidden; }
+.director-3d-host { flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 20px; }
+.director-3d-loading { padding: 32px; color: var(--text-3); font-size: 13px; text-align: center; }
+
 .director-player { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .director-player video { width: 100%; border-radius: var(--radius-sm); background: #000; max-height: 480px; }
 .director-timeline { display: flex; flex-direction: column; gap: 10px; }

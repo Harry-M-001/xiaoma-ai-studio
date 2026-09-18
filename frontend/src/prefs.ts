@@ -10,6 +10,9 @@
  * 不合法就**当场丢掉并降级到默认**，而不是原样用出去、让问题在后面某处冒出来。
  */
 
+import { parseDirectorDoc, serializeDirectorDoc } from "./director3d/persist";
+import type { DirectorDoc } from "./director3d/types";
+
 const K = {
   theme: "xm_theme",
   sidebar: "xm_sidebar_collapsed",
@@ -20,6 +23,12 @@ const K = {
   draftPrompt: "xm_draft_prompt",
   draftFirstFrame: "xm_draft_first_frame",
   model: (modality: string) => `xm_model_${modality}`,
+  /**
+   * 3D 导演台的场景文档。它严格说不是「界面偏好」而是**用户内容**，
+   * 但仍放在这个文件里：规矩的价值在「只有一个口子」，另开一个口子就等于没有规矩。
+   * 代价是这里多知道一个业务类型（见文件末尾的说明），换来的是脏数据照样只在一处降级。
+   */
+  directorScene: (scope: string) => `xm_director3d_${scope}`,
 } as const;
 
 type Theme = "light" | "dark";
@@ -154,5 +163,31 @@ export const prefs = {
         return null;
       }
     },
+  },
+
+  /**
+   * 3D 场景文档按**作用域**存（项目 id 或 demo），互不干扰。
+   *
+   * 校验交给 `director3d/persist.ts`：那是一份纯数据模块（不 import three），
+   * 所以这里引用它不会把 1MB 的 three 拖进首屏包；而「存档能不能用」这件事
+   * 只有那一处说了算，`prefs` 不重复实现半套。
+   *
+   * `load` 要区分「没存过」和「存过但是坏的」：后者必须让界面说一句，
+   * 否则用户看到的是「我昨天搭的场景没了」，而界面表现得像第一次打开。
+   */
+  directorScene: {
+    load: (scope: string): { doc: DirectorDoc | null; malformed: boolean } => {
+      const raw = readRaw(K.directorScene(scope));
+      if (raw === null) return { doc: null, malformed: false };
+      const doc = parseDirectorDoc(raw);
+      if (doc === null) {
+        dropRaw(K.directorScene(scope));
+        return { doc: null, malformed: true };
+      }
+      return { doc, malformed: false };
+    },
+    set: (scope: string, doc: DirectorDoc) =>
+      writeRaw(K.directorScene(scope), serializeDirectorDoc(doc)),
+    drop: (scope: string) => dropRaw(K.directorScene(scope)),
   },
 };
