@@ -200,9 +200,16 @@ ASSET_IMAGE_KINDS = ("assetImage",)
 # 分镜图节点：逐镜批量产生图片任务（同样是 1 个节点 → N 个任务）
 STORYBOARD_IMAGE_KINDS = ("storyboardImage",)
 
+# 分镜表节点：产出镜头表（`### 镜头N | 景别 | 运镜 | 时长`），逐镜出图/出片与静态体检的输入
+STORYBOARD_SHEET_KINDS = ("storyboard",)
+
 
 def is_doc_kind(ntype: str) -> bool:
     return normalize_type(ntype) in DOC_NODE_KINDS
+
+
+def is_storyboard_sheet(ntype: str) -> bool:
+    return normalize_type(ntype) in STORYBOARD_SHEET_KINDS
 
 
 def is_asset_image(ntype: str) -> bool:

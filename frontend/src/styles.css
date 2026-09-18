@@ -580,6 +580,47 @@ input, textarea, select { font-family: inherit; }
 }
 .run-confirm-caveat { font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
 
+/* ============ 分镜体检（零成本的镜头语言检查） ============ */
+
+.lint-dialog-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.lint-dialog-total { font-size: 13px; line-height: 1.8; color: var(--text-2); }
+.lint-dialog-total b { color: var(--text); }
+/* 「没查出问题」也要说一句：什么都不显示会让人怀疑体检到底跑没跑 */
+.lint-dialog-ok {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--success); background: var(--success-soft);
+  color: var(--text); font-size: 12.5px; line-height: 1.7;
+}
+.lint-dialog-ok svg { flex-shrink: 0; color: var(--success); }
+.lint-dialog-note { margin-left: 6px; font-size: 11.5px; color: var(--text-3); }
+.lint-dialog-nodes { display: flex; flex-direction: column; gap: 8px; }
+.lint-dialog-node {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); padding: 8px 10px;
+}
+.lint-dialog-node-head { display: flex; align-items: baseline; gap: 10px; }
+.lint-dialog-node-name { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.lint-dialog-node-meta { margin-left: auto; font-size: 11.5px; color: var(--text-3); }
+.lint-dialog-node-row {
+  margin-top: 4px; font-size: 11.5px; color: var(--text-2);
+  line-height: 1.7; word-break: break-word;
+}
+/* 「跳过的节点」是如实说明，不是告警：用灰字，别和上面的提醒抢注意力 */
+.lint-dialog-skipped {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11.5px; color: var(--text-3);
+}
+.lint-dialog-empty {
+  padding: 14px; border-radius: var(--radius-sm); border: 1px dashed var(--border-strong);
+  font-size: 12.5px; line-height: 1.8; color: var(--text-2); text-align: center;
+}
+.lint-dialog-foot { display: flex; justify-content: flex-end; margin-top: auto; padding-top: 4px; }
+
 /* ============ 社区分享 ============ */
 
 .share-tabs { padding: 10px 16px 0; flex-shrink: 0; }

@@ -34,8 +34,17 @@ from app.registry.canvas_nodes import (
     is_doc_kind,
     is_runnable,
     is_storyboard_image,
+    is_storyboard_sheet,
+    normalize_type,
 )
-from app.services import asset_sheet, provider_store, storage, storyboard_sheet, style_service
+from app.services import (
+    asset_sheet,
+    provider_store,
+    storage,
+    storyboard_lint,
+    storyboard_sheet,
+    style_service,
+)
 from app.services.config_center_service import runtime_value
 from app.services.runner import runner
 
@@ -1214,6 +1223,96 @@ async def preview_graph(project_id: int) -> dict:
         "reused": reused,
         "notes": notes,
         "billable": billable,
+    }
+
+
+async def lint_graph(project_id: int) -> dict:
+    """分镜静态体检：把画布上每份镜头表拉出来，零成本检查镜头语言。
+
+    与 `preview_graph` 的分工：那个答「这一跑要花多少钱」，这个答「拍出来会不会难看」。
+    两者都是**纯读**：不建任务、不写库、不调模型（连模型解析都不做），可以随手点。
+
+    只体检「能解析出镜头表」的内容：
+    - 分镜节点（storyboard）即使解析不出来也要如实说出来——格式写歪了正是最该被点出来的；
+    - 其它文档节点（小说/剧本/资产表）解析不出镜头表是正常的，**静默跳过**，不当成问题报。
+    - 内容只看两处：手改正文（docText）与已生成的正文。节点上的 `prompt` 是「生成要求」，
+      不是内容，不参与体检（否则还没跑过的节点会因为一段指令文本被误报）。
+    """
+    async with SessionLocal() as db:
+        project = await db.get(Project, project_id)
+        if project is None or not project.canvas_json:
+            raise ValueError("画布不存在")
+        doc = json.loads(project.canvas_json)
+
+        nodes_out: list[dict] = []
+        warnings: list[dict] = []
+        skipped: list[dict] = []
+        shot_total = 0
+
+        for node in doc.get("nodes", []):
+            nid = node.get("id")
+            ntype = normalize_type(node.get("type") or "")
+            if not ntype or not nid:
+                continue
+            label = NODE_SCHEMAS.get(ntype, {}).get("label") or ntype
+            assets = await _latest_task_assets(db, project_id, nid)
+            # 手改正文 > 已生成的正文。
+            # 注意**不能**再兜底到 `node.data.prompt`：对文档节点来说 prompt 是「生成要求」
+            # （比如「请按三幕结构改写，每镜不超过 4 秒」），不是内容。把它当内容会对着
+            # 一堆指令文本报「解析不出镜头表」，而那个节点其实只是还没跑过。
+            text = _doc_override_text(node) or _doc_asset_text(assets)
+
+            is_sheet_node = is_storyboard_sheet(ntype)
+            if not text:
+                if is_sheet_node:
+                    skipped.append({"id": nid, "label": label, "reason": "这个节点还没有内容，先跑一次"})
+                continue
+
+            shots, findings, summary = storyboard_lint.lint_text(text)
+            if not shots:
+                if is_sheet_node:
+                    # 分镜节点解析不出镜头表 = 下游逐镜出图会直接报错，必须现在就说
+                    warnings.append(
+                        storyboard_lint.Finding(
+                            code="unparsable_storyboard",
+                            level="warn",
+                            message="没能从内容里解析出镜头表，下游的逐镜出图/出片会直接失败。",
+                            suggestion="标题按 `### 镜头1 | 中景 | 缓慢推近 | 4s` 写，"
+                            "字段用 `- 画面：`、`- 首帧提示词：`。",
+                        ).as_warning(label)
+                    )
+                continue
+
+            shot_total += summary["shots"]
+            nodes_out.append(
+                {
+                    "id": nid,
+                    "type": ntype,
+                    "label": label,
+                    "summary": summary,
+                    "findings": [
+                        {
+                            "code": f.code,
+                            "level": f.level,
+                            "message": f.message,
+                            "suggestion": f.suggestion,
+                            "shots": list(f.shots),
+                        }
+                        for f in findings
+                    ],
+                }
+            )
+            warnings.extend(f.as_warning(label) for f in findings)
+
+    level_rank = {"warn": 0, "info": 1}
+    warnings.sort(key=lambda w: (level_rank.get(w["level"], 2), w["code"]))
+
+    return {
+        "blocking": False,
+        "warnings": warnings,
+        "nodes": nodes_out,
+        "skipped": skipped,
+        "shotTotal": shot_total,
     }
 
 

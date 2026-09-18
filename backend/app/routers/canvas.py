@@ -139,6 +139,19 @@ async def preview_canvas(project_id: int) -> dict:
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.get("/{project_id}/lint")
+async def lint_canvas(project_id: int) -> dict:
+    """分镜静态体检：零成本检查镜头语言（运镜雷同 / 景别单调 / AI 腔…）。
+
+    与 `/preview` 的分工：那个答「这一跑要花多少钱」，这个答「拍出来会不会难看」。
+    同样纯读——不建任务、不写库、不调模型，`blocking` 恒为 false（只告警不阻断）。
+    """
+    try:
+        return await canvas_runner.lint_graph(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.post("/{project_id}/run")
 async def run_canvas(
     project_id: int, payload: RunNodeIn, db: AsyncSession = Depends(get_db)

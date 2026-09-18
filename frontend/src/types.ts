@@ -451,6 +451,42 @@ export interface CanvasPreview {
   billable: boolean;
 }
 
+/** 分镜静态体检查出的一个问题（形状与生成前的 preflight 告警一致，可复用同一个组件画） */
+export interface CanvasLintFinding {
+  code: string;
+  level: "warn" | "info";
+  message: string;
+  suggestion: string;
+  /** 涉及的镜号（「镜头3」这种），供定位 */
+  shots: string[];
+}
+
+export interface CanvasLintNode {
+  id: string;
+  type: string;
+  label: string;
+  summary: {
+    shots: number;
+    sizes: Record<string, number>;
+    moves: Record<string, number>;
+    scenes: number;
+    totalSeconds: number;
+  };
+  findings: CanvasLintFinding[];
+}
+
+/** 分镜静态体检结果（零成本：不建任务、不写库、不调模型） */
+export interface CanvasLint {
+  /** 恒为 false：体检只给建议，不拦你往下走 */
+  blocking: boolean;
+  /** 拍平后的告警，可直接喂 PreflightNotice */
+  warnings: PreflightWarning[];
+  nodes: CanvasLintNode[];
+  /** 没内容的分镜节点（如实说明，而不是当成「没问题」） */
+  skipped: { id: string; label: string; reason: string }[];
+  shotTotal: number;
+}
+
 export interface CanvasNodeStatus {
   taskId: number;
   status: string;

@@ -27,14 +27,25 @@ export async function runPreflight(
  * 只负责「把话说清楚」：为什么会有问题、怎么改。是否继续由用户自己按按钮决定——
  * 所以这里不提供任何「阻止」的样式或逻辑，按钮归调用方的弹窗管。
  */
-export function PreflightNotice({ warnings }: { warnings: PreflightWarning[] }) {
+export function PreflightNotice({
+  warnings,
+  headline,
+}: {
+  warnings: PreflightWarning[];
+  /**
+   * 顶部那句话。默认是「生成前」的说法；分镜体检等场景会覆盖成自己的说法
+   * （体检不是在你点生成的那一刻发生的，说「都不影响提交」会让人对不上号）。
+   */
+  headline?: string;
+}) {
   if (warnings.length === 0) return null;
   return (
     <div className="preflight">
       <div className="preflight-head">
         <AlertTriangle size={15} />
         <span>
-          有 {warnings.length} 条提醒。都不影响提交，你可以照原样生成，也可以先改一改。
+          {headline ??
+            `有 ${warnings.length} 条提醒。都不影响提交，你可以照原样生成，也可以先改一改。`}
         </span>
       </div>
       <ul className="preflight-list">

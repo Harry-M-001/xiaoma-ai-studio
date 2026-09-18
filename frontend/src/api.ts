@@ -31,6 +31,7 @@ import type {
   CanvasNodeSchema,
   CanvasNodeStatus,
   CanvasAgentDraft,
+  CanvasLint,
   CanvasPreview,
   OllamaStatus,
   QuickSetupResult,
@@ -302,6 +303,9 @@ export const api = {
   // 整图执行前的预估：会派多少任务、花多少次调用（纯读，不建任务）
   previewCanvas: (projectId: number) =>
     request<CanvasPreview>(`/api/canvas/${projectId}/preview`),
+  // 分镜静态体检：零成本检查镜头语言（纯读，不建任务、不调模型）
+  lintCanvas: (projectId: number) =>
+    request<CanvasLint>(`/api/canvas/${projectId}/lint`),
   canvasStatus: (projectId: number) =>
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),

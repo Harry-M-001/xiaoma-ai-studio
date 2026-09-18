@@ -28,6 +28,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import {
+  CheckCircle2,
   FileText,
   ImageIcon,
   Images,
@@ -37,6 +38,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  ScanSearch,
   Share2,
   Sparkles,
   Trash2,
@@ -52,6 +54,7 @@ import type {
   Asset,
   CanvasAgentDraft,
   CanvasDoc,
+  CanvasLint,
   CanvasNodeData,
   CanvasNodeSchema,
   CanvasNodeStatus,
@@ -65,6 +68,7 @@ import type {
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
 import { Dialog } from "../components/Dialog";
+import { PreflightNotice } from "../components/PreflightNotice";
 import { useToast } from "../components/Toast";
 import { prefs } from "../prefs";
 // 自动链的拓扑与铺链逻辑在 canvasChain.ts：示例模板要用同一套形状，
@@ -1038,6 +1042,105 @@ function kindSummary(kinds: Record<string, number>): string {
   return Object.entries(kinds)
     .map(([k, n]) => `${PREVIEW_KIND_LABEL[k] ?? k} ${n}`)
     .join(" · ");
+}
+
+/**
+ * 分镜静态体检的结果弹窗。
+ *
+ * 与「运行整图」那个确认弹窗的分工：那个回答**要花多少钱**，这个回答**拍出来会不会难看**。
+ * 所以它不放在「点生成」的那条路上，而是一个随时可点、零成本的检查——体检本身
+ * 不建任务、不调模型，也就没有任何理由拦着人往下走（`blocking` 恒为 false）。
+ */
+function LintDialog({ report, onClose }: { report: CanvasLint; onClose: () => void }) {
+  const warns = report.warnings.filter((w) => w.level === "warn").length;
+  // 注意：不能把「有提醒 / 没查出问题」两种情况都塞进 PreflightNotice 的 headline——
+  // 它在 warnings 为空时直接返回 null，那句「没查出问题」会永远显示不出来。
+  const head =
+    `有 ${report.warnings.length} 条提醒（其中 ${warns} 条建议改）。都不影响生成，` +
+    "你可以照原样往下走，也可以先改分镜表——现在改一分钱都不用花。";
+
+  return (
+    <Dialog
+      onClose={onClose}
+      label="分镜体检"
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog lint-dialog"
+    >
+      <div className="canvas-dialog-head">
+        <span className="canvas-dialog-title">
+          <ScanSearch size={15} /> 分镜体检
+        </span>
+        <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="lint-dialog-body">
+        <div className="lint-dialog-total">
+          检查了 <b>{report.nodes.length}</b> 个分镜节点、共 <b>{report.shotTotal}</b> 个镜头。
+          <span className="lint-dialog-note">零成本：不调模型、不建任务。</span>
+        </div>
+
+        <PreflightNotice warnings={report.warnings} headline={head} />
+
+        {report.warnings.length === 0 && report.nodes.length > 0 && (
+          <div className="lint-dialog-ok">
+            <CheckCircle2 size={15} />
+            <span>没查出问题：镜头语言和字段都是齐的，可以直接往下跑。</span>
+          </div>
+        )}
+
+        {report.nodes.length > 0 && (
+          <div className="lint-dialog-nodes">
+            {report.nodes.map((n) => (
+              <div key={n.id} className="lint-dialog-node">
+                <div className="lint-dialog-node-head">
+                  <span className="lint-dialog-node-name">{n.label}</span>
+                  <span className="lint-dialog-node-meta">
+                    {n.summary.shots} 镜 · {n.summary.totalSeconds}s
+                    {n.summary.scenes > 1 ? ` · ${n.summary.scenes} 个场景` : ""}
+                    {n.findings.length > 0 ? ` · ${n.findings.length} 条` : " · 没问题"}
+                  </span>
+                </div>
+                {Object.keys(n.summary.sizes).length > 0 && (
+                  <div className="lint-dialog-node-row">
+                    景别：{Object.entries(n.summary.sizes).map(([k, v]) => `${k}×${v}`).join(" ")}
+                  </div>
+                )}
+                {Object.keys(n.summary.moves).length > 0 && (
+                  <div className="lint-dialog-node-row">
+                    运镜：{Object.entries(n.summary.moves).map(([k, v]) => `${k}×${v}`).join(" ")}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {report.skipped.length > 0 && (
+          <ul className="lint-dialog-skipped">
+            {report.skipped.map((s) => (
+              <li key={s.id}>
+                「{s.label}」{s.reason}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {report.nodes.length === 0 && report.skipped.length === 0 && (
+          <div className="lint-dialog-empty">
+            画布上还没有能解析出镜头表的内容。先跑一个「分镜」节点，或者把镜头表贴进它的正文里再来。
+          </div>
+        )}
+
+        <div className="lint-dialog-foot">
+          <button type="button" className="btn btn-primary btn-sm" onClick={onClose}>
+            知道了
+          </button>
+        </div>
+      </div>
+    </Dialog>
+  );
 }
 
 /**
@@ -2063,6 +2166,9 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [running, setRunning] = useState(false);
   // 整图运行前的预估结果（非 null 时弹确认框）
   const [runPreview, setRunPreview] = useState<CanvasPreview | null>(null);
+  // 分镜体检结果（非 null 时弹报告）
+  const [lintReport, setLintReport] = useState<CanvasLint | null>(null);
+  const [linting, setLinting] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(() => prefs.paletteOpen.get() ?? true);
   // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）。
@@ -2471,6 +2577,22 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   );
 
   /**
+   * 分镜体检：先把画布存一次再查，否则查的是库里的旧正文，
+   * 用户刚改过的分镜表不会被算进去（体检结果与眼前的内容对不上是最容易失去信任的一种失败）。
+   */
+  const runLint = async () => {
+    if (dirty && !(await saveDoc())) return;
+    setLinting(true);
+    try {
+      setLintReport(await api.lintCanvas(projectId));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "体检失败");
+    } finally {
+      setLinting(false);
+    }
+  };
+
+  /**
    * 点「运行整图」：先让后端算一遍这一跑的形状（纯读），再弹确认框。
    * 整图会把已有产物也重做一遍 —— 这属于「花出去就回不来」的动作，先给人看一眼。
    */
@@ -2801,6 +2923,16 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             <button className="btn btn-ghost btn-sm" onClick={refreshStatus} title="刷新节点状态">
               <RefreshCw size={14} />
             </button>
+            {/* 体检放在「花钱之前」的位置：它零成本，但能省下一整轮逐镜生成的钱 */}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => void runLint()}
+              disabled={linting || !loaded}
+              title="分镜体检：检查运镜雷同 / 景别单调 / AI 腔（不调模型、不花钱）"
+            >
+              {linting ? <Spinner /> : <ScanSearch size={14} />}
+              体检
+            </button>
             <button className="btn btn-ghost btn-sm" onClick={deleteSelected} disabled={!selectedId} title="删除选中节点">
               <Trash2 size={14} />
             </button>
@@ -3029,6 +3161,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             onClose={() => setRunPreview(null)}
           />
         )}
+
+        {lintReport && <LintDialog report={lintReport} onClose={() => setLintReport(null)} />}
 
         {lightbox && (
           <Dialog
