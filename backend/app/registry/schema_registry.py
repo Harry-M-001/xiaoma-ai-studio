@@ -150,6 +150,13 @@ register(
              "value": 5, "sort_order": 23, "description": ""},
             {"key": "limits.video_max_wait_minutes", "group_name": "limits", "label": "视频最长等待（分钟）", "value_type": "int",
              "value": 30, "sort_order": 24, "description": "超时后任务标记失败"},
+            {"key": "limits.task_stale_minutes", "group_name": "limits", "label": "任务无进展判定（分钟）", "value_type": "int",
+             "value": 10, "sort_order": 24,
+             "description": "运行巡检把「多久没有任何进展」视为卡住。只在后台推进确实已经中断（进程内没人在跑这条任务）"
+                            "且已经静置这么久时才动手：能重连的（视频/工作流）重新接上上游，其余如实标失败。"
+                            "调小能更快把卡住的任务放出来重试，调大更保守"},
+            {"key": "limits.patrol_interval_seconds", "group_name": "limits", "label": "运行巡检间隔（秒）", "value_type": "int",
+             "value": 60, "sort_order": 24, "description": "多久扫一遍未完成的任务"},
             {"key": "limits.request_timeout", "group_name": "limits", "label": "接口请求超时（秒）", "value_type": "int",
              "value": 300, "sort_order": 25, "description": "调用上游模型接口的超时时间"},
             {"key": "limits.asset_page_size", "group_name": "limits", "label": "资产库每页数量", "value_type": "int",

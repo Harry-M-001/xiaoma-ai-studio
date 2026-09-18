@@ -272,6 +272,31 @@ def drop_task_logs(task_id: object) -> None:
         _task_buffers.pop(str(task_id), None)
 
 
+def note_task(task_id: object, message: str, *, level: int = logging.WARNING) -> None:
+    """在任务执行协程之外，往某条任务的日志里补一行。
+
+    巡检这类「事后才发现的问题」不是任务自己报的，那时 `task_log_scope` 早就退出了
+    （协程都结束了才轮到巡检发现）；但用户去任务中心看这条任务时，最该看到的就是
+    「谁在什么时候把它收口了」。所以单独留一个补行的口子。
+
+    **只追加，不新建空缓冲去覆盖已有的**：任务自己的那份日志是这个功能里最值钱的东西，
+    为了补一行把它清掉就本末倒置了。缓冲满了宁可不记。
+    """
+    key = str(task_id)
+    line = (
+        f"{datetime.datetime.now().strftime('%H:%M:%S')} "
+        f"{logging.getLevelName(level):<5s} {message}"
+    )
+    with _lock:
+        buf = _task_buffers.get(key)
+        if buf is None:
+            if len(_task_buffers) >= MAX_TASKS:
+                return
+            buf = deque(maxlen=MAX_TASK_LINES)
+            _task_buffers[key] = buf
+        buf.append(line)
+
+
 # ============================================================
 # 读取与导出
 # ============================================================

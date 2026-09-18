@@ -60,12 +60,20 @@ async def lifespan(app: FastAPI):
     log_service.setup_logging(force=True)
     await _seed_config()
     await runner.recover()
+    # 运行巡检：`recover()` 只在重启时兜一次，跑着的时候没人管「轮询协程静默结束、
+    # 任务永远停在 processing」这个洞。循环跟着应用一起起、一起停。
+    patrol_task = asyncio.create_task(runner.patrol_loop())
     # 先把「本机有没有 Ollama」探一次，让首屏那条引导横幅不用等探测：
     # 冷探测实测要 0.6–2.6 秒，而带缓存之后只要十几毫秒。
     asyncio.create_task(ollama_service.detect())
     name = config_center_service.runtime_value("app.name", APP_NAME)
     logger.info("%s v%s 启动完成：http://%s:%s", name, __version__, settings.HOST, settings.PORT)
     yield
+    patrol_task.cancel()
+    try:
+        await patrol_task
+    except asyncio.CancelledError:
+        pass
     runner.shutdown()
 
 

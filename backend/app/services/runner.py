@@ -4,7 +4,9 @@
 - 视频：提交异步任务后周期轮询，成功下载视频到本地；
 - 工作流：提交 ComfyUI /prompt 后轮询 /history，产物逐个下载落库；
 - 文本（自动链文档）：调 LLM 生成 Markdown，超长内容按块续写后合并落盘；
-- 服务重启时，有上游任务 ID 的视频/工作流任务自动重新挂接轮询，其余标记失败。
+- 服务重启时，有上游任务 ID 的视频/工作流任务自动重新挂接轮询，其余标记失败；
+- **跑着的时候**由运行巡检兜底：轮询协程一旦静默结束，任务行会永远停在 processing，
+  巡检按「进程内没人推进 + 长时间没有任何写入」把它重连或收口（见 services/patrol.py）。
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
 from app.providers.base import AdapterError
 from app.providers.comfyui import ComfyUIAdapter, ComfyOutputFile
-from app.services import doc_service, log_service, provider_store, storage, style_service
+from app.services import doc_service, log_service, patrol, provider_store, storage, style_service
 from app.services.comfy_workflow_service import apply_params
 
 logger = logging.getLogger("xiaoma.runner")
@@ -71,6 +73,10 @@ def _queue_full_message() -> str:
     )
 
 
+# 巡检为同一任务重连过的次数只在内存里记，条数上限只为防长跑泄漏
+_REATTACH_MEMORY = 500
+
+
 class _ConcurrencyGate:
     """按配置动态限流：每次进入时读取最新配置，设置里改完立即生效。"""
 
@@ -106,6 +112,9 @@ class TaskRunner:
     def __init__(self) -> None:
         self._jobs: dict[int, asyncio.Task] = {}
         self._gate = _ConcurrencyGate()
+        # 巡检替这条任务重连过几次（只在内存里）。重连是「上游可能还在跑」的补救，
+        # 连着几次都接不上就该收口；进程重启后重新计数也无妨——那时 recover() 会先兜一次。
+        self._patrol_reattaches: dict[int, int] = {}
 
     def shutdown(self) -> None:
         for job in self._jobs.values():
@@ -150,10 +159,36 @@ class TaskRunner:
 
     def reattach(self, task_id: int) -> bool:
         # 恢复轮询不占生成名额：它只是定时问一下上游，不吃我们的算力
-        return self._spawn(task_id, lambda: self._poll_video(task_id))
+        return self._spawn(task_id, lambda: self._poll_video_guarded(task_id))
 
     def reattach_comfy(self, task_id: int) -> bool:
-        return self._spawn(task_id, lambda: self._poll_comfy(task_id))
+        return self._spawn(task_id, lambda: self._poll_comfy_guarded(task_id))
+
+    async def _poll_video_guarded(self, task_id: int) -> None:
+        """重连（启动恢复 / 运行巡检）专用的轮询入口：收住异常并如实标失败。
+
+        `_run_video` 里的轮询是包了 try/except 的，但**重连这条路以前没有**：
+        协程里未捕获的异常只会换来 asyncio 一句 "Task exception was never retrieved"，
+        任务行则永远停在 processing（在运行巡检之前，这种任务只能靠重启服务才出得来）。
+        一次网络抖动就换一条永久卡死的任务，代价完全不成比例。
+        """
+        try:
+            await self._poll_video(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("reattached video task %s polling failed", task_id)
+            await self._mark_failed(task_id, e)
+
+    async def _poll_comfy_guarded(self, task_id: int) -> None:
+        """同 `_poll_video_guarded`，工作流那一侧。"""
+        try:
+            await self._poll_comfy(task_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("reattached comfy task %s polling failed", task_id)
+            await self._mark_failed(task_id, e)
 
     def queue_stats(self) -> dict[str, int]:
         """给界面/健康检查看的队列概况。"""
@@ -738,6 +773,113 @@ class TaskRunner:
                 await self._mark_failed(task_id, e)
 
     # ---------- 恢复与兜底 ----------
+
+    # ---------- 运行中巡检 ----------
+    #
+    # 启动恢复（`recover`）只在重启时兜一次；跑着的时候，轮询协程一旦静默结束，
+    # 任务行就永远停在 processing。巡检就是补这个洞的（判据见 services/patrol.py）。
+
+    async def patrol(self) -> dict[str, int]:
+        """扫一遍未完成的任务，把「已经没人在推进」的收口或重连。
+
+        读候选与动手分开做：先把要判断的几列读出来、关掉会话，再动。
+        `_mark_failed` 与轮询协程都会另开会话，而 SQLite 上一个没结束的读事务
+        很容易把后来者挡在门外——自己把自己锁住是最难查的一类问题。
+        """
+        minutes = patrol.stale_minutes()
+        now = utcnow()
+        stats = {"scanned": 0, "reattached": 0, "failed": 0, "skipped": 0}
+
+        async with SessionLocal() as db:
+            rows = await db.execute(
+                select(Task.id, Task.kind, Task.status, Task.updated_at, Task.remote_job_id)
+                .where(Task.status.in_(patrol.OPEN_STATUSES))
+                .order_by(Task.id.asc())
+            )
+            candidates = [
+                {
+                    "id": tid,
+                    "kind": kind,
+                    "status": status,
+                    "remote": bool(remote),
+                    "stale": patrol.is_stale(updated, now=now, minutes=minutes),
+                }
+                for tid, kind, status, updated, remote in rows
+            ]
+
+        for cand in candidates:
+            stats["scanned"] += 1
+            tid = cand["id"]
+            action = patrol.decide(
+                status=cand["status"],
+                alive=self.is_running(tid),
+                stale=cand["stale"],
+                has_remote=cand["remote"],
+                reattaches=self._patrol_reattaches.get(tid, 0),
+            )
+            if action == patrol.SKIP:
+                stats["skipped"] += 1
+            elif action == patrol.REATTACH:
+                if await self._patrol_reattach(tid, kind=cand["kind"]):
+                    stats["reattached"] += 1
+                else:
+                    stats["skipped"] += 1
+            else:
+                await self._patrol_recover(
+                    tid, status=cand["status"], has_remote=cand["remote"]
+                )
+                stats["failed"] += 1
+
+        # 只在真干了活的时候出声：每轮都喊一句「一切正常」等于把日志变成噪音
+        if stats["reattached"] or stats["failed"]:
+            logger.warning(patrol.summary_line(stats))
+        return stats
+
+    async def patrol_loop(self) -> None:
+        """巡检循环：跟着应用一起起，随应用一起停。
+
+        **先睡再扫**：启动那一刻 `recover()` 已经把未完成任务兜过一遍了，
+        立刻再扫一次是重复劳动。间隔每轮开头重读一次，改完**下一轮**生效
+        （正在睡的那一觉不会被中途改短）。
+        """
+        while True:
+            await asyncio.sleep(patrol.interval_seconds())
+            try:
+                await self.patrol()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - 巡检自己坏了不能把应用带下去
+                logger.exception("运行巡检这一轮失败，下一轮继续")
+
+    async def _patrol_reattach(self, task_id: int, *, kind: str) -> bool:
+        """替一条停住的视频/工作流任务重新挂上轮询，返回是否真挂上了。"""
+        count = self._patrol_reattaches.get(task_id, 0) + 1
+        self._patrol_reattaches[task_id] = count
+        self._prune_reattaches()
+        ok = self.reattach_comfy(task_id) if kind == "workflow" else self.reattach(task_id)
+        if ok:
+            logger.warning("运行巡检：任务 %s 的推进停了，重新挂上轮询（第 %s 次）", task_id, count)
+            log_service.note_task(task_id, patrol.reattach_note(reattaches=count))
+        else:
+            # 队列满：不占算力名额、但要占在册名额，这一轮先放过它，下一轮再来
+            logger.warning("运行巡检：任务 %s 需要重连，但队列已满，这一轮跳过", task_id)
+        return ok
+
+    async def _patrol_recover(self, task_id: int, *, status: str, has_remote: bool) -> None:
+        """收口一条救不回来的任务：先把话写进这条任务的日志，再标失败。"""
+        reason = patrol.fail_reason(
+            status=status,
+            has_remote=has_remote,
+            reattaches=self._patrol_reattaches.get(task_id, 0),
+        )
+        logger.warning("运行巡检：收口任务 %s —— %s", task_id, reason)
+        log_service.note_task(task_id, reason)
+        await self._mark_failed(task_id, AdapterError(reason))
+
+    def _prune_reattaches(self) -> None:
+        """重连计数只在同一进程内有意义，但不能因为跑得久就一直涨。"""
+        while len(self._patrol_reattaches) > _REATTACH_MEMORY:
+            self._patrol_reattaches.pop(next(iter(self._patrol_reattaches)))
 
     async def recover(self) -> None:
         """启动时恢复未完成任务。"""
