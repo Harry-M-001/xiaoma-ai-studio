@@ -1,4 +1,4 @@
-"""FFmpeg 能力封装：二进制解析 / 检测 / 探测 / 截取 / 缩略图 / 合并。
+"""FFmpeg 能力封装：二进制解析 / 检测 / 探测 / 截取 / 缩略图 / 合并 / 静图缓动样片。
 
 所有命令走 asyncio 子进程，带超时；文件全部落在 storage 目录内。
 
@@ -17,9 +17,10 @@ import json
 import logging
 import re
 import shutil
+import uuid
 from pathlib import Path
 
-from app.services import storage
+from app.services import animatic, storage
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,10 @@ _TIMEOUT_PROBE = 30
 _TIMEOUT_FRAME = 60
 _TIMEOUT_CUT = 600
 _TIMEOUT_MERGE = 1800
+# 单镜缓动片段：一镜最长 12 秒，正常几秒就完；给 5 分钟是留给很慢的机器
+_TIMEOUT_ANIMATIC_CLIP = 300
+# 整条样片（含最后的合并）：上限 120 秒的画面，慢机器也够
+_TIMEOUT_ANIMATIC_TOTAL = 2400
 
 _WIN_CANDIDATES = [
     r"{LOCALAPPDATA}\Microsoft\WinGet\Links\ffmpeg.exe",
@@ -326,3 +331,68 @@ async def merge_videos(paths: list[Path]) -> Path:
         return out
     finally:
         list_file.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- 静图缓动样片
+
+
+def _new_workdir() -> Path:
+    """给一次样片渲染开一个临时目录（在 storage 内，结束时整体删掉）。
+
+    放在 storage 内是为了守住本模块「文件全落在 storage 目录内」的约定；
+    目录名带 uuid，两次渲染不会互相踩。
+    """
+    work = settings_storage_dir() / "tmp" / f"animatic-{uuid.uuid4().hex[:12]}"
+    work.mkdir(parents=True, exist_ok=True)
+    return work
+
+
+async def render_animatic(
+    items: list[tuple[Path, animatic.AnimaticClip, tuple[int, int]]],
+    *,
+    out_size: tuple[int, int],
+) -> Path:
+    """把「图片 + 镜头参数」逐镜渲染成缓动片段，再合成一条样片。
+
+    `items` 是 `(图片路径, 镜头, 源图尺寸)`。**逐镜渲染再合并**而不是一条巨型
+    filter_complex：哪个镜头的表达式写错了就单独报哪个镜头，而不是整条命令一句
+    「Invalid argument」；代价是中间多落几个临时文件，收尾统一删掉。
+
+    合成的活交给 `merge_videos`（流拷贝 → 带音轨重编码 → 无音轨重编码三级回退），
+    本模块不再写第四套合并逻辑。
+    """
+    if not items:
+        raise RuntimeError("没有可渲染的镜头")
+
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，无法出样片")
+
+    work = _new_workdir()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _TIMEOUT_ANIMATIC_TOTAL
+    try:
+        parts: list[Path] = []
+        for idx, (image, clip, src_size) in enumerate(items, 1):
+            left = deadline - loop.time()
+            if left <= 1:
+                raise RuntimeError(
+                    f"渲染超时（超过 {_TIMEOUT_ANIMATIC_TOTAL // 60} 分钟）："
+                    "请减少镜数或调短每镜时长后重试"
+                )
+            out = work / f"{idx:02d}.mp4"
+            cmd = animatic.clip_command(
+                ffmpeg, image, out, clip, src_size=src_size, out_size=out_size
+            )
+            ok, err = await _run(cmd, int(min(_TIMEOUT_ANIMATIC_CLIP, left)))
+            if not ok or not out.exists() or out.stat().st_size == 0:
+                out.unlink(missing_ok=True)
+                raise RuntimeError(f"镜头 {clip.shot_no} 渲染失败：{err}")
+            parts.append(out)
+
+        merged = await merge_videos(parts)
+        logger.info("静图样片渲染完成：%s 镜 → %s", len(parts), merged.name)
+        return merged
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+

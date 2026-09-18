@@ -160,12 +160,23 @@ NODE_SCHEMAS: dict[str, dict] = {
     # ---- 分镜图：读分镜表逐镜出图（C 期） ----
     # 每镜用它自己的首帧提示词，上游纯图片不参与（要的是"这一镜的角色"），
     # 参考图 = 节点上手动选的 + 该镜文本里提到的资产设定图。
+    # `animatic` = 出完图之后可以零成本出一版「静图缓动样片」：
+    # 按分镜表的时长与运镜把静图串成能看的片子，先审节奏再决定要不要花视频钱。
     "storyboardImage": {
         "kind": "storyboardImage",
         "category": "image",
         "label": "分镜图",
-        "description": "读上游分镜表逐镜出图（用每镜的首帧提示词，自动追加风格词）；提到资产名会自动挂设定图",
-        "features": ["prompt", "modelSelect", "styleSelect", "imageSize", "sampleCount", "shotLimit"],
+        "description": "读上游分镜表逐镜出图（用每镜的首帧提示词，自动追加风格词）；"
+        "提到资产名会自动挂设定图；出完图可以零成本出一版静图样片",
+        "features": [
+            "prompt",
+            "modelSelect",
+            "styleSelect",
+            "imageSize",
+            "sampleCount",
+            "shotLimit",
+            "animatic",
+        ],
         "promptLabel": "补充要求",
         "promptPlaceholder": "可选：每镜都必须出现的元素、统一的画面要求（风格请用上面的风格卡）",
         "handles": {

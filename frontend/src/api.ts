@@ -31,6 +31,7 @@ import type {
   CanvasNodeSchema,
   CanvasNodeStatus,
   CanvasAgentDraft,
+  CanvasAnimaticResult,
   CanvasLint,
   CanvasPreview,
   OllamaStatus,
@@ -306,6 +307,15 @@ export const api = {
   // 分镜静态体检：零成本检查镜头语言（纯读，不建任务、不调模型）
   lintCanvas: (projectId: number) =>
     request<CanvasLint>(`/api/canvas/${projectId}/lint`),
+  /**
+   * 出静图缓动样片：本地 ffmpeg 按分镜表的时长与运镜把分镜图串成一条片子。
+   * 不花生成费，但要占 CPU，服务端同时只允许渲染一条（忙时回 409）。
+   */
+  renderAnimatic: (projectId: number, nodeId: string) =>
+    request<CanvasAnimaticResult>(
+      `/api/canvas/${projectId}/nodes/${encodeURIComponent(nodeId)}/animatic`,
+      { method: "POST" },
+    ),
   canvasStatus: (projectId: number) =>
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),

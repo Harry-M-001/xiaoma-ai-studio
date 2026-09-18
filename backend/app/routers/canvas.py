@@ -20,7 +20,8 @@ from app.registry.canvas_nodes import (
     normalize_type,
     validate_document,
 )
-from app.services import canvas_agent, canvas_runner, storage
+from app.schemas import AssetOut
+from app.services import canvas_agent, canvas_runner, ffmpeg_service, storage
 
 router = APIRouter(prefix="/api/canvas", tags=["canvas"])
 
@@ -150,6 +151,51 @@ async def lint_canvas(project_id: int) -> dict:
         return await canvas_runner.lint_graph(project_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{project_id}/nodes/{node_id}/animatic")
+async def render_animatic(project_id: int, node_id: str) -> dict:
+    """从「分镜图」节点出一版静图缓动样片。
+
+    零生成成本：本地 FFmpeg 按分镜表的时长与运镜把已出的静图串成一条片子，
+    用来先审节奏再决定要不要花视频钱。**不建任务、不调模型**，但会占用 CPU，
+    所以同一时间只允许渲染一条（正在渲染时回 409，而不是排队）。
+    """
+    available, _ = await ffmpeg_service.ffmpeg_available()
+    if not available:
+        raise HTTPException(
+            status_code=503,
+            detail="本机未检测到可用的 FFmpeg，出不了样片；安装方法见「导演台」页的提示",
+        )
+    try:
+        asset, report = await canvas_runner.render_animatic(project_id, node_id)
+    except canvas_runner.AnimaticBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except canvas_runner.AnimaticInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        # 走到这里只剩「画布/节点不存在」（其余 ValueError 都是 AnimaticInputError）
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "asset": AssetOut(
+            id=asset.id,
+            kind=asset.kind,
+            url=f"/media/{asset.filename}",
+            original_name=asset.original_name,
+            content_type=asset.content_type,
+            size=asset.size,
+            source=asset.source,
+            prompt=asset.prompt,
+            width=asset.width,
+            height=asset.height,
+            duration=asset.duration,
+            created_at=asset.created_at,
+        ),
+        "report": report,
+    }
 
 
 @router.post("/{project_id}/run")

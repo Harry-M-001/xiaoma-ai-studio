@@ -621,6 +621,41 @@ input, textarea, select { font-family: inherit; }
 }
 .lint-dialog-foot { display: flex; justify-content: flex-end; margin-top: auto; padding-top: 4px; }
 
+/* ============ 静图样片（分镜图节点里的零成本出片） ============ */
+
+/* 与上面的产物网格分开：它是「再做一件事」，不是产物的一部分 */
+.canvas-sample {
+  display: flex; flex-direction: column; gap: 8px;
+  padding-top: 10px; border-top: 1px dashed var(--border);
+}
+.canvas-sample-tag {
+  flex-shrink: 0; font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--success); background: var(--success-soft); color: var(--text-2);
+}
+/* 四个设置排两行：浮框本来就窄，挤成一行会把下拉全压成省略号 */
+.canvas-sample-opts {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; align-items: center;
+}
+.canvas-sample-opts > label {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; color: var(--text-3); min-width: 0;
+}
+.canvas-sample-opts .select,
+.canvas-sample-opts .input { width: 100%; min-width: 0; }
+/* 分镜表里没写运镜时选「固定不动」，样片会真的不动——这跟「认不出来」不是一回事 */
+.canvas-sample-report {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 11.5px; color: var(--text-2); line-height: 1.6;
+}
+.canvas-sample-report .warn { color: var(--warning); }
+.canvas-sample-video { display: flex; flex-direction: column; gap: 6px; }
+.canvas-sample-video video {
+  width: 100%; border-radius: var(--radius-sm); background: #000;
+  border: 1px solid var(--border); display: block;
+}
+.canvas-sample-actions { justify-content: space-between; gap: 8px; }
+.canvas-sample-actions > .canvas-float-hint { flex: 1; min-width: 0; }
+
 /* ============ 社区分享 ============ */
 
 .share-tabs { padding: 10px 16px 0; flex-shrink: 0; }

@@ -224,6 +224,20 @@ export interface CanvasNodeData {
   assetScope?: string;
   /** 分镜图：本次最多生成几个镜头（0 = 全部） */
   shotLimit?: number;
+  /** 静图样片：画幅（source = 跟随图片，其余为固定比例，会裁切填满） */
+  sampleRatio?: string;
+  /** 静图样片：成片长边像素（1280 / 1920；跟随图片时不会超过原图，避免糊） */
+  sampleRes?: number;
+  /** 静图样片：分镜表没写时长时，每镜按几秒算 */
+  sampleShotSeconds?: number;
+  /** 静图样片：分镜表没写运镜时怎么办（空 = 轻微推近 / static = 固定不动） */
+  sampleDefaultMove?: string;
+  /**
+   * 最近一次出的样片。存在节点上（不是临时状态）——
+   * 刷新页面后那条片子还在，不用为了再看一眼重新渲染一次。
+   */
+  sampleAssetId?: number;
+  sampleAssetUrl?: string;
   /** 逐镜出视频：off（整段一个）/ each（每镜一段）/ chain（每镜一段并首尾相连） */
   shotVideo?: string;
   /** 同场景串联：每镜额外带上同场景上一镜的分镜图当参考 */
@@ -485,6 +499,32 @@ export interface CanvasLint {
   /** 没内容的分镜节点（如实说明，而不是当成「没问题」） */
   skipped: { id: string; label: string; reason: string }[];
   shotTotal: number;
+}
+
+/**
+ * 静图缓动样片的出片报告。
+ *
+ * `skipped` / `truncated` 必须显示出来：一条样片少了哪几镜、为什么少，
+ * 是判断「这个节奏可不可信」的前提，藏起来就等于骗人。
+ */
+export interface CanvasAnimaticReport {
+  /** 真的进了样片的镜数 */
+  shots: number;
+  seconds: number;
+  /** 有镜头没进来：镜号 + 原因 */
+  skipped: { shot: string; reason: string }[];
+  /** 因为总时长上限被截掉的镜号 */
+  truncated: string[];
+  /** 这次用的总时长上限（秒）：面板要说清楚「截在哪里」 */
+  maxSeconds: number;
+  size: [number, number];
+  fps: number;
+  bytes: number;
+}
+
+export interface CanvasAnimaticResult {
+  asset: Asset;
+  report: CanvasAnimaticReport;
 }
 
 export interface CanvasNodeStatus {

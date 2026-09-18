@@ -30,6 +30,7 @@ import "@xyflow/react/dist/style.css";
 import {
   CheckCircle2,
   FileText,
+  Film,
   ImageIcon,
   Images,
   PanelLeftClose,
@@ -53,6 +54,7 @@ import type {
   AgentMeta,
   Asset,
   CanvasAgentDraft,
+  CanvasAnimaticReport,
   CanvasDoc,
   CanvasLint,
   CanvasNodeData,
@@ -167,6 +169,10 @@ interface NodePanelCtx {
   /** 打开文档正文编辑器（大弹窗） */
   editDoc: (req: DocEditRequest) => void;
   runNode: (id: string) => void;
+  /** 正在出样片的节点 id（空串 = 没有）；同时只允许一条，服务端也会挡 */
+  sampling: string;
+  /** 出静图样片（本地渲染，不花生成费）；失败时已弹提示，返回 null */
+  renderAnimatic: (id: string) => Promise<CanvasAnimaticReport | null>;
   openPicker: (nodeId: string, slot?: "first" | "last") => void;
   reloadWorkflows: () => Promise<ComfyWorkflow[]>;
 }
@@ -1144,6 +1150,171 @@ function LintDialog({ report, onClose }: { report: CanvasLint; onClose: () => vo
 }
 
 /**
+ * 静图缓动样片：把已出的分镜图按分镜表的「时长 + 运镜」串成一条能看的片子。
+ *
+ * 这是「先审节奏再花钱」那一步：出视频是真金白银，而节奏对不对、运镜方案成不成立，
+ * 在静图阶段就能看出来——本地渲染一条，零生成成本。
+ *
+ * 两个刻意的取舍：
+ * 1. **运镜照分镜表来**。写「固定」就真的不动，那样才能看出「这场戏全是固定镜头，
+ *    是不是太闷」；给所有镜头套同一个推近，等于把分镜表的运镜栏当废纸。
+ * 2. **少了哪几镜要说出来**。`skipped` / `truncated` 直接摆在下面，
+ *    不然用户会拿一条缺了两镜的样片去判断节奏。
+ */
+function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
+  const ctx = useContext(PanelCtx);
+  const [report, setReport] = useState<CanvasAnimaticReport | null>(null);
+  const [broken, setBroken] = useState(false);
+  const busy = ctx?.sampling === id;
+  const url = String(data.sampleAssetUrl ?? "");
+  const ratio = String(data.sampleRatio ?? "source");
+  const res = Number(data.sampleRes ?? 1280);
+  const seconds = Number(data.sampleShotSeconds ?? 3);
+  const holdStill = String(data.sampleDefaultMove ?? "") === "static";
+
+  const run = async () => {
+    if (!ctx || busy) return;
+    setBroken(false);
+    setReport(await ctx.renderAnimatic(id));
+  };
+
+  const skipped = report?.skipped ?? [];
+  const truncated = report?.truncated ?? [];
+
+  return (
+    <div className="canvas-sample">
+      <div className="canvas-inline canvas-refhead">
+        <label className="field-label">静图样片</label>
+        <span className="canvas-sample-tag">零生成成本</span>
+      </div>
+      <div className="canvas-float-hint">
+        按分镜表的时长与运镜把上面这些图串成一条片子，先看节奏再决定要不要出视频。
+        本地渲染，不调模型、不花钱。
+      </div>
+
+      <div className="canvas-inline canvas-sample-opts">
+        <label>
+          画幅
+          <select
+            className="select"
+            value={ratio}
+            onChange={(e) => ctx?.updateNode(id, { sampleRatio: e.target.value })}
+            title="跟随图片不会裁切；选固定比例时按比例裁切填满"
+          >
+            <option value="source">跟随图片</option>
+            <option value="16:9">16:9</option>
+            <option value="9:16">9:16</option>
+            <option value="1:1">1:1</option>
+            <option value="4:3">4:3</option>
+          </select>
+        </label>
+        <label>
+          清晰度
+          <select
+            className="select"
+            value={String(res)}
+            onChange={(e) => ctx?.updateNode(id, { sampleRes: Number(e.target.value) })}
+            title="720p 够看节奏，而且快得多；跟随图片时不会放大超过原图"
+          >
+            <option value="1280">720p</option>
+            <option value="1920">1080p</option>
+          </select>
+        </label>
+        <label>
+          兜底时长
+          <input
+            className="input"
+            type="number"
+            min={1}
+            max={12}
+            value={seconds}
+            onChange={(e) =>
+              ctx?.updateNode(id, {
+                sampleShotSeconds: Math.max(1, Math.min(12, Number(e.target.value) || 3)),
+              })
+            }
+            title="分镜表没写「几秒」时，每镜按这个时长算"
+          />
+        </label>
+        <label>
+          没写运镜时
+          <select
+            className="select"
+            value={holdStill ? "static" : ""}
+            onChange={(e) => ctx?.updateNode(id, { sampleDefaultMove: e.target.value })}
+            title="分镜表的运镜栏是空的、或写了认不出来的词时怎么办"
+          >
+            <option value="">轻微推近</option>
+            <option value="static">固定不动</option>
+          </select>
+        </label>
+      </div>
+
+      <button
+        type="button"
+        className="btn btn-ghost btn-block"
+        disabled={busy || !ctx}
+        onClick={() => void run()}
+      >
+        {busy ? <Spinner /> : <Film size={14} />}
+        {busy ? "正在渲染…" : url ? "重新出一版样片" : "出样片"}
+      </button>
+
+      {busy && (
+        <div className="canvas-float-hint">
+          本地逐镜渲染，几十秒内出结果；同时只允许渲染一条，另一条要等它出完
+        </div>
+      )}
+
+      {report && (
+        <div className="canvas-sample-report">
+          <span>
+            {report.shots} 镜 · {report.seconds}s · {report.size[0]}×{report.size[1]} · {report.fps}fps
+          </span>
+          {skipped.length > 0 && (
+            <span className="warn">
+              跳过：{skipped.map((s) => `镜头${s.shot}（${s.reason}）`).join("、")}
+            </span>
+          )}
+          {truncated.length > 0 && (
+            <span className="warn">
+              超过 {report.maxSeconds}s 上限，没收录：
+              {truncated.map((t) => `镜头${t}`).join("、")}
+            </span>
+          )}
+        </div>
+      )}
+
+      {url && !broken && (
+        <div className="canvas-sample-video">
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <video
+            src={url}
+            controls
+            preload="metadata"
+            onError={() => setBroken(true)}
+            title="静图样片"
+          />
+          <div className="canvas-inline canvas-sample-actions">
+            <a className="btn btn-ghost btn-xs" href={url} target="_blank" rel="noreferrer">
+              下载
+            </a>
+            <span className="canvas-float-hint">已存进资产库（可直接在导演台里当素材用）</span>
+          </div>
+        </div>
+      )}
+
+      {/* 产物被删掉时给一句人话，而不是一个点不动的播放器 */}
+      {url && broken && (
+        <div className="canvas-float-hint">
+          这条样片的文件已经不在了（可能被清理过）。重新出一版即可，点上面的按钮。
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * 「运行整图」前的确认弹窗。
  *
  * 整图会把图里每个节点都重跑一遍 —— 包括已经有产物的那些，每条都是真花钱的调用。
@@ -1787,6 +1958,8 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
+      {features.includes("animatic") && <AnimaticSection id={id} data={data} />}
+
       {status?.injectedNames && status.injectedNames.length > 0 && (
         <div className="canvas-float-hint">
           已自动挂载参考图：{status.injectedNames.join("、")}
@@ -2169,6 +2342,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   // 分镜体检结果（非 null 时弹报告）
   const [lintReport, setLintReport] = useState<CanvasLint | null>(null);
   const [linting, setLinting] = useState(false);
+  // 正在出样片的节点 id：渲染是本地 CPU 活，一次只跑一条（服务端也会挡）
+  const [sampling, setSampling] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(() => prefs.paletteOpen.get() ?? true);
   // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）。
@@ -2796,6 +2971,32 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [nodes, pickerFor, toast, updateNodeData]
   );
 
+  /**
+   * 出静图样片：与体检同理，先存一次——后端读的是库里的画布，
+   * 不存就会拿旧的设置和旧的分镜表去渲染，结果与眼前的内容对不上。
+   *
+   * 产物落进资产库，同时把地址写回节点：刷新页面后那条片子还在，
+   * 不用为了再看一眼重新渲染一遍。
+   */
+  const renderAnimatic = useCallback(
+    async (nodeId: string): Promise<CanvasAnimaticReport | null> => {
+      if (dirty && !(await saveDoc())) return null;
+      setSampling(nodeId);
+      try {
+        const { asset, report } = await api.renderAnimatic(projectId, nodeId);
+        updateNodeData(nodeId, { sampleAssetId: asset.id, sampleAssetUrl: asset.url });
+        toast.success(`样片已出：${report.shots} 镜 / ${report.seconds} 秒`);
+        return report;
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "出样片失败");
+        return null;
+      } finally {
+        setSampling("");
+      }
+    },
+    [dirty, projectId, saveDoc, toast, updateNodeData]
+  );
+
   const panelCtx = useMemo<NodePanelCtx>(
     () => ({
       models,
@@ -2811,6 +3012,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       pickThumb,
       editDoc: openDocEditor,
       runNode,
+      sampling,
+      renderAnimatic,
       openPicker,
       reloadWorkflows,
     }),
@@ -2820,6 +3023,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       agents,
       styles,
       running,
+      sampling,
+      renderAnimatic,
       updateNodeData,
       applyStyleToAll,
       nudgeViewport,

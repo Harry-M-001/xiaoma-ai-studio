@@ -38,7 +38,10 @@ from app.registry.canvas_nodes import (
     normalize_type,
 )
 from app.services import (
+    animatic,
     asset_sheet,
+    ffmpeg_service,
+    image_size,
     provider_store,
     storage,
     storyboard_lint,
@@ -1314,6 +1317,154 @@ async def lint_graph(project_id: int) -> dict:
         "skipped": skipped,
         "shotTotal": shot_total,
     }
+
+
+class AnimaticBusy(RuntimeError):
+    """已有一条样片在渲染。
+
+    渲染是纯 CPU 的（zoompan 逐帧算），两条同时跑只会互相拖慢、双双超时，
+    所以这里直接拒绝后来的那条，让用户等一会儿再点——比默默排队两分钟好。
+    """
+
+
+class AnimaticInputError(ValueError):
+    """出样片的输入不成立（分镜表没接、还没有分镜图、图与镜号对不上…）。
+
+    单独一个类型是为了把「用户改一下就能跑」与「画布/节点根本不存在」分开：
+    前者回 400 并把怎么改说清楚，后者回 404。
+    """
+
+
+# 进程内只允许一条样片在渲染。
+# 模块级而不是塞进某个对象：渲染是 GPU/CPU 密集的，两处各持一把锁等于没锁。
+# 顺带说明为什么它不会把测试搞坏：无竞争的 acquire 走的是不碰事件循环的快路径，
+# 所以每个用例各自 `asyncio.run`（新循环）也不会撞上「绑定了另一个事件循环」。
+_ANIMATIC_LOCK = asyncio.Lock()
+
+
+async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
+    """从「分镜图」节点出一版静图缓动样片：零生成成本，先审节奏。
+
+    与生成链的关系：它**不是**一个节点、不建任务、不进自动链，也不花一分钱；
+    只是拿这个节点已经出好的图，配上上游分镜表写的时长与运镜，本地渲染一条片子。
+    所以设定、机位有变化时，随手再出一版就是了。
+
+    内容口径与体检、出图三处完全一致（同一个 `parse_storyboard`、同一套上游取值），
+    否则会出现「体检说 6 镜、样片只认 5 镜」这种最难解释的不一致。
+    """
+    if _ANIMATIC_LOCK.locked():
+        raise AnimaticBusy("正在渲染上一条样片，请等它出完再点")
+
+    async with _ANIMATIC_LOCK:
+        async with SessionLocal() as db:
+            project = await db.get(Project, project_id)
+            if project is None or not project.canvas_json:
+                raise ValueError("画布不存在")
+            doc = json.loads(project.canvas_json)
+            node = next((n for n in doc.get("nodes", []) if n.get("id") == node_id), None)
+            if node is None:
+                raise ValueError("节点不存在")
+            ntype = normalize_type(node.get("type") or "")
+            if not is_storyboard_image(ntype):
+                raise AnimaticInputError("只有「分镜图」节点能出样片——它才有一镜一张图")
+
+            upstream = await _resolve_upstream(db, project_id, doc, node_id)
+            _prompt, _images, _videos, upstream_text = await _node_inputs(db, doc, node, upstream)
+            shots = storyboard_sheet.parse_storyboard(upstream_text)
+            if not shots:
+                raise AnimaticInputError(
+                    "没能从上游内容里解析出分镜表：出样片要知道每镜几秒、怎么运镜，"
+                    "请把上游「分镜」节点接进来"
+                )
+
+            assets = await _latest_task_assets(db, project_id, node_id)
+            by_shot = await _assets_by_shot(db, assets)
+            if not by_shot:
+                raise AnimaticInputError("这个节点还没有出过分镜图，先运行一次再出样片")
+
+            data = node.get("data") or {}
+            plan = animatic.plan(
+                shots,
+                by_shot,
+                default_seconds=animatic.sanitize_seconds(data.get("sampleShotSeconds")),
+                default_move=animatic.sanitize_default_move(str(data.get("sampleDefaultMove") or "")),
+            )
+            if not plan.clips:
+                detail = "；".join(f"镜头{s['shot']}（{s['reason']}）" for s in plan.skipped[:6])
+                raise AnimaticInputError(
+                    f"没有任何一镜能进样片：{detail or '分镜表与已出的图对不上镜号'}"
+                )
+
+            # 先按文件实际在不在把镜头筛一遍。
+            # 库里有一行 Asset 不代表文件还在（数据目录被清理过、手动搬过、同步工具删过），
+            # 这种图如果交给 ffmpeg，报出来的是「Invalid data found」这类跟用户无关的话；
+            # 按「这一镜跳过」处理，才能在后来的报告里说清是缺了哪几镜、为什么缺。
+            items: list[tuple[object, animatic.AnimaticClip, tuple[int, int]]] = []
+            for clip in plan.clips:
+                asset = by_shot[clip.shot_no]
+                path = storage.abs_path(asset.filename)
+                if not path.exists():
+                    plan.skipped.append({"shot": clip.shot_no, "reason": "图片文件不在了"})
+                    continue
+                size = image_size.read_image_size_from_file(path)
+                if not size:
+                    size = (int(asset.width or 0), int(asset.height or 0))
+                if not size[0] or not size[1]:
+                    plan.skipped.append({"shot": clip.shot_no, "reason": "读不出图片尺寸"})
+                    continue
+                items.append((path, clip, (max(2, size[0]), max(2, size[1]))))
+
+            if not items:
+                raise AnimaticInputError(
+                    "样片用到的分镜图都读不到了（文件被清理或搬走过）。"
+                    "可以先重跑一次「分镜图」节点，再出样片"
+                )
+            if len(items) < len(plan.clips):
+                # 时长与镜数都以真正进片的那几个算，报告才对得上画面
+                kept = {clip.shot_no for _p, clip, _s in items}
+                plan.clips = [c for c in plan.clips if c.shot_no in kept]
+
+            # 成片尺寸以**第一镜的图**为准：同一个节点用同一个尺寸设置出图，
+            # 拿首镜定基准即可；万一混进了别的尺寸，后面每镜仍按自己的原图算工作画布，
+            # 由 ffmpeg 按「填满」裁切对齐，不会因为一张异形图整条样片失败。
+            base = image_size.read_image_size_from_file(items[0][0]) or items[0][2]
+            out_size = animatic.output_size(
+                base[0],
+                base[1],
+                ratio=animatic.sanitize_ratio(str(data.get("sampleRatio") or "")),
+                long_side=animatic.sanitize_long_side(data.get("sampleRes")),
+            )
+
+            out_path = await ffmpeg_service.render_animatic(items, out_size=out_size)
+
+            rel = ffmpeg_service._save_asset_file(out_path, "mp4")
+            record = Asset(
+                kind="video",
+                filename=rel,
+                original_name=f"样片_{len(plan.clips)}镜_{out_size[0]}x{out_size[1]}.mp4",
+                content_type="video/mp4",
+                size=out_path.stat().st_size,
+                source="animatic",
+                width=out_size[0],
+                height=out_size[1],
+                duration=plan.seconds,
+                # 来路写进 prompt：资产库里一眼能看出这条片子是怎么来的、跳过了哪几镜
+                prompt=animatic.summarize(plan),
+            )
+            db.add(record)
+            await db.commit()
+            await db.refresh(record)
+
+            report = plan.to_report()
+            report["size"] = [out_size[0], out_size[1]]
+            report["fps"] = animatic.FPS
+            report["bytes"] = record.size
+            logger.info(
+                "画布 %s 节点 %s 出样片：%s 镜 / %s 秒 / %sx%s（跳过 %s 镜）",
+                project_id, node_id, len(plan.clips), plan.seconds,
+                out_size[0], out_size[1], len(plan.skipped),
+            )
+            return record, report
 
 
 async def _run_full_graph(project_id: int) -> None:
