@@ -43,6 +43,7 @@ from app.registry.canvas_nodes import (
 from app.services import (
     animatic,
     asset_sheet,
+    digital_human,
     ffmpeg_service,
     image_size,
     provider_store,
@@ -270,6 +271,30 @@ def _manual_ref_ids(data: dict) -> list[int]:
         for r in (data.get("refImages") or [])
         if isinstance(r, dict) and r.get("id")
     ]
+
+
+async def _audio_ref_asset(db: AsyncSession, data: dict) -> Asset | None:
+    """节点上挂的对白音轨（`data.audioRefAssetId`），没有就返回 None。
+
+    对白是**可选**的一件附加物：没挂就照旧出无声片子，挂错了要当场说清楚——
+    所以这里对「id 指向的不是音频」直接报错，不静默当成没选。
+    """
+    raw = data.get("audioRefAssetId")
+    if not raw:
+        return None
+    try:
+        aid = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("节点上的「对白音轨」值不对（不是资产编号），请重新选一条") from None
+    asset = await db.get(Asset, aid)
+    if asset is None:
+        raise ValueError("节点上选的「对白音轨」已经被删掉了，请重新选一条配音")
+    if asset.kind != "audio":
+        raise ValueError(
+            f"「对白音轨」要选一条**音频**资产，而 #{aid} 是{asset.kind}——"
+            "到「配音」页生成一段，或到资产库筛「音频」挑一条"
+        )
+    return asset
 
 
 async def _inject_asset_refs(
@@ -743,7 +768,7 @@ async def _apply_manual_refs(db: AsyncSession, data: dict, images: list[Asset]) 
 
 
 def _referenced_asset_ids(params: dict) -> list[int]:
-    """任务 params 里引用到的资产 id（参考图 / 首帧 / 尾帧 / 参考视频）。
+    """任务 params 里引用到的资产 id（参考图 / 首帧 / 尾帧 / 参考视频 / 对白音轨）。
 
     整图预览靠它统计「同一张素材被这一跑引用了多少次」。
     """
@@ -752,7 +777,7 @@ def _referenced_asset_ids(params: dict) -> list[int]:
         for x in params.get(key) or []:
             if isinstance(x, int):
                 ids.append(x)
-    for key in ("first_frame_asset_id", "last_frame_asset_id"):
+    for key in ("first_frame_asset_id", "last_frame_asset_id", "audio_ref_asset_id"):
         x = params.get(key)
         if isinstance(x, int):
             ids.append(x)
@@ -901,6 +926,25 @@ async def _create_node_task(
                 params["video_ref_asset_ids"] = [v.id for v in videos]
         else:
             raise ValueError(f"未知的视频模式：{mode}")
+
+        # 对白 / 口播（数字人那条路）：挂一条配音当参考音，出来的片子自带声音。
+        # 时长不够读完整句时**在这里拦掉**：改时长就是改钱，必须由用户自己点那一下，
+        # 我们不替他悄悄把 5 秒改成 10 秒（见 services/digital_human.py 的第 1 条口径）。
+        audio_asset = await _audio_ref_asset(db, data)
+        if audio_asset is not None:
+            audio_name = audio_asset.name or audio_asset.original_name
+            problem = digital_human.check_duration(
+                requested=int(params.get("duration") or 0),
+                audio_seconds=audio_asset.duration,
+                name=audio_name,
+            )
+            if problem:
+                raise ValueError(problem)
+            params["audio_ref_asset_id"] = audio_asset.id
+            # 任务说明里留下「这一段带了哪条配音、多长」——事后才查得清时长为什么是这么多
+            params["dialogue_note"] = digital_human.attach_note(
+                name=audio_name, seconds=audio_asset.duration
+            )
 
     # 记下自动挂了哪些资产参考图，方便在任务详情里回溯"这张图为什么长这样"
     if injected_names:

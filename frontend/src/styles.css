@@ -1457,6 +1457,13 @@ input, textarea, select { font-family: inherit; }
 }
 .speech-item-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 
+/* 对白音轨选择器：没有配音可用时的空状态（视频页与画布视频节点共用） */
+.audio-ref-empty {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12.5px; line-height: 1.65; color: var(--text-3);
+}
+.audio-ref-empty svg { flex: 0 0 auto; margin-top: 2px; }
+
 .config-panel { display: flex; flex-direction: column; gap: 16px; }
 .config-section { overflow: hidden; }
 .config-section-head {

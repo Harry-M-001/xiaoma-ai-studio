@@ -107,6 +107,20 @@ class VideoStatus:
 
 
 @dataclass
+class AudioRef:
+    """一条**参考音频**（对白/口播）：配音的字节 + 它的容器类型。
+
+    为什么要带着 `content_type` 而不是只给 bytes：上游要的是一段能被识别的
+    音频（`wav` / `mp3`），而我们发的是 data URI，MIME 就写在字符串里。
+    自己去嗅探容器类型是在猜，而库里那条 `Asset` 本来就把 `content_type`
+    记得清清楚楚——能用已知的，就别猜。
+    """
+
+    data: bytes
+    content_type: str = "audio/mpeg"
+
+
+@dataclass
 class SpeechResult:
     """一段语音合成的产物。
 
@@ -218,11 +232,17 @@ class BaseAdapter(ABC):
         last_frame: bytes | None = None,
         ref_images: list[bytes] | None = None,
         ref_videos: list[bytes] | None = None,
+        ref_audio: AudioRef | None = None,
     ) -> str:
         """提交异步视频任务，返回上游任务 ID。
 
         - first_frame / last_frame：首尾帧模式
         - ref_images / ref_videos：全能参考模式（多模态参考）
+        - ref_audio：**对白/口播**——把一条配音当作参考音随请求附发，
+          出来的片子自带声音、口型看着是这句话（数字人那条路）。
+
+        `ref_audio` 给了却实现不了时**必须报错，不许静默丢掉**：
+        视频是真金白银的一笔，悄悄出一段没人说话的片子，用户只会以为功能坏了。
         不支持的实现应给出可读错误（raise AdapterError）。
         """
 

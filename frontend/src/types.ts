@@ -159,6 +159,8 @@ export interface SpeechVoices {
   maxChars: number;
   speedRange: [number, number];
   speedDefault: number;
+  /** 把配音挂到一次视频生成上时那句提示（唯一副本在后端，两个入口共用） */
+  videoRefHint: string;
 }
 
 export interface SpeechResult {
@@ -261,6 +263,11 @@ export interface CanvasNodeData {
   sampleNarration?: boolean;
   /** 静图样片旁白的音色；留空 = 用语音服务的默认音色 */
   sampleVoice?: string;
+  /**
+   * 视频节点的「对白音轨」：一条**音频资产**的 id（配音产物）。
+   * 挂上它这次出片会自带声音（数字人 / 口播那条路）；不挂就是无声片子。
+   */
+  audioRefAssetId?: number | null;
   /**
    * 最近一次出的样片。存在节点上（不是临时状态）——
    * 刷新页面后那条片子还在，不用为了再看一眼重新渲染一次。

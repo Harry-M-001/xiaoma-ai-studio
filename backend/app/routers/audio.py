@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_db, require_auth
+from app.providers import ark
 from app.providers.base import AdapterError
 from app.schemas import asset_to_out
 from app.services import speech, speech_service
@@ -43,12 +44,17 @@ async def list_voices() -> dict:
 
     `presets` 只是**快捷选项**，不是白名单：各家音色名不通用（`alloy` /
     `zh-CN-XiaoxiaoNeural` / 自建音色 id），界面上允许直接手填。
+
+    `videoRefHint` 是「把配音挂到一次视频生成上」时那句提示，**唯一副本在后端**：
+    它会同时出现在视频生成页与画布的视频节点面板上，两边各抄一份必然会漂移，
+    而漂移的表现是「同一个能力两个说法」，用户只会谁都不信。
     """
     return {
         "presets": [dict(v) for v in speech.VOICE_PRESETS],
         "maxChars": speech.MAX_CHARS,
         "speedRange": [speech.SPEED_MIN, speech.SPEED_MAX],
         "speedDefault": speech.SPEED_DEFAULT,
+        "videoRefHint": ark.AUDIO_REF_NO_HINT,
     }
 
 

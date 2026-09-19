@@ -139,12 +139,14 @@ NODE_SCHEMAS: dict[str, dict] = {
         "kind": "video",
         "category": "video",
         "label": "视频生成",
-        "description": "按模式工作：文生视频 / 首尾帧 / 全能参考（视频编辑）；也可逐镜出片，把分镜图接成首帧",
+        "description": "按模式工作：文生视频 / 首尾帧 / 全能参考（视频编辑）；"
+        "可挂一条配音当对白（数字人/口播）；也可逐镜出片，把分镜图接成首帧",
         "features": [
             "prompt",
             "modelSelect",
             "videoMode",
             "imageUpload",
+            "audioRef",
             "duration",
             "ratio",
             "styleSelect",

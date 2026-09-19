@@ -23,6 +23,7 @@ import httpx
 
 from app.providers.base import (
     AdapterError,
+    AudioRef,
     BaseAdapter,
     SpeechResult,
     VideoStatus,
@@ -196,7 +197,16 @@ class DashScopeAdapter(BaseAdapter):
         last_frame: bytes | None = None,
         ref_images: list[bytes] | None = None,
         ref_videos: list[bytes] | None = None,
+        ref_audio: AudioRef | None = None,
     ) -> str:
+        if ref_audio is not None:
+            # 百炼的数字人（wan2.2-s2v）是**另一个接口**，而且要求图片与音频都是
+            # 公网可访问的 URL——本机工作台的产物在本地磁盘上，满足不了。
+            # 与其静默丢掉音频出一段没人说话的片子，不如直说。
+            raise unsupported(
+                "参考音频（对白/口播）——百炼的数字人是另一个接口，且要求图片与音频都是公网 URL，"
+                "本机文件满足不了。要走对白请用「火山方舟 Ark」类型接入 Seedance 1.5 pro / 2.0 / 2.5"
+            )
         if not self.base_url or not self.api_key:
             raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
         kling = self._is_kling(model)

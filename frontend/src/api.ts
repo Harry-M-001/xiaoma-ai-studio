@@ -170,6 +170,8 @@ export const api = {
     model_key: string;
     prompt: string;
     first_frame_asset_id?: number | null;
+    /** 对白音轨（数字人/口播）：一条音频资产的 id，随请求作为参考音频附发 */
+    audio_ref_asset_id?: number | null;
     duration: number;
     ratio: string;
     resolution: string;

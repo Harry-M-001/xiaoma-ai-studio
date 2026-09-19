@@ -199,6 +199,9 @@ class VideoGenerateIn(BaseModel):
     model_key: str
     prompt: str = Field(..., min_length=1)
     first_frame_asset_id: int | None = None
+    # 对白音轨（数字人/口播）：一条音频资产的 id，随请求作为参考音频附发。
+    # 只有支持参考音频的视频模型（如 Seedance 1.5 pro / 2.0 / 2.5）才认它。
+    audio_ref_asset_id: int | None = None
     # 以下值的可选范围由 param_options 表决定，接口层不写死
     duration: int = 5
     ratio: str = "16:9"

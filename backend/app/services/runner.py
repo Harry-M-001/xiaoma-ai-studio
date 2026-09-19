@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clock import utcnow
 from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
-from app.providers.base import AdapterError
+from app.providers.base import AdapterError, AudioRef
 from app.providers.comfyui import ComfyUIAdapter, ComfyOutputFile
 from app.services import doc_service, log_service, patrol, provider_store, storage, style_service
 from app.services.comfy_workflow_service import apply_params
@@ -106,6 +107,37 @@ class _ConcurrencyGate:
 
 def _asset_url(rel: str) -> str:
     return f"/media/{rel}"
+
+
+async def _load_audio_ref(db: AsyncSession, params: dict) -> AudioRef | None:
+    """把任务上的「对白音轨」读成 `AudioRef`；没有就返回 None。
+
+    **读不到时必须报错，不能当成「没挂」**：用户开这一项就是为了要一段会说话的
+    片子，静默降级成无声的，等于花了视频钱拿到一个不想要的东西，而且他还不知道为什么。
+    这里报错会走 `_mark_failed`（失败信息直接展示），且**没有发生任何上游调用**。
+    """
+    raw = params.get("audio_ref_asset_id")
+    if not raw:
+        return None
+    asset = await db.get(Asset, int(raw))
+    if asset is None:
+        raise AdapterError(
+            "这条任务的「对白音轨」已经不在了（那条配音被删掉了）——请重新选一条再跑",
+            log_detail=f"missing_audio_asset id={raw}",
+        )
+    if asset.kind != "audio":
+        raise AdapterError(
+            f"这条任务的「对白音轨」指向的不是音频（#{asset.id} 是 {asset.kind}）——请重新选一条",
+            log_detail=f"audio_ref_not_audio kind={asset.kind}",
+        )
+    path = storage.abs_path(asset.filename)
+    if not path.exists():
+        raise AdapterError(
+            "这条任务的「对白音轨」文件不在了（可能被清理过）——到资产库看看那条配音还在不在",
+            log_detail=f"audio_file_missing id={asset.id}",
+        )
+    # content_type 库里记着，直接带上——让适配器去猜容器类型是在猜，而这是已知的
+    return AudioRef(data=path.read_bytes(), content_type=asset.content_type or "")
 
 
 class TaskRunner:
@@ -350,6 +382,11 @@ class TaskRunner:
                     ref_videos = [
                         b for b in (await asyncio.gather(*[_asset_bytes(i) for i in params.get("video_ref_asset_ids", [])])) if b
                     ] or None
+                    audio_ref = await _load_audio_ref(db, params)
+                    if audio_ref is not None:
+                        # 任务日志里留下「这一段带了哪条配音」：视频时长是按配音长度定的，
+                        # 事后想弄清「为什么这次是 10 秒」就得有这一行
+                        logger.info("这条任务带对白音轨：%s", params.get("dialogue_note") or "（未记录）")
 
                     task.status = "processing"
                     task.progress = 10
@@ -362,6 +399,7 @@ class TaskRunner:
                         last_frame=last_frame,
                         ref_images=ref_images,
                         ref_videos=ref_videos,
+                        ref_audio=audio_ref,
                         duration=int(params.get("duration", 5)),
                         ratio=str(params.get("ratio", "16:9")),
                         resolution=str(params.get("resolution", "720p")),

@@ -30,7 +30,7 @@ from app.schemas import (
     VideoPreflightIn,
     asset_to_out,
 )
-from app.services import log_service, option_service, preflight, storage
+from app.services import digital_human, log_service, option_service, preflight, storage
 from app.services.runner import runner
 
 router = APIRouter(prefix="/api", tags=["generation"], dependencies=[Depends(require_auth)])
@@ -262,21 +262,34 @@ async def generate_videos(
         db, "video_resolution", payload.resolution, "清晰度"
     )
 
+    # 对白音轨（数字人/口播）：可选。给了就**必须能用**——时长不够读完整句时在这里
+    # 直接 400，而不是替用户把时长悄悄改大（改时长就是改钱，得他自己点那一下）。
+    params: dict = {
+        "first_frame_asset_id": payload.first_frame_asset_id,
+        "duration": duration,
+        "ratio": ratio,
+        "resolution": resolution,
+    }
+    if payload.audio_ref_asset_id is not None:
+        audio = await db.get(Asset, payload.audio_ref_asset_id)
+        if audio is None or audio.kind != "audio":
+            raise HTTPException(status_code=400, detail="对白音轨不存在或不是音频")
+        audio_name = audio.name or audio.original_name
+        problem = digital_human.check_duration(
+            requested=duration, audio_seconds=audio.duration, name=audio_name
+        )
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        params["audio_ref_asset_id"] = audio.id
+        params["dialogue_note"] = digital_human.attach_note(name=audio_name, seconds=audio.duration)
+
     task = Task(
         kind="video",
         status="pending",
         service_id=resolved.service.id,
         model=payload.model_key,
         prompt=payload.prompt,
-        params_json=json.dumps(
-            {
-                "first_frame_asset_id": payload.first_frame_asset_id,
-                "duration": duration,
-                "ratio": ratio,
-                "resolution": resolution,
-            },
-            ensure_ascii=False,
-        ),
+        params_json=json.dumps(params, ensure_ascii=False),
     )
     db.add(task)
     await db.commit()

@@ -2,9 +2,11 @@
 
 - 文本：/api/v3/chat/completions（OpenAI 兼容）
 - 图片：/api/v3/images/generations（Seedream，支持参考图改图）
-- 视频：/api/v3/contents/generations/tasks（Seedance 异步任务：文生 / 首帧图生）
+- 视频：/api/v3/contents/generations/tasks（Seedance 异步任务：文生 / 首帧图生 /
+  首尾帧 / 全能参考 / **参考音频（对白口播）**）
 
 文档：https://www.volcengine.com/docs/82379
+音频参考：https://docs.volcengine.com/docs/82379/1520757
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import httpx
 
 from app.providers.base import (
     AdapterError,
+    AudioRef,
     BaseAdapter,
     SpeechResult,
     VideoStatus,
@@ -27,6 +30,10 @@ from app.providers.base import (
 from app.providers.openai_compat import iter_chat_sse, raise_upstream_error
 
 DEFAULT_ARK_BASE = "https://ark.cn-beijing.volces.com/api/v3"
+
+# 参考音频的硬限制（上游口径）：单个 ≤15 MB、格式 wav/mp3。
+# 这两条本地就能判，先在本地拦住——省下一次必然失败的上游往返，错误也更短。
+AUDIO_MAX_BYTES = 15 * 1024 * 1024
 
 
 def _sniff_image_mime(data: bytes) -> str:
@@ -44,6 +51,75 @@ def _sniff_image_mime(data: bytes) -> str:
 def _data_uri(data: bytes) -> str:
     mime = _sniff_image_mime(data)
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def _audio_mime(ref: AudioRef) -> str:
+    """参考音频的 MIME：以库里记的 `content_type` 为准，认不出再用魔数兜一下。
+
+    上游只吃 wav / mp3 两种。本地生成的配音（我们的 TTS）也是这两种之一，
+    所以这里不扩张名单——真出别的格式，调用方那句报错会告诉用户该怎么办。
+    认不出来返回空串，由调用方给出可读错误。
+    """
+    ct = (ref.content_type or "").split(";")[0].strip().lower()
+    if ct in ("audio/x-wav", "audio/wave"):
+        return "audio/wav"
+    if ct == "audio/mp3":
+        return "audio/mpeg"
+    if ct in ("audio/wav", "audio/mpeg"):
+        return ct
+    if ref.data[:4] == b"RIFF" and ref.data[8:12] == b"WAVE":
+        return "audio/wav"
+    if ref.data[:3] == b"ID3" or ref.data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    return ""
+
+
+def _audio_data_uri(ref: AudioRef) -> str:
+    mime = _audio_mime(ref)
+    if not mime:
+        raise AdapterError(
+            f"这条参考音频的格式认不出来（记录的类型是 {ref.content_type or '空'}）——"
+            "方舟只收 wav 与 mp3。请换一条配音，或到「配音」页重新生成一段",
+            log_detail=f"invalid_audio_type ct={ref.content_type or '-'}",
+        )
+    if len(ref.data) > AUDIO_MAX_BYTES:
+        raise AdapterError(
+            f"这条参考音频有 {len(ref.data) / 1048576:.1f} MB，超过上限 15 MB。"
+            "请换一段更短的配音（长台词建议拆成两镜）",
+            log_detail=f"audio_too_large bytes={len(ref.data)}",
+        )
+    return f"data:{mime};base64,{base64.b64encode(ref.data).decode('ascii')}"
+
+
+# 参考音频（`role=reference_audio`）是 Seedance 较新几档才有的能力：官方模型能力表里
+# **1.5 pro / 2.0 / 2.5 为 ✓，1.0 pro 与 1.0 pro fast 为 ✗**。
+# 这里只用来把上游那句 400 翻译成人话，**不做闸门**：名单一定会过期（新模型一直在出），
+# 拿它拦人就会把「本来能跑的组合」也拦掉，而放过去最坏只是上游回一句 400、不花钱。
+AUDIO_REF_OK_PREFIXES = ("doubao-seedance-2", "doubao-seedance-1-5-pro", "seedance-2", "seedance-1-5-pro")
+AUDIO_REF_NO_PREFIXES = ("doubao-seedance-1-0", "seedance-1-0")
+
+
+def audio_ref_support(model: str) -> bool | None:
+    """这个模型认不认参考音频。True / False / **None = 不知道**。
+
+    「不知道」是合法答案，也是常态（新模型一直在出）——不知道时照常发出去，
+    让上游判，不要替用户猜。
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return None
+    if any(name.startswith(p) or p in name for p in AUDIO_REF_OK_PREFIXES):
+        return True
+    if any(name.startswith(p) or p in name for p in AUDIO_REF_NO_PREFIXES):
+        return False
+    return None
+
+
+AUDIO_REF_NO_HINT = (
+    "参考音频（对白/口播）只有 Seedance 1.5 pro / 2.0 / 2.5 这几档认，1.0 系列不支持。"
+    "到「模型服务」里把这个服务下的视频模型换成其中一档即可；"
+    "只想让它动起来、不需要说话，就把「对白音轨」去掉"
+)
 
 
 class ArkAdapter(BaseAdapter):
@@ -154,6 +230,7 @@ class ArkAdapter(BaseAdapter):
         last_frame: bytes | None = None,
         ref_images: list[bytes] | None = None,
         ref_videos: list[bytes] | None = None,
+        ref_audio: AudioRef | None = None,
     ) -> str:
         if not self.base_url or not self.api_key:
             raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
@@ -191,6 +268,19 @@ class ArkAdapter(BaseAdapter):
                     "role": "reference_video",
                 }
             )
+        # 参考音频（对白/口播）：`role` 固定是 reference_audio，是**参考**不是嘴型驱动。
+        # 官方参数表里没有 lip_sync 之类的开关，所以出来的片子是「这个人用这个音色说这句话」，
+        # 口型看着对得上，但不保证逐字对齐——界面上的文案也照着这个口径写，别过度承诺。
+        # 另外：只有 Seedance 1.5 pro / 2.0 / 2.5 认这一段，1.0 系列会直接 400
+        # （见 audio_ref_support / AUDIO_REF_NO_HINT，那句 400 会被翻译成人话）。
+        if ref_audio is not None:
+            content.append(
+                {
+                    "type": "audio_url",
+                    "audio_url": {"url": _audio_data_uri(ref_audio)},
+                    "role": "reference_audio",
+                }
+            )
         body: dict[str, Any] = {
             "model": model,
             "content": content,
@@ -208,6 +298,14 @@ class ArkAdapter(BaseAdapter):
         except httpx.HTTPError as e:
             raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
         if resp.status_code != 200:
+            if ref_audio is not None and resp.status_code == 400:
+                # 带参考音频的 400 绝大多数是「这一档模型不吃音频」。上游原文照旧带上
+                # （它能说清是哪个参数不对），再补一句我们知道的名单——不然用户只会
+                # 看到一句「上游拒绝了这次请求」，而这一句其实是有解的。
+                try:
+                    raise_upstream_error(resp)
+                except AdapterError as e:
+                    raise AdapterError(f"{e}\n{AUDIO_REF_NO_HINT}", log_detail=e.log_detail) from e
             raise_upstream_error(resp)
         data = resp.json()
         remote_id = data.get("id")

@@ -4,6 +4,7 @@ import { api, cfgBool, cfgNumber, cfgString } from "../api";
 import { consumeDraftFirstFrame, consumeDraftPrompt } from "../promptDraft";
 import type { Asset, ConfigMap, ModelOption, ParamOptionItem, PreflightWarning, Task } from "../types";
 import { Empty, Modal, ModelSelect, Spinner, isRunning } from "../components/common";
+import AudioRefPicker from "../components/AudioRefPicker";
 import { PreflightNotice, runPreflight } from "../components/PreflightNotice";
 import { useToast } from "../components/Toast";
 import { prefs } from "../prefs";
@@ -51,6 +52,10 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
   const [ratioOptions, setRatioOptions] = useState<ParamOptionItem[]>(FALLBACK_RATIO);
   const [resolutionOptions, setResolutionOptions] = useState<ParamOptionItem[]>(FALLBACK_RESOLUTION);
   const [firstFrame, setFirstFrame] = useState<{ id: number; url: string } | null>(null);
+  // 对白音轨（数字人/口播）：一条配音资产。默认不挂——它是可选件，
+  // 挂上就意味着这次出片会自带声音（也意味着挑模型时得挑认参考音频的那几档）。
+  // 存整条资产而不只是 id：确认弹窗要用它的名字与秒数再摆一次。
+  const [audioRef, setAudioRef] = useState<Asset | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -180,6 +185,7 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
         model_key: modelKey,
         prompt: prompt.trim(),
         first_frame_asset_id: firstFrame?.id ?? null,
+        audio_ref_asset_id: audioRef?.id ?? null,
         duration,
         ratio,
         resolution,
@@ -260,6 +266,14 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
                 e.target.value = "";
               }}
             />
+          </div>
+
+          <div className="field">
+            <label className="field-label">
+              对白音轨（可选，数字人 / 口播）
+              <span className="field-hint-inline">挂一段配音，让画面里的人说出这句话</span>
+            </label>
+            <AudioRefPicker value={audioRef?.id ?? null} onChange={setAudioRef} />
           </div>
 
           <div className="field">
@@ -383,6 +397,17 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
                 {firstFrame ? " · 图生视频" : ""}
               </b>
             </div>
+            {audioRef && (
+              // 挂了对白就在掏钱前再摆一次：它会改变这一笔买到的东西
+              //（有声的片子 vs 无声的片子），而这一句正是用户最后一次确认的机会
+              <div className="confirm-row">
+                <span>对白</span>
+                <b>
+                  {audioRef.name || audioRef.prompt || audioRef.original_name}
+                  {audioRef.duration ? `（${audioRef.duration} 秒）` : ""}
+                </b>
+              </div>
+            )}
             <div className="confirm-row">
               <span>描述</span>
               <b className="confirm-prompt">{prompt.trim()}</b>

@@ -71,6 +71,7 @@ import type {
   StyleOption,
 } from "../types";
 import { ModelSelect, Spinner } from "../components/common";
+import AudioRefPicker from "../components/AudioRefPicker";
 import { Dialog } from "../components/Dialog";
 import { PreflightNotice } from "../components/PreflightNotice";
 import { useToast } from "../components/Toast";
@@ -1972,6 +1973,22 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
               max={4}
               value={Number(data.n ?? 1)}
               onChange={(e) => patch({ n: Number(e.target.value) || 1 })}
+            />
+          </div>
+        )}
+        {features.includes("audioRef") && (
+          // 对白音轨（数字人 / 口播）：挂一条配音，让画面里的人说出这句话。
+          // 刻意放在「时长」上面：这两项是联动的——配音比时长长会被后端拦下，
+          // 摆在一起用户才看得见「要么调时长、要么换短一点的配音」。
+          <div className="field">
+            <label className="field-label">
+              对白音轨（可选）
+              <span className="field-hint-inline">挂一段配音，出片自带声音</span>
+            </label>
+            <AudioRefPicker
+              value={data.audioRefAssetId ? Number(data.audioRefAssetId) : null}
+              // 节点上只存 id：资产本身在库里，节点数据里放一份副本迟早不一致
+              onChange={(asset) => ctx?.updateNode(id, { audioRefAssetId: asset ? asset.id : null })}
             />
           </div>
         )}
