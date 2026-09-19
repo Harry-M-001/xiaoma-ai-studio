@@ -33,6 +33,7 @@ import type {
   CanvasAgentDraft,
   CanvasAnimaticResult,
   CanvasLint,
+  CanvasNodeVersions,
   CanvasRunSummary,
   CanvasPreview,
   OllamaStatus,
@@ -326,6 +327,16 @@ export const api = {
   // 分镜静态体检：零成本检查镜头语言（纯读，不建任务、不调模型）
   lintCanvas: (projectId: number) =>
     request<CanvasLint>(`/api/canvas/${projectId}/lint`),
+  /**
+   * 某个节点的历史版本（同一节点多次生成各留一版）。
+   *
+   * 只读：回滚是把这个节点的 `data.versionKey` 改成要用的那一版，走普通的保存画布那条路
+   * ——不另开一个写接口，免得出现两条写画布的路径。
+   */
+  nodeVersions: (projectId: number, nodeId: string) =>
+    request<CanvasNodeVersions>(
+      `/api/canvas/${projectId}/nodes/${encodeURIComponent(nodeId)}/versions`,
+    ),
   /**
    * 出静图缓动样片：本地 ffmpeg 按分镜表的时长与运镜把分镜图串成一条片子。
    * 不花生成费，但要占 CPU，服务端同时只允许渲染一条（忙时回 409）。

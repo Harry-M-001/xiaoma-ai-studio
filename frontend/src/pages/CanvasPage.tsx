@@ -62,6 +62,7 @@ import type {
   CanvasNodeData,
   CanvasNodeSchema,
   CanvasNodeStatus,
+  CanvasNodeVersions,
   CanvasPreview,
   ComfyWorkflow,
   ModelOption,
@@ -70,7 +71,7 @@ import type {
   ShareLicense,
   StyleOption,
 } from "../types";
-import { ModelSelect, Spinner } from "../components/common";
+import { formatTime, ModelSelect, Spinner } from "../components/common";
 import AudioRefPicker from "../components/AudioRefPicker";
 import { Dialog } from "../components/Dialog";
 import { PreflightNotice } from "../components/PreflightNotice";
@@ -153,6 +154,8 @@ interface DocEditRequest {
 
 /** 节点浮框与页面通信（避免把全局态塞进 node.data 被持久化） */
 interface NodePanelCtx {
+  /** 当前项目 id（节点版本列表要按项目 + 节点查） */
+  projectId: number;
   models: ModelOption[];
   workflows: ComfyWorkflow[];
   agents: AgentMeta[];
@@ -160,6 +163,14 @@ interface NodePanelCtx {
   styles: StyleOption[];
   running: boolean;
   updateNode: (id: string, patch: Partial<CanvasNodeData>) => void;
+  /**
+   * 切换某个节点交付的产物版本（`null` = 回到跟最新）。
+   *
+   * 单独给一个入口而不是让浮框自己 patch：产物网格与角标都是后端按**已保存的**画布算的，
+   * 所以改完要等这次自动保存落库，再补刷一次节点状态——否则会出现
+   * 「标签已经是第 1 版、缩略图还是第 2 版」。
+   */
+  pickVersion: (id: string, key: string | null) => void;
   /** 把同一个风格套到画布上所有支持风格的节点（省得七八个节点逐个选） */
   applyStyleToAll: (key: string) => void;
   /** 按屏幕像素平移动画布（浮框超出可视区时用来自动让位） */
@@ -1604,6 +1615,29 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const statusKey = `${status?.taskId ?? ""}:${status?.status ?? ""}`;
 
   /**
+   * 产物版本栈：这个节点历次生成各留一版，可以回滚到旧的那一版。
+   *
+   * 随 `statusKey` 重拉（刚跑完就多一版）。**拉不到不算致命**：节点上「已回滚」这件事
+   * 记在 `data.versionKey` 里，本地就有，所以即使列表没取回来，浮框照样会如实标出
+   * 「已回滚到旧版本」——不会因为一次网络抖动就装作没回滚过。
+   */
+  const [versions, setVersions] = useState<CanvasNodeVersions | null>(null);
+  const projectId = ctx?.projectId ?? 0;
+  useEffect(() => {
+    if (!projectId) return;
+    let alive = true;
+    api
+      .nodeVersions(projectId, id)
+      .then((v) => {
+        if (alive) setVersions(v);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [projectId, id, statusKey]);
+
+  /**
    * 浮框超出画布可视区时把画布平移一点，让整块浮框都落在屏幕内
    * （节点在画布任何位置都能看全，不用手动拖画布）
    *
@@ -1662,6 +1696,21 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const features = schema.features ?? [];
   // 图片产物（文档 / 视频不走这个网格）
   const imageProducts = (status?.assets ?? []).filter((a) => a.kind === "image");
+  // 产物版本栈：节点上回滚到的那一版（空 = 跟最新），与后端读的是同一个字段
+  const versionPin = String(data.versionKey ?? "");
+  const versionItems = versions?.items ?? [];
+  /**
+   * 当前这一版**以节点上的字段为准**，不看接口回的 `activeKey`。
+   *
+   * 理由：用户刚在下拉里改完、画布还没保存时，接口回的仍是上一次保存时的算法结果，
+   * 界面就会「选了半天没反应」（浏览器走查时正是这样）。本地字段才是这次要保存下去的值，
+   * 拿它算，选完立刻就对。指不到任何一版时退回最新那一版（与后端同口径）。
+   */
+  const activeVersion =
+    (versionPin ? versionItems.find((v) => v.key === versionPin) : undefined) ?? versionItems[0];
+  // 回滚到的那一版已经不在了（历史任务被清理过）——要如实说，不能装作没事
+  const pinMissing = Boolean(versionPin) && versionItems.length > 0
+    && !versionItems.some((v) => v.key === versionPin);
   // 文档正文：手改的覆盖 > 生成结果（后端也按这个顺序取，两边口径要一致）
   const docOverride = String(data.docText ?? "").trim();
   const bodyText = docOverride || status?.text || "";
@@ -2155,6 +2204,76 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       ) : null}
 
+      {(versionItems.length > 1 || versionPin) && (
+        // 产物版本栈：同一节点多次生成各留一版，可以回滚。只有一版时不占地方。
+        <div className="field">
+          <div className="canvas-inline canvas-refhead">
+            <label className="field-label">
+              产物版本
+              <em className="canvas-doc-count">
+                {activeVersion
+                  ? `（第 ${activeVersion.index} / ${activeVersion.total} 版）`
+                  : "（已回滚）"}
+              </em>
+            </label>
+            {versionPin && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => ctx.pickVersion(id, null)}
+              >
+                切到最新
+              </button>
+            )}
+          </div>
+          {versionItems.length > 0 ? (
+            <select
+              className="input"
+              value={activeVersion?.key ?? ""}
+              onChange={(e) => {
+                // 选「最新」= 不再钉住（跟最新走），不能把最新的 key 写进去——
+                // 否则下次生成出新版时，节点还钉在旧的「最新」上，像是回滚没生效
+                const picked = versionItems.find((v) => v.key === e.target.value);
+                ctx.pickVersion(id, picked?.latest ? null : e.target.value);
+              }}
+            >
+              {versionItems.map((v) => {
+                const bits = [`第 ${v.index} 版`];
+                if (v.latest) bits.push("最新");
+                bits.push(`${v.assetCount} 件产物`);
+                if (v.failedCount) bits.push(`${v.failedCount} 条失败`);
+                if (v.createdAt) bits.push(formatTime(v.createdAt));
+                return (
+                  <option key={v.key} value={v.key}>
+                    {bits.join(" · ")}
+                  </option>
+                );
+              })}
+            </select>
+          ) : (
+            <div className="field-hint danger">
+              版本列表没取回来（后端或网络异常），但节点上仍然记着「已回滚」——
+              刷新一下或点「切到最新」都能回到跟最新。
+            </div>
+          )}
+          {pinMissing ? (
+            <div className="field-hint danger">
+              你回滚到的那一版已经不在了（历史任务被清理过），现在给下游的是最新这版。
+            </div>
+          ) : versionPin && activeVersion && !activeVersion.latest ? (
+            <div className="field-hint danger">
+              下游现在读的是第 {activeVersion.index} 版（不是最新那版）。想让新版重新生效就选它，
+              或者点「切到最新」。
+            </div>
+          ) : (
+            <div className="field-hint">
+              下游读的是选中的这一版；每生成一次就多一版，旧的都留着。
+              回滚在「单跑节点」时生效——整图运行会把每个节点重跑一遍，那时一律按最新算。
+            </div>
+          )}
+        </div>
+      )}
+
       {imageProducts.length > 0 && (
         <div className="field">
           <div className="canvas-inline canvas-refhead">
@@ -2589,6 +2708,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   // 盯这一跑的轮询句柄（组件卸载时要清掉）
   const runWatcher = useRef<number | null>(null);
   const [loaded, setLoaded] = useState(false);
+  /** 刚切过产物版本：自动保存落库后要补刷一次节点状态（见 NodePanelCtx.pickVersion） */
+  const versionSwitchPending = useRef(false);
   const [paletteOpen, setPaletteOpen] = useState(() => prefs.paletteOpen.get() ?? true);
   // 自动链档位：铺多远（记忆上次选择，避免每次都要重选）。
   // 只认当前版本真实存在的档位——老版本的 key 可能已经没了
@@ -2945,10 +3066,16 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   useEffect(() => {
     if (!dirty || !loaded || saving) return;
     const t = window.setTimeout(() => {
-      void saveDoc();
+      void saveDoc().then((ok) => {
+        // 刚切过产物版本：这一版交付什么由后端按已保存的画布算，所以要补刷一次状态
+        if (ok && versionSwitchPending.current) {
+          versionSwitchPending.current = false;
+          void refreshStatus();
+        }
+      });
     }, 1000);
     return () => window.clearTimeout(t);
-  }, [dirty, loaded, saving, saveDoc]);
+  }, [dirty, loaded, saving, saveDoc, refreshStatus]);
 
   // "已保存"指示 2s 后淡出
   useEffect(() => {
@@ -3103,6 +3230,19 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const updateNodeData = useCallback((id: string, patch: Partial<CanvasNodeData>) => {
     setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)));
     setDirty(true);
+  }, []);
+
+  /**
+   * 切换节点交付的产物版本（回滚 / 回到最新）。
+   *
+   * 与 `updateNodeData` 的区别只在**多打一个标记**：产物网格与画布角标是后端按
+   * 已保存的画布算出来的，所以这次自动保存落库之后要补刷一次节点状态，
+   * 否则界面会「标签已经是第 1 版、缩略图还是第 2 版」。
+   */
+  const pickVersion = useCallback((id: string, key: string | null) => {
+    setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, data: { ...n.data, versionKey: key } } : n)));
+    setDirty(true);
+    versionSwitchPending.current = true;
   }, []);
 
   // 一个风格套全链：只改支持 styleSelect 的节点，其余节点不动
@@ -3289,12 +3429,14 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
   const panelCtx = useMemo<NodePanelCtx>(
     () => ({
+      projectId,
       models,
       workflows,
       agents,
       styles,
       running,
       updateNode: updateNodeData,
+      pickVersion,
       applyStyleToAll,
       nudgeViewport,
       preview: previewProduct,
@@ -3308,6 +3450,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       reloadWorkflows,
     }),
     [
+      projectId,
       models,
       workflows,
       agents,
@@ -3316,6 +3459,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       sampling,
       renderAnimatic,
       updateNodeData,
+      pickVersion,
       applyStyleToAll,
       nudgeViewport,
       previewProduct,

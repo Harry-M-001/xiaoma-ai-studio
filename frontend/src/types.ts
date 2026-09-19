@@ -287,6 +287,14 @@ export interface CanvasNodeData {
   shotVoices?: string;
   /** 同场景串联：每镜额外带上同场景上一镜的分镜图当参考 */
   sceneRefs?: boolean;
+  /**
+   * 回滚到的那一版（产物版本栈）。空 = 跟最新那一版。
+   *
+   * 只有用户显式点「设为当前」才会写这个字段；生成新产物**不会**动它。
+   * 所以「回滚到第 2 版、又生成了第 4 版」之后，节点交付的仍然是第 2 版——
+   * 节点上会把这件事标出来（不然就成了静默行为）。
+   */
+  versionKey?: string | null;
   /** 导演风格卡标识（空 = 不注入风格） */
   styleKey?: string;
   /**
@@ -656,6 +664,49 @@ export interface CanvasNodeStatus {
   }[];
   progress?: number;
   error?: string | null;
+  /** 当前交付的是第几版 / 共几版（0 表示这个节点还没有产物） */
+  versionIndex?: number;
+  versionTotal?: number;
+  /** 当前交付版本的标识 */
+  versionKey?: string;
+  /** 当前交付的是不是最新那一版；false = 用户回滚过 */
+  versionLatest?: boolean;
+}
+
+/** 节点的一版产物（同一节点多次生成各留一版，可回滚） */
+export interface CanvasNodeVersion {
+  key: string;
+  /** 第几版，从 1 开始、从旧往新数 */
+  index: number;
+  total: number;
+  latest: boolean;
+  taskCount: number;
+  doneCount: number;
+  failedCount: number;
+  runningCount: number;
+  createdAt: string;
+  /** 这一版一共有几件产物（`assets` 只带前几张当缩略图） */
+  assetCount: number;
+  assets: {
+    id: number;
+    url: string;
+    kind: string;
+    name: string;
+    category: string;
+    label?: string;
+    title?: string;
+  }[];
+}
+
+export interface CanvasNodeVersions {
+  nodeId: string;
+  /** 节点上写着的那个 key（可能因为历史被清而指不到任何一版） */
+  pin: string;
+  /** 实际生效的那一版 */
+  activeKey: string;
+  latestKey: string;
+  /** 最新的在前 */
+  items: CanvasNodeVersion[];
 }
 
 // ---- 创作 Agent（自动链） ----

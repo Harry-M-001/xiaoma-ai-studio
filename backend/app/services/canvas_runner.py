@@ -139,12 +139,88 @@ def asset_view(asset: Asset, params: dict | None = None) -> dict:
     }
 
 
-async def _latest_task_assets(db: AsyncSession, project_id: int, node_id: int | str) -> list[Asset]:
-    """取某画布节点最近一次成功任务的全部产物（按生成顺序）。
+def version_key_of(task: Task) -> str:
+    """这个任务属于哪一版。
 
-    资产链节点一次运行会产生 N 个任务（一行资产一个任务），这批任务的
-    params_json 里带同一个 asset_batch 标记；这里按标记把整批产物收齐，
-    否则节点上只会显示最后一个任务的图。普通节点没有该标记，行为不变（只取最新一个）。
+    「一版」= 一次运行派出的那批任务，它们带着同一个 `asset_batch`。所以版本的身份
+    就直接用批次标记，不必再建一张表——**已有的批次标记本来就是版本**，
+    只是以前没人把它当回事说出来。
+
+    老数据里没有这个标记的任务（`asset_batch` 是 v1.1.22 才补到所有节点类型上的），
+    每个任务自成一版：那正是它们本来的样子（一个任务 = 一次生成），
+    回填反而会凭空编造出「哪些任务属于同一次运行」这个我们并不知道的事实。
+    """
+    batch = read_task_params(task).get("asset_batch")
+    return str(batch) if batch else f"t{task.id}"
+
+
+def group_versions(tasks: list[Task]) -> list[dict]:
+    """把某个节点的历史任务按版本分组，**最新的在前**。
+
+    入参要求按 `Task.id` 倒序（调用方查库时就是这个顺序）：这样「第一次出现的批次」
+    就是最新那一版，字典的插入顺序天然给出「新 → 旧」，不用再排一次序。
+
+    `index` 从 1 开始、**从旧往新数**（第 1 版是最早那次生成）：用户嘴里说的
+    「第 2 版」就是这个号，倒过来数会让人对不上。
+    """
+    groups: dict[str, dict] = {}
+    for t in tasks:
+        key = version_key_of(t)
+        g = groups.get(key)
+        if g is None:
+            g = {"key": key, "tasks": []}
+            groups[key] = g
+        g["tasks"].append(t)
+
+    ordered = list(groups.values())
+    total = len(ordered)
+    for i, g in enumerate(ordered):
+        g["index"] = total - i
+        g["total"] = total
+        g["latest"] = i == 0
+        g["taskCount"] = len(g["tasks"])
+    return ordered
+
+
+def pick_version(groups: list[dict], version_key: object) -> dict | None:
+    """挑出要交付的那一版；`version_key` 为空（没回滚过）或指不到任何一版时取最新。
+
+    **指不到时退回最新而不是报错**：那多半是「分享码导入到别人机器上」或「历史任务被
+    清理了」，为这个让整条链失败没有任何好处。但节点上会标出「当前交付的是第 N 版」，
+    用户一眼能看出自己拿的是哪一版，不会以为拿到的是最新那版。
+    """
+    if not groups:
+        return None
+    want = str(version_key or "").strip()
+    if want:
+        for g in groups:
+            if g["key"] == want:
+                return g
+    return groups[0]
+
+
+def version_pin_of(node: dict) -> str:
+    """节点上「回滚到的那一版」（`data.versionKey`）；没回滚过就是空串 = 跟最新。
+
+    回滚是**显式**的：只有用户点了「设为当前」才会写这个字段。生成新产物**不会**动它，
+    所以「回滚到第 2 版，然后又生成了第 4 版」之后，节点交付的仍然是第 2 版——
+    这不是 bug，是「用户刚说过要用哪一版」这件事不该被一次生成悄悄推翻。
+    节点上会把「当前交付的是第 N 版（不是最新）」标出来，并给一键切回。
+    """
+    return str((node.get("data") or {}).get("versionKey") or "").strip()
+
+
+async def _latest_task_assets(
+    db: AsyncSession, project_id: int, node_id: int | str, version_key: object = None
+) -> list[Asset]:
+    """取某画布节点要交付给下游的那一版产物（按生成顺序）。
+
+    默认是**最新一版**；节点上回滚过（`data.versionKey` 指到旧的一版）就给那一版——
+    这是「回滚」真正生效的地方：下游节点、预览、体检、样片都从这里取产物，
+    所以只要这一处认了，整条链读到的就是旧那一版。
+
+    一个版本里可能有多个任务（资产链 / 分镜图 / 逐镜视频一次运行派 N 个任务），
+    它们带着同一个批次标记，按标记收齐——否则节点上只会显示最后一个任务的图。
     """
     row = await db.execute(
         select(Task)
@@ -160,11 +236,8 @@ async def _latest_task_assets(db: AsyncSession, project_id: int, node_id: int | 
     if not tasks:
         return []
 
-    batch = read_task_params(tasks[0]).get("asset_batch")
-    if batch:
-        tasks = [t for t in tasks if read_task_params(t).get("asset_batch") == batch]
-    else:
-        tasks = tasks[:1]
+    group = pick_version(group_versions(tasks), version_key)
+    tasks = group["tasks"] if group else tasks[:1]
 
     arow = await db.execute(
         select(Asset)
@@ -172,6 +245,82 @@ async def _latest_task_assets(db: AsyncSession, project_id: int, node_id: int | 
         .order_by(Asset.id.asc())
     )
     return list(arow.scalars().all())
+
+
+# 版本列表里每版带几张产物缩略图：用户是靠「看一眼」认出版本的，标题里的时间帮不上忙
+_VERSION_PREVIEW = 4
+
+
+async def node_versions(
+    db: AsyncSession, project_id: int, node_id: int | str, version_key: object = None
+) -> dict:
+    """某个节点的历史版本，**最新的在前**（含每版的产物缩略图与成败条数）。
+
+    三处刻意的取舍：
+
+    1. **不只列成功的那几条**。某一版可能一条都没成（全失败），而用户最想知道的恰恰是
+       「这一版为什么不能用」——所以按任务全量分组，把失败条数一并给出。
+    2. **与 `_latest_task_assets` 共用 `group_versions`**。两处各分一次组，迟早出现
+       「列表说有 3 版、实际交付的是第 4 版」这种最难看的不一致。
+    3. **`pin` 与 `activeKey` 分开回**。`pin` 是节点上写着的那个 key（可能因为历史任务
+       被清理而指不到任何一版），`activeKey` 是**实际生效**的那一版。分开回，前端才能
+       如实说「你选的那一版已经不在了，现在给的是最新这版」，而不是装作没事。
+    """
+    row = await db.execute(
+        select(Task)
+        .where(Task.canvas_project_id == project_id, Task.canvas_node_id == str(node_id))
+        .order_by(Task.id.desc())
+        .limit(_MAX_TASKS_PER_NODE)
+    )
+    tasks = list(row.scalars().all())
+    groups = group_versions(tasks)
+
+    by_task: dict[int, list[Asset]] = {}
+    if tasks:
+        arow = await db.execute(
+            select(Asset)
+            .where(Asset.task_id.in_([t.id for t in tasks]))
+            .order_by(Asset.id.asc())
+        )
+        for a in arow.scalars().all():
+            if a.task_id is not None:
+                by_task.setdefault(a.task_id, []).append(a)
+
+    items: list[dict] = []
+    for g in groups:
+        views: list[dict] = []
+        for t in sorted(g["tasks"], key=lambda x: x.id):
+            tparams = read_task_params(t)
+            for a in by_task.get(t.id, []):
+                views.append(asset_view(a, tparams))
+        created = [t.created_at for t in g["tasks"] if t.created_at is not None]
+        items.append(
+            {
+                "key": g["key"],
+                "index": g["index"],
+                "total": g["total"],
+                "latest": g["latest"],
+                "taskCount": g["taskCount"],
+                "doneCount": sum(1 for t in g["tasks"] if t.status == "completed"),
+                "failedCount": sum(1 for t in g["tasks"] if t.status == "failed"),
+                "runningCount": sum(
+                    1 for t in g["tasks"] if t.status in ("pending", "processing")
+                ),
+                "createdAt": min(created).isoformat() if created else "",
+                # 只带前几张当缩略图，但要如实说一共几张（否则「这版只有 4 张」是假的）
+                "assetCount": len(views),
+                "assets": views[:_VERSION_PREVIEW],
+            }
+        )
+
+    chosen = pick_version(groups, version_key)
+    return {
+        "nodeId": str(node_id),
+        "pin": str(version_key or "").strip(),
+        "activeKey": chosen["key"] if chosen else "",
+        "latestKey": groups[0]["key"] if groups else "",
+        "items": items,
+    }
 
 
 def _text_node_output(node: dict, nodes_by_id: dict[str, dict], edges: list[dict], depth: int = 0) -> str:
@@ -907,6 +1056,10 @@ async def _create_node_task(
 ) -> Task:
     ntype = node["type"]
     data = node.get("data") or {}
+    # 这一跑派出的任务都盖同一个批次标记 —— 它就是「一版」的身份。
+    # 单任务节点（文本 / 图片 / 视频 / 工作流）也照盖：不盖的话「重新生成」出来的
+    # 那一条会自成一版，而它其实只是把同一版里失败的那条补上。
+    batch = _new_batch_id(node)
 
     # 手动选择的参考（图库/上传）优先于上游产物
     images = await _apply_manual_refs(db, data, images)
@@ -942,6 +1095,7 @@ async def _create_node_task(
                     "node_params": node_params,
                     # 风格卡：由 runner._run_text 追加到系统提示词（这里可以出现导演名）
                     "style_key": str(data.get("styleKey") or ""),
+                    "asset_batch": batch,
                 },
                 ensure_ascii=False,
             ),
@@ -961,6 +1115,7 @@ async def _create_node_task(
         params: dict = {
             "workflow_id": wf.id,
             "param_values": data.get("paramValues") or {},
+            "asset_batch": batch,
         }
         if images:
             params["ref_asset_ids"] = [a.id for a in images]
@@ -991,7 +1146,7 @@ async def _create_node_task(
         )
         prompt = style_service.append_style(prompt, suffix)
 
-    params = {}
+    params = {"asset_batch": batch}
     if ntype == "image":
         # 生成/编辑合一：有参考图=图生图（编辑），无=文生图
         params["size"] = data.get("size") or "1024x1024"
@@ -1060,8 +1215,18 @@ async def _create_node_task(
 
 
 async def _resolve_upstream(
-    db: AsyncSession, project_id: int, doc: dict, node_id: str
+    db: AsyncSession, project_id: int, doc: dict, node_id: str, use_pins: bool = True
 ) -> list[tuple[str, dict, list[Asset]]]:
+    """取上游节点要交给本节点的产物。
+
+    `use_pins` 决定**上游节点上回滚过的版本算不算数**，两个入口的口径不同：
+
+    - **单节点运行**（`use_pins=True`，也是默认）：算数。这正是回滚的用处——
+      「这一版的分镜图更好，拿它去出视频」。
+    - **整图运行**（`use_pins=False`）：不算数，一律按最新那版。因为整图会把每个可执行
+      节点都重跑一遍、它们各自都会产出新的一版；这时候还按旧版给下游，用户会看到
+      「我刚跑的图没被用上」——那是比「回滚没生效」更难解释的事。
+    """
     upstream: list[tuple[str, dict, list[Asset]]] = []
     nodes = {n["id"]: n for n in doc.get("nodes", [])}
     for e in doc.get("edges", []):
@@ -1073,7 +1238,8 @@ async def _resolve_upstream(
         if src["type"] == "text":
             upstream.append((src["id"], src, []))
             continue
-        assets = await _latest_task_assets(db, project_id, src["id"])
+        pin = version_pin_of(src) if use_pins else ""
+        assets = await _latest_task_assets(db, project_id, src["id"], pin)
         upstream.append((src["id"], src, assets))
     return upstream
 
@@ -1312,6 +1478,7 @@ async def preview_graph(project_id: int) -> dict:
         pending: list[str] = []  # 条数待定的节点
         rerun: list[str] = []  # 已经有产物、这一跑会重做的节点
         blocked: list[str] = []  # 已经能判定必挂的节点
+        pinned: list[str] = []  # 回滚到旧版本的节点（整图会重跑它们，按最新算）
         billable = False  # 是否会真实调用外部模型（workflow 走本机 ComfyUI，不扣额度）
         dialogue_calls = 0  # 逐镜对白会额外做几次语音合成（它们不出现在任务数里）
 
@@ -1324,14 +1491,17 @@ async def preview_graph(project_id: int) -> dict:
                 # 非 workflow 节点一律要真调模型（workflow 走本机 ComfyUI，不扣额度）
                 billable = True
             label = NODE_SCHEMAS[node["type"]]["label"]
-            upstream = await _resolve_upstream(db, project_id, doc, nid)
+            if version_pin_of(node):
+                pinned.append(label)
+            # 预览描述的是「整图跑一遍」会发生什么，所以这里按整图的口径取上游（忽略回滚）
+            upstream = await _resolve_upstream(db, project_id, doc, nid, use_pins=False)
             # 上游里本次才会产出东西的节点：它们跑完之前，本节点会派几条无从得知
             waiting = [
                 NODE_SCHEMAS[s["type"]]["label"]
                 for _sid, s, assets in upstream
                 if is_runnable(s["type"]) and not assets and not _doc_override_text(s)
             ]
-            existing = await _latest_task_assets(db, project_id, nid)
+            existing = await _latest_task_assets(db, project_id, nid, version_pin_of(node))
 
             item: dict = {
                 "id": nid,
@@ -1416,6 +1586,17 @@ async def preview_graph(project_id: int) -> dict:
                 + "。每次调用都会真实消耗对应服务的额度（本机服务则占本机算力），确认后再跑。",
             }
         )
+    if pinned:
+        # 回滚只在「单跑某个节点」时生效。整图会把这些节点重跑一遍，那时还按旧版给
+        # 下游，用户会看到「我刚跑的图没被用上」——必须在点下去之前就说清楚
+        notes.append(
+            {
+                "level": "warning",
+                "text": "、".join(f"「{x}」" for x in pinned)
+                + " 当前交付的是回滚后的旧版本。整图会把每个节点都重跑一遍，"
+                "所以这一跑它们一律按最新那一版算；想让回滚生效，请只单跑下游那个节点。",
+            }
+        )
     if rerun:
         notes.append(
             {
@@ -1492,7 +1673,7 @@ async def lint_graph(project_id: int) -> dict:
             if not ntype or not nid:
                 continue
             label = NODE_SCHEMAS.get(ntype, {}).get("label") or ntype
-            assets = await _latest_task_assets(db, project_id, nid)
+            assets = await _latest_task_assets(db, project_id, nid, version_pin_of(node))
             # 手改正文 > 已生成的正文。
             # 注意**不能**再兜底到 `node.data.prompt`：对文档节点来说 prompt 是「生成要求」
             # （比如「请按三幕结构改写，每镜不超过 4 秒」），不是内容。把它当内容会对着
@@ -1675,7 +1856,7 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
                     "请把上游「分镜」节点接进来"
                 )
 
-            assets = await _latest_task_assets(db, project_id, node_id)
+            assets = await _latest_task_assets(db, project_id, node_id, version_pin_of(node))
             by_shot = await _assets_by_shot(db, assets)
             if not by_shot:
                 raise AnimaticInputError("这个节点还没有出过分镜图，先运行一次再出样片")
@@ -1811,7 +1992,9 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
                 logger.info("画布 %s 节点 %s 因上游失败跳过", project_id, nid)
                 continue
             try:
-                upstream = await _resolve_upstream(db, project_id, doc, nid)
+                # 整图会把每个可执行节点都重跑一遍，所以忽略各节点上回滚的版本：
+                # 这一跑它们自己就会产出新版，下游该用新的
+                upstream = await _resolve_upstream(db, project_id, doc, nid, use_pins=False)
                 tasks = await _build_node_tasks(db, project_id, doc, node, upstream)
                 await _stamp_run(db, tasks, run_id)
             except Exception as e:  # noqa: BLE001 - 单节点失败不中断整图

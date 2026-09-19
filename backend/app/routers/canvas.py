@@ -271,7 +271,19 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
 
     媒体节点返回产物 URL（资产链节点一次运行有多张，全部返回）；
     文档节点（自动链）额外返回正文预览，前端据此在节点与浮框里直接展示生成的 Markdown。
+
+    「哪一批产物算数」与 `canvas_runner._latest_task_assets` **共用同一套版本分组**：
+    节点上回滚过就给回滚到的那一版，并带上「第 N 版 / 共 M 版」让前端标出来。
+    分两份实现的话，迟早出现「画布上显示的是新版、下游读的是旧版」。
     """
+    project = await db.get(Project, project_id)
+    doc = json.loads(project.canvas_json) if project and project.canvas_json else {}
+    pins = {
+        str(n.get("id")): canvas_runner.version_pin_of(n)
+        for n in doc.get("nodes", [])
+        if n.get("id")
+    }
+
     rows = await db.execute(
         select(Task)
         .where(Task.canvas_project_id == project_id)
@@ -287,13 +299,10 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
     node_batch: dict[str, list[Task]] = {}
     for nid, tasks in tasks_by_node.items():
         latest = tasks[0]
-        batch = canvas_runner.read_task_params(latest).get("asset_batch")
-        # 资产链节点一批任务 = 一次运行；其余节点只看最新一个任务
-        batch_tasks = (
-            [t for t in tasks if canvas_runner.read_task_params(t).get("asset_batch") == batch]
-            if batch
-            else [latest]
-        )
+        groups = canvas_runner.group_versions(tasks)
+        chosen = canvas_runner.pick_version(groups, pins.get(nid))
+        # 一版 = 一次运行；节点状态里的「产物」永远指当前那一版
+        batch_tasks = chosen["tasks"] if chosen else [latest]
         node_batch[nid] = batch_tasks
         node_status[nid] = {
             "taskId": latest.id,
@@ -301,6 +310,11 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
             "assetId": None,
             "taskCount": len(batch_tasks),
             "injectedNames": canvas_runner.read_task_params(latest).get("injected_names") or [],
+            # 版本：第 N 版 / 共 M 版；`versionLatest` 为 false 时前端要标出「不是最新」
+            "versionIndex": chosen["index"] if chosen else 0,
+            "versionTotal": chosen["total"] if chosen else 0,
+            "versionKey": chosen["key"] if chosen else "",
+            "versionLatest": bool(chosen and chosen["latest"]),
         }
 
     asset_rows = await db.execute(
@@ -333,6 +347,31 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
         if doc_asset is not None and st["status"] == "completed":
             st["text"] = _read_text_preview(doc_asset.filename)
     return {"nodes": node_status}
+
+
+@router.get("/{project_id}/nodes/{node_id}/versions")
+async def node_versions(
+    project_id: int, node_id: str, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """某个节点的历史版本（同一节点多次生成各留一版，可回滚）。
+
+    节点上「当前用哪一版」存在节点 data 的 `versionKey`（和模型、时长那些一样，
+    跟着图一起存），所以**这里不写任何东西**：回滚走的是普通的保存画布那条路，
+    前端把 `versionKey` 改掉即可。给一个专门的写接口反而会出现两条写画布的路径。
+
+    `pin` 与 `activeKey` 分开回：`pin` 是节点上写着的那个 key（可能因为历史任务被清理
+    而指不到任何一版），`activeKey` 是实际生效的那一版——前端才能如实说明。
+    """
+    project = await db.get(Project, project_id)
+    if project is None or not project.canvas_json:
+        raise HTTPException(status_code=404, detail="画布不存在")
+    doc = json.loads(project.canvas_json)
+    node = next((n for n in doc.get("nodes", []) if str(n.get("id")) == str(node_id)), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail="节点不存在")
+    return await canvas_runner.node_versions(
+        db, project_id, node_id, canvas_runner.version_pin_of(node)
+    )
 
 
 _DOC_PREVIEW_CHARS = 6000
