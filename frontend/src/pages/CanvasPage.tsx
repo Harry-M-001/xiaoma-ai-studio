@@ -1830,6 +1830,56 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
+      {features.includes("shotDialogue") && isShotVideoNode && (
+        // 逐镜对白（数字人）：每镜的「台词」合成成配音，再作为参考音附给这一镜的视频。
+        // 只在逐镜出片时才有意义——「整段一个视频」没有「这一镜的台词」这个概念。
+        // 与其余区块同一套写法：能力由注册表的 features 声明，面板照着画。
+        <div className="field">
+          <label className="canvas-check">
+            <input
+              type="checkbox"
+              checked={data.shotDialogue === true}
+              onChange={(e) => patch({ shotDialogue: e.target.checked })}
+            />
+            <span>逐镜对白（数字人）</span>
+          </label>
+          <div className="canvas-float-hint">
+            每一镜的「台词」先合成成配音，再作为参考音附给这一镜的视频——画面里的人就说这句话。
+            读不完这一镜的台词不会出片（那一镜跳过，并在日志里说明是哪儿的问题），
+            台词写成「（无）」的镜头照常出无声片子。
+          </div>
+          {data.shotDialogue === true && (
+            <>
+              <label className="field-label" style={{ marginTop: 10 }}>
+                默认音色
+                <span className="field-hint-inline">留空 = 用语音服务的默认音色</span>
+              </label>
+              <input
+                className="input"
+                value={String(data.shotVoice ?? "")}
+                placeholder="留空 = 服务默认音色"
+                onChange={(e) => patch({ shotVoice: e.target.value })}
+              />
+              <label className="field-label" style={{ marginTop: 10 }}>
+                角色音色（可选，每行一条）
+                <span className="field-hint-inline">小焰=nova</span>
+              </label>
+              <textarea
+                className="textarea"
+                rows={2}
+                value={String(data.shotVoices ?? "")}
+                placeholder={"小焰=nova\n阿澈=echo"}
+                onChange={(e) => patch({ shotVoices: e.target.value })}
+              />
+              <div className="canvas-float-hint">
+                角色名取自台词前的标签（分镜表里写「小焰：你终于来了」就认「小焰」），
+                没列出来的角色用上面的默认音色。音色名填所选服务商那一套。
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {isShotVideoNode && (
         <div className="field">
           <label className="canvas-check">

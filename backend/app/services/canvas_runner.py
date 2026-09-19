@@ -659,8 +659,47 @@ async def _create_shot_video_tasks(
     manual = await _apply_manual_refs(db, data, [])
     batch = _new_batch_id(node)
 
+    # 逐镜对白（数字人）：每一镜的「台词」先合成成配音，再作为参考音附给这一镜的视频。
+    # 顺序不能反——「这一镜的台词读不读得完」只有拿到配音时长才知道，而配音便宜、视频贵。
+    dialogue_on = bool(data.get("shotDialogue"))
+    voice_map: dict[str, str] = {}
+    default_voice = ""
+    tts_key = ""
+    if dialogue_on:
+        voice_map, bad_lines = digital_human.parse_voice_map(data.get("shotVoices"))
+        if bad_lines:
+            raise ValueError(
+                "「逐镜对白」的角色音色表里有认不出的行："
+                + "、".join(f"「{x}」" for x in bad_lines)
+                + "。每行写成「角色=音色」（用冒号也行），例如「小焰=nova」；"
+                "角色名取自台词前的标签（「小焰：…」）"
+            )
+        default_voice = speech.sanitize_voice(data.get("shotVoice"))
+
+    # 先把「哪几镜要说话」挑出来：一句台词都没有时**立刻报错**，一个字的钱都别花
+    texts: dict[str, str] = {}
+    speakers: dict[str, str] = {}
+    if dialogue_on:
+        for shot in shots:
+            text, speaker = speech.dialogue_parts(shot)
+            if text:
+                texts[str(shot.no)] = text
+                speakers[str(shot.no)] = speaker
+        if not texts:
+            raise ValueError(
+                "「逐镜对白」开着，但这份分镜表里一句台词都没有。"
+                "可以先去「分镜」节点给每镜补一行「台词：…」，或者把这个开关关掉"
+            )
+        try:
+            tts_key = await speech_service.default_model_key(db)
+        except AdapterError as e:
+            # 配置不对要在开跑之前说（预览也会走到这里，于是确认弹窗里就能看到）
+            raise ValueError(f"「逐镜对白」要先把语音模型配好：{e}") from e
+
     tasks: list[Task] = []
     missing: list[str] = []
+    dialogue_skipped: list[str] = []
+    voiced = 0
     for idx, shot in enumerate(shots):
         first = by_shot.get(str(shot.no))
         if first is None:
@@ -710,6 +749,50 @@ async def _create_shot_video_tasks(
         if injected:
             params["injected_names"] = injected
 
+        # 逐镜对白：这一镜有台词就配出来挂上；配不了就**不派这一镜的视频**
+        if dialogue_on and str(shot.no) in texts:
+            if dry_run:
+                # 预览绝不花钱：只标出「这一镜会多做一次配音合成」，让预估的账说得清
+                params["shot_dialogue"] = True
+            else:
+                speaker = speakers.get(str(shot.no), "")
+                voice = digital_human.voice_for(speaker, voice_map, default_voice)
+                try:
+                    audio, meta = await speech_service.synthesize_to_asset(
+                        db,
+                        model_key=tts_key,
+                        text=texts[str(shot.no)],
+                        voice=voice,
+                        source="shot",
+                        name=f"对白 · 镜头{shot.no}",
+                        note=f"逐镜对白（说话人：{speaker or '未标注'}）",
+                    )
+                except AdapterError as e:
+                    dialogue_skipped.append(f"镜头{shot.no} 的配音没做成：{e}")
+                    continue
+                problem = digital_human.check_duration(
+                    requested=int(params.get("duration") or 0),
+                    audio_seconds=meta["seconds"],
+                    name=audio.name or texts[str(shot.no)],
+                    duration_hint="分镜表里这一镜的时长",
+                )
+                if problem:
+                    # 时长来自分镜表，我们**不替用户改**（改时长就是改钱）；
+                    # 这一镜不派任务，并在日志里逐条说明为什么
+                    dialogue_skipped.append(
+                        digital_human.skip_reason(
+                            shot_no=str(shot.no),
+                            audio_seconds=meta["seconds"],
+                            shot_seconds=int(params.get("duration") or 0),
+                        )
+                    )
+                    continue
+                params["audio_ref_asset_id"] = audio.id
+                params["dialogue_note"] = digital_human.attach_note(
+                    name=audio.name or "", seconds=meta["seconds"]
+                )
+                voiced += 1
+
         task = Task(
             kind="video",
             status="pending",
@@ -720,8 +803,6 @@ async def _create_shot_video_tasks(
             canvas_project_id=project_id,
             canvas_node_id=str(node["id"]),
         )
-        if not dry_run:
-            db.add(task)
         tasks.append(task)
 
     if not tasks:
@@ -735,6 +816,16 @@ async def _create_shot_video_tasks(
     if dry_run:
         return tasks
 
+    if dialogue_on and voiced == 0:
+        # 一镜都没配上：派出去就是拿视频钱换一串没声音的片子。宁可一条都不派。
+        raise ValueError(
+            "「逐镜对白」一镜都没配上，这一跑没有派任何视频任务："
+            + "；".join(dialogue_skipped)
+            + "。台词已经试配过了（配音资产在资产库里），改完分镜表再跑一次即可"
+        )
+
+    for t in tasks:
+        db.add(t)
     await db.commit()
     for t in tasks:
         await db.refresh(t)
@@ -750,6 +841,11 @@ async def _create_shot_video_tasks(
             total_found,
             len(tasks),
         )
+    if dialogue_on and not dry_run:
+        # 没配上的那几镜逐条列出来（用户看到成片少了一段，最想知道的就是为什么）
+        logger.warning("节点「%s」%s", label, digital_human.dialogue_summary(
+            voiced=voiced, skipped=dialogue_skipped
+        ))
     return tasks
 
 
@@ -1217,6 +1313,7 @@ async def preview_graph(project_id: int) -> dict:
         rerun: list[str] = []  # 已经有产物、这一跑会重做的节点
         blocked: list[str] = []  # 已经能判定必挂的节点
         billable = False  # 是否会真实调用外部模型（workflow 走本机 ComfyUI，不扣额度）
+        dialogue_calls = 0  # 逐镜对白会额外做几次语音合成（它们不出现在任务数里）
 
         for nid in order:
             node = nodes[nid]
@@ -1265,7 +1362,12 @@ async def preview_graph(project_id: int) -> dict:
                 for t in tasks:
                     by[t.kind] = by.get(t.kind, 0) + 1
                     by_kind[t.kind] = by_kind.get(t.kind, 0) + 1
-                    for aid in _referenced_asset_ids(read_task_params(t)):
+                    tp = read_task_params(t)
+                    # 逐镜对白会**额外**做语音合成：它不是任务，所以不在「调用次数」里，
+                    # 但它是真花钱的一次调用——不摆出来的话，这一跑的账就少算了
+                    if tp.get("shot_dialogue"):
+                        dialogue_calls += 1
+                    for aid in _referenced_asset_ids(tp):
                         hits[aid] = hits.get(aid, 0) + 1
                 item["kinds"] = by
 
@@ -1323,6 +1425,17 @@ async def preview_graph(project_id: int) -> dict:
                 "只想补跑某一步的话，用那个节点上的单独运行。",
             }
         )
+    if dialogue_calls:
+        # 语音合成是**额外**的一次付费调用（不占任务名额），必须单独说出来：
+        # 不说的话，用户看着「这一跑 5 次调用」的账，实际还会再花 5 次配音的钱
+        notes.append(
+            {
+                "level": "warning",
+                "text": f"逐镜对白：这一跑还会额外做 {dialogue_calls} 次语音合成"
+                "（按所选语音服务计费，不计在上面那个次数里），"
+                "再把每段配音分别附给对应镜头的视频。",
+            }
+        )
     if reused:
         top = "、".join(f"「{r['name']}」{r['count']} 次" for r in reused[:5])
         notes.append({"level": "info", "text": f"本次会复用已有素材：{top}。"})
@@ -1340,6 +1453,8 @@ async def preview_graph(project_id: int) -> dict:
             "pendingNodes": len(pending),
             "rerunNodes": len(rerun),
             "blockedNodes": len(blocked),
+            # 逐镜对白的额外语音合成次数（不属于「调用次数」那一栏，也还没排进任务）
+            "dialogueCalls": dialogue_calls,
         },
         "gate": state,
         "reused": reused,

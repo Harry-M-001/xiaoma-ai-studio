@@ -276,6 +276,15 @@ export interface CanvasNodeData {
   sampleAssetUrl?: string;
   /** 逐镜出视频：off（整段一个）/ each（每镜一段）/ chain（每镜一段并首尾相连） */
   shotVideo?: string;
+  /**
+   * 逐镜对白（数字人）：每一镜的「台词」先合成成配音，再作为参考音附给这一镜的视频。
+   * 只在逐镜出片时有意义（「整段一个视频」没有「这一镜的台词」这个概念）。
+   */
+  shotDialogue?: boolean;
+  /** 逐镜对白的默认音色；留空 = 用语音服务的默认音色 */
+  shotVoice?: string;
+  /** 逐镜对白的角色音色表：每行一条 `角色=音色`（认不出格式的行会报错，不静默忽略） */
+  shotVoices?: string;
   /** 同场景串联：每镜额外带上同场景上一镜的分镜图当参考 */
   sceneRefs?: boolean;
   /** 导演风格卡标识（空 = 不注入风格） */
@@ -496,6 +505,8 @@ export interface CanvasPreview {
     pendingNodes: number;
     rerunNodes: number;
     blockedNodes: number;
+    /** 逐镜对白会额外做几次语音合成（不计在 calls 里，但那是真花钱的调用） */
+    dialogueCalls?: number;
   };
   /** 预算闸：整图运行是否超过「调用上限」（超了要在弹窗里再确认一次） */
   gate: CanvasRunGate;

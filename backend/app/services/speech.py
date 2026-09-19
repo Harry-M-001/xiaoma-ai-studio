@@ -118,6 +118,22 @@ def strip_speaker(line: str) -> str:
     return _SPEAKER_PREFIX.sub("", line.strip(), count=1)
 
 
+def speaker_of(line: str) -> str:
+    """这一行是谁说的。认不出说话人时返回空串。
+
+    **与 `strip_speaker` 共用同一个正则**：它俩必须对同一批写法给出同一个答案。
+    各写一个正则迟早会漂移，而漂移的表现是「标签剥掉了、说话人却没认出来」——
+    于是配音悄悄用了默认音色，用户只会觉得「我明明给这个角色配了音色，怎么没生效」。
+
+    只认行首那个短标签（「小焰：」「【小焰】」），与剥标签的口径完全一致。
+    """
+    match = _SPEAKER_PREFIX.match(str(line or "").strip())
+    if not match:
+        return ""
+    # 剥掉包裹符号与冒号，标签内部的空格留着（「Xiao Yan:」是个人名）
+    return match.group(0).strip().strip("【[]】:： \t").strip()
+
+
 def _join_lines(lines: list[str]) -> str:
     """把各条台词接成一段：只在上一条**没有句末标点**时才补一个句号。
 
@@ -132,6 +148,15 @@ def _join_lines(lines: list[str]) -> str:
     return out
 
 
+def _speakable_lines(dialogue: object) -> list[str]:
+    """把「台词」那一栏切成真正要念的几句（**原文，未剥标签**）。
+
+    整段旁白（`narration_from_shots`）与逐镜对白（`dialogue_parts`）都从这里走，
+    免得两个入口对「哪些行算台词」各有一套说法。
+    """
+    return [p for p in str(dialogue or "").split("\n") if is_speakable(p)]
+
+
 def narration_from_shots(shots: Iterable[object]) -> tuple[str, int]:
     """把分镜表的台词拼成一段旁白，返回 (文本, 台词条数)。
 
@@ -142,13 +167,23 @@ def narration_from_shots(shots: Iterable[object]) -> tuple[str, int]:
     """
     lines: list[str] = []
     for shot in shots:
-        raw = str(getattr(shot, "dialogue", "") or "")
-        for part in raw.split("\n"):
-            if is_speakable(part):
-                text = strip_speaker(part)
-                if text:
-                    lines.append(text)
+        for part in _speakable_lines(getattr(shot, "dialogue", "")):
+            text = strip_speaker(part)
+            if text:
+                lines.append(text)
     return _join_lines(lines), len(lines)
+
+
+def dialogue_parts(shot: object) -> tuple[str, str]:
+    """这一镜的台词与它的说话人，返回 `(要念的文本, 说话人)`；没有台词返回 `("", "")`。
+
+    说话人取**第一条**可念台词上的标签。一镜里换好几个人说话是另一件事
+    （那要按句切分、每句一条音轨），不是这一版的范围——这一版一镜一条配音。
+    """
+    parts = _speakable_lines(getattr(shot, "dialogue", ""))
+    speaker = speaker_of(parts[0]) if parts else ""
+    lines = [t for t in (strip_speaker(p) for p in parts) if t]
+    return _join_lines(lines), speaker
 
 
 def asset_name(text: str) -> str:

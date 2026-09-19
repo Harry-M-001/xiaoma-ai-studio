@@ -128,6 +128,52 @@ def test_speaker_label_is_stripped_but_only_when_it_is_short():
     assert speech.strip_speaker(long_label) == long_label
 
 
+def test_the_speaker_is_read_from_the_same_labels_that_get_stripped():
+    """说话人与剥标签必须对同一批写法给出**同一个答案**。
+
+    它们各写一个正则迟早会漂移，而漂移的表现是「标签剥掉了、说话人却没认出来」——
+    于是配音悄悄用了默认音色，用户只会觉得「我明明给这个角色配了音色，怎么没生效」。
+    """
+    for line, want in (
+        ("小焰：你终于来了。", "小焰"),
+        ("【小焰】你终于来了。", "小焰"),
+        ("Xiao Yan: hello", "Xiao Yan"),
+        ("你终于来了。", ""),
+        ("这是一个非常非常长的标签名：内容", ""),
+    ):
+        assert speech.speaker_of(line) == want, f"「{line}」的说话人认成了 {speech.speaker_of(line)!r}"
+        # 认得出说话人 ⇔ 剥得掉标签，这两件事必须同时成立
+        assert bool(speech.speaker_of(line)) == (speech.strip_speaker(line) != line.strip()), line
+
+
+def test_dialogue_parts_reads_one_shots_line_and_speaker():
+    """逐镜对白要的就是这一镜的台词与说话人（一镜一条音轨）。"""
+    assert speech.dialogue_parts(_shot("1", "小焰：你终于来了。")) == ("你终于来了。", "小焰")
+    assert speech.dialogue_parts(_shot("2", "你终于来了")) == ("你终于来了", "")
+    # 一镜里两行台词拼成一条（中间按句末标点补句号）
+    assert speech.dialogue_parts(_shot("3", "他在门口站住\n她回过头"))[0] == "他在门口站住。她回过头"
+    # 占位与空行都不算台词
+    for empty in ("（无）", "无", "—", "", "   "):
+        assert speech.dialogue_parts(_shot("4", empty)) == ("", ""), empty
+
+
+def test_narration_and_per_shot_dialogue_agree_on_what_a_line_is():
+    """整段旁白与逐镜对白必须对「这一镜有没有台词」给出同一个答案。
+
+    不然会出现「样片里有旁白、逐镜出片却说没台词」这种最难解释的不一致。
+    """
+    sheet = "### 镜头1 | 中景 | 固定 | 3s\n- 画面：他抬手看表\n- 台词：（无）\n"
+    shots = storyboard_sheet.parse_storyboard(sheet)
+    assert speech.narration_from_shots(shots) == ("", 0)
+    assert speech.dialogue_parts(shots[0]) == ("", "")
+    # 两边的条数也要对得上
+    sheet2 = SHEET
+    shots2 = storyboard_sheet.parse_storyboard(sheet2)
+    _text_all, lines = speech.narration_from_shots(shots2)
+    per_shot = sum(1 for s in shots2 if speech.dialogue_parts(s)[0])
+    assert lines == per_shot, f"整段旁白数出 {lines} 句，逐镜数出 {per_shot} 句"
+
+
 def test_text_is_cleaned_without_rewriting():
     """不改写内容：标点、语气词都按用户写的念；只收拾空白。"""
     got = speech.sanitize_text("  黄昏的站台，\r\n\r\n\r\n最后一班车还没来。  \r\n")

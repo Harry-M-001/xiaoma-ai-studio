@@ -151,6 +151,7 @@ NODE_SCHEMAS: dict[str, dict] = {
             "ratio",
             "styleSelect",
             "shotVideo",
+            "shotDialogue",
             "sceneRefs",
             "shotLimit",
         ],
