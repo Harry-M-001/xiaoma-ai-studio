@@ -1246,6 +1246,25 @@ input, textarea, select { font-family: inherit; }
 .director-clip-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .director-clip-info .muted { font-size: 11px; }
 .director-clip-ops { display: flex; gap: 2px; flex-shrink: 0; }
+
+/* 转场与转场音效：三个控件一行，下面一行「成片会变短」的对账 */
+.director-transition { display: flex; flex-direction: column; gap: 10px; }
+.director-transition-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.director-transition-row .field { display: flex; flex-direction: column; gap: 4px; margin: 0; }
+.director-transition-row .field > span:first-child { font-size: 12px; font-weight: 600; color: var(--text-2); }
+.director-transition-row .field-hint { font-size: 11px; color: var(--text-3); line-height: 1.5; }
+/* 「成片会比硬切短」这条必须显眼，但不像报错那样刺眼——它是个提示，不是失败 */
+.director-merge-note {
+  font-size: 12.5px; line-height: 1.6; color: var(--text-2);
+  background: var(--surface-2); border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm); padding: 8px 10px;
+}
+.director-merge-note b { color: var(--primary); }
+.director-merge-warn {
+  font-size: 12.5px; line-height: 1.6; color: var(--danger);
+  background: var(--danger-soft); border-radius: var(--radius-sm); padding: 8px 10px;
+}
+.director-clips .btn-block { margin-top: 2px; }
 .director-merged { display: flex; flex-direction: column; gap: 10px; }
 .director-merged video { width: 100%; border-radius: var(--radius-sm); background: #000; }
 .task-error { background: var(--danger-soft); color: var(--danger); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 10px; word-break: break-word; }

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import shutil
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
@@ -14,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import SessionLocal
 from app.models import Asset
 from app.schemas import AssetOut, DirectorExtractIn, DirectorMergeIn, DirectorProbeIn, DirectorThumbnailIn
-from app.services import ffmpeg_service, image_size, storage
+from app.services import ffmpeg_service, image_size, storage, transitions
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +205,61 @@ async def extract_thumbnail(
     return _asset_out(asset)
 
 
+@router.get("/transitions")
+async def list_transitions() -> dict:
+    """转场与转场音效的可选项（给前端的两个下拉用）。
+
+    预设表在 `services/transitions.py` 里——那是唯一一份，前端不另抄一份：
+    抄一份的话，界面能选出一种后端不认识的转场，而报错要到合并时才知道。
+    """
+    return {
+        "presets": [dict(p) for p in transitions.PRESETS],
+        "sfx": [dict(p) for p in transitions.SFX_PRESETS],
+        "seconds": {
+            "min": transitions.MIN_SECONDS,
+            "max": transitions.MAX_SECONDS,
+            "default": transitions.DEFAULT_SECONDS,
+        },
+    }
+
+
+async def _clip_seconds(payload: DirectorMergeIn, db: AsyncSession) -> list[float | None]:
+    """逐段量时长。**转场位置就是按它算出来的**，所以量不出来就不能硬接
+    （见 `transitions.check_clips`），这里如实把 None 交回去让校验去拦。"""
+    out: list[float | None] = []
+    for aid in payload.asset_ids:
+        asset = await _get_video_asset(db, aid)
+        info = await ffmpeg_service.probe(storage.abs_path(asset.filename))
+        out.append(info.get("duration"))
+    return out
+
+
+@router.post("/merge/preview")
+async def merge_preview(payload: DirectorMergeIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """合并前先算账：成片多长、比硬切短多少、这样接行不行。
+
+    与 `/merge` 用**同一套口径**（`services/transitions.py`），不另算一份——
+    两处各算一次的话，「弹窗里写 13 秒、导出来 12.5 秒」是最难解释的那种不一致。
+
+    这一条是纯读：不写盘、不改资产、不动 ffmpeg 编码（只 ffprobe 量时长）。
+    """
+    durations = await _clip_seconds(payload, db)
+    key = transitions.sanitize_key(payload.transition)
+    seconds = transitions.sanitize_seconds(payload.transition_seconds)
+    usable = [d for d in durations if d]
+    return {
+        "transition": key,
+        "sfx": transitions.sanitize_sfx(payload.sfx),
+        "transitionSeconds": seconds,
+        "clipSeconds": [round(d, 2) if d else None for d in durations],
+        "hardCutSeconds": round(sum(usable), 2),
+        "totalSeconds": round(transitions.total_seconds(usable, key, seconds), 2),
+        # 成片会变短多少秒：xfade 是把相邻两段交叠，不是插一段新的
+        "shortfallSeconds": round(transitions.shortfall(usable, key, seconds), 2),
+        "problem": transitions.check_clips(durations, key, seconds),
+    }
+
+
 @router.post("/merge", response_model=AssetOut)
 async def merge_videos(
     payload: DirectorMergeIn, db: AsyncSession = Depends(get_db)
@@ -215,15 +272,44 @@ async def merge_videos(
         a = await _get_video_asset(db, aid)
         assets.append(a)
 
+    key = transitions.sanitize_key(payload.transition)
+    seconds = transitions.sanitize_seconds(payload.transition_seconds)
+
+    # 转场放不下 / 时长读不出来：这是**输入问题**，回 400 并说清哪一段，
+    # 而不是扔给 ffmpeg 报一句 Invalid duration（用户看不懂那句话）
+    durations = [await ffmpeg_service.probe(storage.abs_path(a.filename)) for a in assets]
+    problem = transitions.check_clips([d.get("duration") for d in durations], key, seconds)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    # 转场音效：内置合成 或 资产库里的一条音频（给了后者就以它为准）
+    sfx_path, sfx_label, sfx_tmp_dir = await _resolve_sfx(payload, key, seconds, db)
+
     try:
         out_path = await ffmpeg_service.merge_videos(
-            [storage.abs_path(a.filename) for a in assets]
+            [storage.abs_path(a.filename) for a in assets],
+            transition=key,
+            transition_seconds=seconds,
+            sfx_path=sfx_path,
         )
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if sfx_tmp_dir is not None:
+            # 合成音效只是这次合并的中间产物，用完就删（它不该堆在 storage/tmp 里）
+            shutil.rmtree(sfx_tmp_dir, ignore_errors=True)
 
     rel = ffmpeg_service._save_asset_file(out_path, "mp4")
-    total = sum(a.duration or 0 for a in assets)
+    # 成片时长**以量出来的为准**，不按「各段相加」估：加了转场之后确实会短一截，
+    # 估算值万一和实际差一点，下游（导演台列表、以后的对账）就会一直差着
+    real = (await ffmpeg_service.probe(out_path)).get("duration")
+    total = real or transitions.total_seconds(
+        [d.get("duration") or 0 for d in durations], key, seconds
+    )
+    label = transitions.preset(key)["label"]
+    note = f"{len(assets)} 段 · 转场 {label} {seconds:g}s"
+    if sfx_label:
+        note += f" · 音效 {sfx_label}"
     asset = Asset(
         kind="video",
         filename=rel,
@@ -233,10 +319,47 @@ async def merge_videos(
         source="merged",
         width=assets[0].width,
         height=assets[0].height,
-        duration=int(total) if total else None,
-        prompt=" / ".join(a.original_name for a in assets)[:2000],
+        duration=int(round(total)) if total else None,
+        # 来路写进 prompt：资产库里一眼能看出这条片子是怎么接的（和样片同一个思路）
+        prompt=f"{note} ｜ " + " / ".join(a.original_name for a in assets)[:1800],
     )
     db.add(asset)
     await db.commit()
     await db.refresh(asset)
     return _asset_out(asset)
+
+
+async def _resolve_sfx(
+    payload: DirectorMergeIn, key: str, seconds: float, db: AsyncSession
+) -> tuple[Path | None, str, Path | None]:
+    """把「转场音效」解析成一个要混进去的音频文件。
+
+    返回 `(文件路径或 None, 用于落库说明的标签, 用完要删的临时目录或 None)`。
+    两条路：**选资产库里的音频**（用户自己的素材）优先；否则用内置配方现场合成。
+
+    选错资产 / 文件不在了都直接报错，不静默降级成「没有音效」——
+    那样用户会以为音效生效了，听不出来才发现。
+    """
+    if transitions.is_cut(key):
+        return None, "", None
+
+    if payload.sfx_asset_id is not None:
+        picked = await db.get(Asset, payload.sfx_asset_id)
+        if picked is None:
+            raise HTTPException(status_code=400, detail="选的那条音效资产已经不在了，回资产库另挑一条")
+        if picked.kind != "audio":
+            raise HTTPException(status_code=400, detail="转场音效要选一条「音频」资产")
+        path = storage.abs_path(picked.filename)
+        if not path.exists():
+            raise HTTPException(status_code=400, detail="选的那条音效文件不在了，换一条再试")
+        return path, (picked.name or picked.original_name), None
+
+    kind = transitions.sanitize_sfx(payload.sfx)
+    if not kind:
+        return None, "", None
+    try:
+        wav = await ffmpeg_service.synth_sfx(kind, transitions.sfx_seconds(seconds))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    label = next(p["label"] for p in transitions.SFX_PRESETS if p["key"] == kind)
+    return wav, label, wav.parent

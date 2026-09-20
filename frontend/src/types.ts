@@ -146,6 +146,59 @@ export interface Asset {
   created_at: string;
 }
 
+// ---------- 导演台：转场与转场音效 ----------
+
+/**
+ * 转场预设。`xfade` 是发给 ffmpeg 的滤镜名，与 `key` **不一定同名**
+ * （「过黑」的 key 是 `fade`、滤镜名是 `fadeblack`），所以两个都留着。
+ */
+export interface TransitionPreset {
+  key: string;
+  label: string;
+  xfade: string;
+  hint: string;
+}
+
+/** 转场音效预设。key 为空表示不加音效（`hint` 里说明） */
+export interface TransitionSfxPreset {
+  key: string;
+  label: string;
+  hint: string;
+}
+
+export interface TransitionOptions {
+  presets: TransitionPreset[];
+  sfx: TransitionSfxPreset[];
+  seconds: { min: number; max: number; default: number };
+}
+
+/**
+ * 合并前的算账结果。**成片会比硬切短**（转场是把相邻两段交叠，不是插一段新的），
+ * 所以这两个数必须摆出来，而不是等用户拿到片子发现短了再去猜。
+ */
+export interface MergePreview {
+  transition: string;
+  sfx: string;
+  transitionSeconds: number;
+  /** 逐段时长；读不出来的那一段是 null */
+  clipSeconds: (number | null)[];
+  hardCutSeconds: number;
+  totalSeconds: number;
+  shortfallSeconds: number;
+  /** 非空 = 这样接不行，里面是一句可直接展示的理由 */
+  problem: string;
+}
+
+export interface MergeArgs {
+  assetIds: number[];
+  transition?: string;
+  transitionSeconds?: number;
+  /** 内置配方（与 `sfxAssetId` 二选一） */
+  sfx?: string;
+  /** 用资产库里自己的一条音频当音效（优先于 `sfx`） */
+  sfxAssetId?: number | null;
+}
+
 // ---------- 配音（语音合成） ----------
 
 /** 音色快捷选项。只是快捷选项、不是白名单：界面允许直接手填别家的音色 id */

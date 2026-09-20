@@ -193,6 +193,14 @@ class DirectorThumbnailIn(BaseModel):
 
 class DirectorMergeIn(BaseModel):
     asset_ids: list[int] = Field(..., min_length=2)
+    # 转场：cut（默认，不加滤镜、走原来的流拷贝）/ dissolve / fade / flash / wipe / circle
+    transition: str = "cut"
+    # 转场时长（秒）。不传用默认；超范围由服务端夹到边界
+    transition_seconds: float | None = None
+    # 转场音效：内置合成音效的 key（whoosh / riser / impact / tick）
+    sfx: str = ""
+    # 或者直接用资产库里的一条音频当音效；给了它就以它为准（内置 key 忽略）
+    sfx_asset_id: int | None = None
 
 
 class VideoGenerateIn(BaseModel):

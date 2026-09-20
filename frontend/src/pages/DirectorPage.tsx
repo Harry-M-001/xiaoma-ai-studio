@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { setDraftFirstFrame } from "../promptDraft";
-import type { Asset } from "../types";
+import type { Asset, MergeArgs, MergePreview, TransitionOptions } from "../types";
 import { downloadUrl } from "../components/TaskCard";
 import { Empty, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -26,6 +26,13 @@ const DirectorStudio3D = lazy(() => import("../director3d/DirectorStudio3D"));
 
 /** 本机场景的作用域。3D 预演暂时是「一台机器一份草稿」，换机器用导出/导入 JSON */
 const SCENE_SCOPE = "local";
+
+/**
+ * 转场音效下拉里的取值前缀。一个下拉里混着「内置配方」与「我自己的音频」两来源，
+ * 得能分开——`""` 表示不加音效。
+ */
+const BUILTIN_PREFIX = "builtin:";
+const ASSET_PREFIX = "asset:";
 
 function fmt(t: number): string {
   if (!Number.isFinite(t)) return "--:--";
@@ -56,13 +63,77 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   // 正在截首帧的片段 id（AI 改造要先截一帧才能交给视频页）
   const [remaking, setRemaking] = useState<number | null>(null);
 
+  // ---- 转场与转场音效 ----
+  // 预设表从后端拿：`services/transitions.py` 是唯一一份，前端不另抄一张——
+  // 抄一份就可能出现「界面能选出一种后端不认识的转场」，而报错要到合并时才知道。
+  const [trOpts, setTrOpts] = useState<TransitionOptions | null>(null);
+  const [transition, setTransition] = useState("cut");
+  const [trSeconds, setTrSeconds] = useState(0.5);
+  /** "" = 不加；"builtin:whoosh" = 内置配方；"asset:12" = 资产库里自己的一条音频 */
+  const [sfxPick, setSfxPick] = useState("");
+  const [audioAssets, setAudioAssets] = useState<Asset[]>([]);
+  /** 合并前的算账结果（成片多长、比硬切短多少、这样接行不行） */
+  const [preview, setPreview] = useState<MergePreview | null>(null);
+
   useEffect(() => {
     (async () => {
       const [status, vids] = await Promise.all([api.ffmpegStatus(), api.listDirectorVideos()]);
       setFfmpeg(status);
       setVideos(vids);
     })();
+    api
+      .transitionOptions()
+      .then((o) => {
+        setTrOpts(o);
+        setTrSeconds(o.seconds.default);
+      })
+      .catch(() => {
+        /* 预设拉不到也不挡着粗剪：默认硬切本来就够用 */
+      });
+    api
+      .listAssets({ kind: "audio", limit: 60 })
+      .then((r) => setAudioAssets(r.items))
+      .catch(() => setAudioAssets([]));
   }, []);
+
+  const clipIds = clips.map((c) => c.id);
+
+  /**
+   * 把下拉的取值翻成接口参数。两条路：内置配方（本机现场合成）与
+   * **资产库里自己的一条音频**——后者优先，与后端 `_resolve_sfx` 的顺序一致。
+   */
+  const sfxArgs = ((): Pick<MergeArgs, "sfx" | "sfxAssetId"> => {
+    if (sfxPick.startsWith(BUILTIN_PREFIX)) return { sfx: sfxPick.slice(BUILTIN_PREFIX.length) };
+    if (sfxPick.startsWith(ASSET_PREFIX)) return { sfxAssetId: Number(sfxPick.slice(ASSET_PREFIX.length)) };
+    return {};
+  })();
+
+  /**
+   * 合并前先算账：**成片会比硬切短**（`xfade` 是把相邻两段交叠，不是插一段新的——
+   * 三段各 5 秒、转场 1 秒，成片 13 秒而不是 15 秒）。这件事必须在点合并**之前**
+   * 说出来，而不是等用户拿到片子发现短了再去猜。接口是纯读（只 ffprobe 量时长），
+   * 所以每次改动都可以重算。
+   */
+  useEffect(() => {
+    if (clipIds.length < 2) {
+      setPreview(null);
+      return;
+    }
+    let alive = true;
+    api
+      .mergePreview({ assetIds: clipIds, transition, transitionSeconds: trSeconds, ...sfxArgs })
+      .then((p) => {
+        if (alive) setPreview(p);
+      })
+      .catch(() => {
+        /* 算不出来就不显示这一行，别把粗剪卡住 */
+        if (alive) setPreview(null);
+      });
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clipIds.join(","), transition, trSeconds, sfxPick]);
 
   const loadVideos = async () => setVideos(await api.listDirectorVideos());
 
@@ -148,10 +219,16 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   };
 
   const doMerge = async () => {
-    if (clips.length < 2) return;
+    // 放不下时按钮也是灰的，这里再拦一次：按钮状态可能还没跟上最后一次改动
+    if (clips.length < 2 || preview?.problem) return;
     setMerging(true);
     try {
-      const out = await api.mergeVideos(clips.map((c) => c.id));
+      const out = await api.mergeVideos({
+        assetIds: clipIds,
+        transition,
+        transitionSeconds: trSeconds,
+        ...sfxArgs,
+      });
       setMerged(out);
       await loadVideos();
       toast.success("合并完成，成片已存入资产库");
@@ -164,6 +241,11 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
 
   const totalDur = clips.reduce((s, c) => s + (c.duration ?? 0), 0);
   const canExtract = current != null && inPoint != null && !extracting;
+  const isCut = transition === "cut";
+  const curPreset = trOpts?.presets.find((p) => p.key === transition) ?? null;
+  const curSfx =
+    trOpts?.sfx.find((s) => s.key === (sfxPick.startsWith(BUILTIN_PREFIX) ? sfxPick.slice(BUILTIN_PREFIX.length) : "")) ??
+    null;
 
   return (
     <>
@@ -340,10 +422,97 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
               </div>
             )}
             {clips.length >= 2 && (
-              <button className="btn btn-primary btn-block" disabled={merging} onClick={doMerge}>
-                {merging ? <Spinner light /> : <Clapperboard size={15} />}
-                {merging ? "合并中…" : `合并导出（${clips.length} 段）`}
-              </button>
+              <div className="director-transition">
+                <div className="director-transition-row">
+                  <label className="field">
+                    <span>片段之间怎么接</span>
+                    <select
+                      className="select"
+                      value={transition}
+                      onChange={(e) => setTransition(e.target.value)}
+                    >
+                      {(trOpts?.presets ?? []).map((p) => (
+                        <option key={p.key} value={p.key}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                    {curPreset && <span className="field-hint">{curPreset.hint}</span>}
+                  </label>
+                  <label className="field">
+                    <span>转场时长（秒）</span>
+                    <input
+                      className="input"
+                      type="number"
+                      step={0.1}
+                      min={trOpts?.seconds.min ?? 0.2}
+                      max={trOpts?.seconds.max ?? 2}
+                      value={trSeconds}
+                      disabled={isCut}
+                      onChange={(e) => setTrSeconds(Number(e.target.value))}
+                    />
+                    <span className="field-hint">
+                      {isCut
+                        ? "硬切不用这个"
+                        : `可取 ${trOpts?.seconds.min ?? 0.2}–${trOpts?.seconds.max ?? 2} 秒`}
+                    </span>
+                  </label>
+                  <label className="field">
+                    <span>转场处音效</span>
+                    <select
+                      className="select"
+                      value={sfxPick}
+                      disabled={isCut}
+                      onChange={(e) => setSfxPick(e.target.value)}
+                    >
+                      <optgroup label="内置音效（本机合成，不下载素材）">
+                        {(trOpts?.sfx ?? []).map((s) => (
+                          <option key={s.key || "none"} value={s.key ? `${BUILTIN_PREFIX}${s.key}` : ""}>
+                            {s.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      {audioAssets.length > 0 && (
+                        <optgroup label="用资产库里我自己的音频">
+                          {audioAssets.map((a) => (
+                            <option key={a.id} value={`${ASSET_PREFIX}${a.id}`}>
+                              {a.name || a.original_name}
+                              {a.duration ? `（${a.duration} 秒）` : ""}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                    <span className="field-hint">
+                      {isCut
+                        ? "硬切没有转场，也就没有转场音效"
+                        : sfxPick.startsWith(ASSET_PREFIX)
+                          ? "用你选的那条音频，长度以片子为准自动截断"
+                          : (curSfx?.hint ?? "")}
+                    </span>
+                  </label>
+                </div>
+
+                {preview?.problem ? (
+                  <div className="director-merge-warn">{preview.problem}</div>
+                ) : preview ? (
+                  <div className="director-merge-note">
+                    成片约 <b>{preview.totalSeconds}s</b>
+                    {preview.shortfallSeconds > 0
+                      ? `——比硬切短 ${preview.shortfallSeconds}s（转场是把相邻两段交叠，不是插一段新的）`
+                      : "（硬切，各段时长直接相加）"}
+                  </div>
+                ) : null}
+
+                <button
+                  className="btn btn-primary btn-block"
+                  disabled={merging || Boolean(preview?.problem)}
+                  onClick={doMerge}
+                >
+                  {merging ? <Spinner light /> : <Clapperboard size={15} />}
+                  {merging ? "合并中…" : `合并导出（${clips.length} 段）`}
+                </button>
+              </div>
             )}
           </div>
 

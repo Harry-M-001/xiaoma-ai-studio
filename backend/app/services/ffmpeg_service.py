@@ -20,7 +20,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from app.services import animatic, storage
+from app.services import animatic, storage, transitions
 
 logger = logging.getLogger(__name__)
 
@@ -198,14 +198,40 @@ async def probe(path: Path) -> dict:
         return {}
     streams = data.get("streams", [])
     video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     fmt = data.get("format", {})
     duration = fmt.get("duration") or video.get("duration")
+    # 帧率：转场（xfade）要求两条流帧率一致，混杂素材要先归一化，所以这里得报出来。
+    # `avg_frame_rate` 是「分子/分母」形式的字符串，0/0 表示读不出来
+    fps = None
+    rate = str(video.get("avg_frame_rate") or "")
+    num, _, den = rate.partition("/")
+    try:
+        if float(den):
+            fps = round(float(num) / float(den), 3)
+    except ValueError:
+        fps = None
     return {
         "duration": float(duration) if duration else None,
         "width": video.get("width"),
         "height": video.get("height"),
         "codec": video.get("codec_name"),
+        # 有没有音轨：合并时决定「要不要给它补一条静音」（见 _merge_with_transition）
+        "has_audio": audio is not None,
+        "has_video": bool(video),
+        "fps": fps,
+        # 音轨的编码参数：`_copy_concat_blocker` 靠它判断两段能不能直接接包
+        "audio_codec": (audio or {}).get("codec_name") if audio else None,
+        "audio_rate": _as_int((audio or {}).get("sample_rate")) if audio else None,
+        "audio_channels": (audio or {}).get("channels") if audio else None,
     }
+
+
+def _as_int(raw: object) -> int | None:
+    try:
+        return int(str(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def _out_path(ext: str) -> Path:
@@ -275,12 +301,123 @@ async def extract_frame(src: Path, t: float) -> Path:
     return out
 
 
-async def merge_videos(paths: list[Path]) -> Path:
-    """按顺序合并多个视频。优先 concat + 流拷贝；失败回退 concat 滤镜重编码。"""
+# ---------------------------------------------------------------- 转场与音效
+
+_TIMEOUT_SFX = 120
+# 统一帧率：xfade 要求两条流帧率一致。素材来自各家模型，帧率什么都有，
+# 所以一律归一到 30（这是本项目所有生成视频的常见档位，重采样损失可以忽略）
+_MERGE_FPS = 30
+
+
+async def synth_sfx(kind: str, seconds: float) -> Path:
+    """现场合成一小段音效，返回临时 wav 路径。
+
+    **不下载任何素材**：配方就是几条 lavfi 表达式（见 `transitions.SFX_RECIPES`），
+    所以没有授权问题、没有仓库体积问题、换台机器出来的是同一段声音，
+    也不需要联网。想用真正的素材（比如自己收的 CC0 音效），走「选一条资产库音频」
+    那条路——接口上是 `sfx_asset_id`，混音这条链路完全一样。
+    """
+    recipe = transitions.SFX_RECIPES.get(kind)
+    if recipe is None:
+        raise RuntimeError(f"没有这种音效：{kind}")
+    source, extra = recipe
+    ffmpeg, _ = await _resolve_binaries()
+    out = _new_workdir("sfx") / f"sfx-{kind}.wav"
+
+    # 尾巴一定要淡出：截断的正弦听起来是「咔」的一声，比没有音效更糟
+    fade_out = f"afade=t=out:st={max(0.0, seconds - 0.18):.3f}:d=0.18"
+    filters = ",".join(f for f in (extra, fade_out) if f)
+    ok, err = await _run(
+        [
+            ffmpeg, "-y",
+            "-f", "lavfi", "-i", source,
+            "-t", f"{seconds:.3f}",
+            "-af", filters,
+            "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+            str(out),
+        ],
+        _TIMEOUT_SFX,
+    )
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError(f"合成音效失败：{err}")
+    return out
+
+
+async def merge_videos(
+    paths: list[Path],
+    *,
+    transition: str = "cut",
+    transition_seconds: object = None,
+    sfx_path: Path | None = None,
+) -> Path:
+    """按顺序合并多个视频。
+
+    `transition` 留空 / `cut` 时是硬切，有两条路：**素材同构**时用 concat demuxer +
+    流拷贝（最快、不重编码）；**不同构**时逐段归一化后重编码（见 `_merge_normalized`）。
+    选了真正的转场则走 `_merge_with_transition`（也要重编码，慢一些）。
+
+    `sfx_path` 是「转场处要贴的音效」——可以是我们现场合成的，也可以是用户从资产库里
+    挑的一条音频；这里只认文件，谁来提供都一样。
+    """
+    key = transitions.sanitize_key(transition)
+    if not transitions.is_cut(key):
+        return await _merge_with_transition(
+            paths,
+            transition=key,
+            seconds=transitions.sanitize_seconds(transition_seconds),
+            sfx_path=sfx_path,
+        )
+
+    blocker = await _copy_concat_blocker(paths)
+    if blocker is None:
+        copied = await _merge_by_copy(paths)
+        if copied is not None:
+            return copied
+        logger.info("流拷贝直拼失败，改用重编码合并")
+    else:
+        logger.info("素材不同构（%s），不走流拷贝直拼，改用重编码合并", blocker)
+    return await _merge_normalized(paths)
+
+
+async def _copy_concat_blocker(paths: list[Path]) -> str | None:
+    """能不能用 concat demuxer + 流拷贝直拼。能则 `None`，不能则一句原因（进日志）。
+
+    判据是**同构**：宽高 / 视频编码 / 帧率 / 有没有音轨 / 音轨编码参数全都要一致。
+
+    为什么非要拦这一下：concat demuxer 是把各段的包**直接接起来**，不做任何转换。
+    素材但凡不一致，接出来的片子时间戳就是错的——命令**照样成功返回**，于是
+    「三段共 15 秒的素材，导出成 18.75 秒、音轨和画面对不上」这种结果是悄悄给出去的，
+    不报错、也不会有任何提示。多编一遍画面，比这个强。
+
+    读不出这些信息的（老文件、损坏文件）也一律不放行。
+    """
+    if len(paths) < 2:
+        # 只有一段就没什么可「接」的，直拼必然是安全的（比如只有一镜的样片）
+        return None
+    infos = [await probe(p) for p in paths]
+    first = infos[0]
+    if not first.get("has_video") or not first.get("width") or not first.get("height"):
+        return "第一段的视频信息读不出来"
+    keys = (
+        "width", "height", "codec", "fps",
+        "has_audio", "audio_codec", "audio_rate", "audio_channels",
+    )
+    for i, info in enumerate(infos[1:], 2):
+        if not info.get("has_video"):
+            return f"第 {i} 段没有视频流"
+        for k in keys:
+            if info.get(k) != first.get(k):
+                return f"第 {i} 段的 {k} 与第一段不同（{first.get(k)} vs {info.get(k)}）"
+    return None
+
+
+async def _merge_by_copy(paths: list[Path]) -> Path | None:
+    """concat demuxer + 流拷贝直拼。**只在素材同构时可用**（调用方先问 `_copy_concat_blocker`）。
+
+    失败回 `None`（交给重编码那条路），不在这里自己往下试别的写法。
+    """
     ffmpeg, _ = await _resolve_binaries()
     out = _out_path("mp4")
-
-    # 方案一：concat demuxer + copy（同源片段最快）
     list_file = out.with_suffix(".txt")
     list_file.write_text(
         "\n".join(f"file '{p.as_posix()}'" for p in paths), encoding="utf-8"
@@ -292,45 +429,215 @@ async def merge_videos(paths: list[Path]) -> Path:
         )
         if ok and out.exists() and out.stat().st_size > 0:
             return out
-        logger.info("流拷贝合并失败，回退重编码：%s", err)
-
-        # 方案二：concat 滤镜（带音轨）
-        inputs: list[str] = []
-        for p in paths:
-            inputs.extend(["-i", str(p)])
-        n = len(paths)
-        parts = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-        ok, err = await _run(
-            [
-                ffmpeg, "-y", *inputs,
-                "-filter_complex", f"{parts}concat=n={n}:v=1:a=1",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "aac",
-                str(out),
-            ],
-            _TIMEOUT_MERGE,
-        )
-        if ok and out.exists() and out.stat().st_size > 0:
-            return out
-        logger.info("带音轨合并失败，尝试丢弃音轨：%s", err)
-
-        # 方案三：无音轨素材
-        parts = "".join(f"[{i}:v]" for i in range(n))
-        ok, err = await _run(
-            [
-                ffmpeg, "-y", *inputs,
-                "-filter_complex", f"{parts}concat=n={n}:v=1:a=0",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                "-an",
-                str(out),
-            ],
-            _TIMEOUT_MERGE,
-        )
-        if not ok:
-            raise RuntimeError(f"合并视频失败：{err}")
-        return out
+        logger.info("流拷贝合并失败：%s", err)
+        return None
     finally:
         list_file.unlink(missing_ok=True)
+
+
+async def _merge_normalized(paths: list[Path]) -> Path:
+    """不同构素材的硬切合并：逐段归一化再 `concat`。
+
+    为什么不再沿用老的「concat 滤镜三级回退」：那一套在**有的段有音轨、有的段没有**
+    时，第二级必然失败，然后退到第三级「整条丢掉音轨」——把本来有声音的段也一起弄哑，
+    而且不报错。这里给缺音轨的段补一条等长静音，音轨就保住了。
+
+    归一化本身与转场那条链**共用同一个 `_normalized_graph`**：两处各写一遍的话，
+    迟早出现「转场那条链对得上、硬切那条链偏了」这种最难查的偏差。
+    """
+    ffmpeg, _ = await _resolve_binaries()
+    out = _out_path("mp4")
+    inputs, chains, vlabels, alabels, lens, _infos, _size = await _normalized_graph(paths)
+    n = len(paths)
+    chains.append(
+        "".join(f"[{vlabels[i]}][{alabels[i]}]" for i in range(n))
+        + f"concat=n={n}:v=1:a=1[vout][aout]"
+    )
+    ok, err = await _run(
+        [
+            ffmpeg, "-y", *inputs,
+            "-filter_complex", ";".join(chains),
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(out),
+        ],
+        _TIMEOUT_MERGE,
+    )
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError(f"合并视频失败：{err}")
+    logger.info("重编码合并完成：%s 段，成片约 %.2f 秒", n, sum(lens))
+    return out
+
+
+async def _normalized_graph(
+    paths: list[Path],
+) -> tuple[list[str], list[str], list[str], list[str], list[float], list[dict], tuple[int, int]]:
+    """把 N 段素材归一化成「尺寸 / 帧率 / 像素格式一致，且每条都有一条等长音轨」的流。
+
+    返回 `(ffmpeg 附加输入, 已建好的滤镜链, 视频标签, 音频标签, 各段时长, probe 结果, 目标尺寸)`。
+    调用方接着往上叠自己的链（`concat` 或 `xfade`），最后 `";".join` 成 filter_complex。
+
+    这里有四个「不这么做就会坏」的地方：
+
+    1. **每段先归一化**（尺寸 / 帧率 / 像素格式 / SAR）：生成出来的素材什么尺寸什么帧率
+       都有。`xfade` 要求两条流完全一致；`concat` 滤镜也要求参数相同，否则就是
+       `Input link ... parameters do not match`，或者画面抖一下。
+    2. **没有音轨的片段补一条等长静音**：不补的话 `acrossfade` 直接失败，`concat=v=1:a=1`
+       也一样；退而求其次「整条丢掉音轨」则会把**有声音的片段也弄哑**，那是最坏的结果。
+    3. **音轨裁到与画面等长再补静音**：素材的音轨常比画面短零点几秒，不补齐的话每接一次
+       就累积一点偏移，越接越不对口。
+    4. **`setpts` 重置时间戳**：`xfade` / `acrossfade` 都按 PTS 定位，素材自带的时间戳
+       会让转场位置整体偏掉。
+
+    目标尺寸以第一段为准；宽高取偶数（libx264 的 yuv420p 要求偶数，奇数会直接失败）。
+    """
+    infos = [await probe(p) for p in paths]
+    durations = [i.get("duration") for i in infos]
+    bad = [i for i, d in enumerate(durations) if not d or float(d) <= 0]
+    if bad:
+        i = bad[0]
+        raise RuntimeError(
+            f"读不出第 {i + 1} 段的时长，没法对齐各段。"
+            "这一段可能是还没下载完或编码不完整——先确认它能正常播放再合并"
+        )
+    lens = [float(d) for d in durations]  # type: ignore[arg-type]
+
+    width = int(infos[0].get("width") or 1280)
+    height = int(infos[0].get("height") or 720)
+    width -= width % 2
+    height -= height % 2
+
+    inputs: list[str] = []
+    for p in paths:
+        inputs += ["-i", str(p)]
+    silent_idx: dict[int, int] = {}
+    for i, info in enumerate(infos):
+        if not info.get("has_audio"):
+            silent_idx[i] = len(paths) + len(silent_idx)
+            inputs += ["-f", "lavfi", "-t", f"{lens[i]:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+
+    chains: list[str] = []
+    for i, info in enumerate(infos):
+        chains.append(
+            f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={_MERGE_FPS},"
+            f"format=yuv420p,setpts=PTS-STARTPTS[v{i}]"
+        )
+        src = f"{i}:a" if info.get("has_audio") else f"{silent_idx[i]}:a"
+        chains.append(
+            f"[{src}]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            f"apad,atrim=0:{lens[i]:.3f},asetpts=N/SR/TB[a{i}]"
+        )
+
+    n = len(paths)
+    return (
+        inputs,
+        chains,
+        [f"v{i}" for i in range(n)],
+        [f"a{i}" for i in range(n)],
+        lens,
+        infos,
+        (width, height),
+    )
+
+
+async def _merge_with_transition(
+    paths: list[Path],
+    *,
+    transition: str,
+    seconds: float,
+    sfx_path: Path | None = None,
+) -> Path:
+    """带转场地合并：`xfade` 接画面、`acrossfade` 接声音，可选在转场处贴一声音效。
+
+    素材先过 `_normalized_graph`（归一化 / 补静音 / 对齐音轨长度 / 重置时间戳，
+    四个坑都写在那里），这里只负责把转场叠上去。
+
+    `transition` 收的是**预设 key**（`transitions.PRESETS` 里的那一列），不是 `xfade`
+    的滤镜名——两者常常不一样（「过黑」的 key 是 `fade`、滤镜名是 `fadeblack`；
+    `wipe` 压根没有同名的滤镜）。直接拿 key 当滤镜名会掉进两种坑：名字碰巧存在
+    （`fade` 就是），于是「过黑」悄悄变成普通叠化，不报错；名字不存在（`wipe`），
+    ffmpeg 才回一句看不懂的错。所以这里**必须**回过预设表取。
+    """
+    xfade_name = transitions.preset(transition)["xfade"]
+    inputs, chains, vlabels, alabels, lens, _infos, _size = await _normalized_graph(paths)
+    problem = transitions.check_clips(lens, transition, seconds)
+    if problem:
+        raise RuntimeError(problem)
+
+    ffmpeg, _ = await _resolve_binaries()
+    out = _out_path("mp4")
+
+    # 音效在这条链上是**最后**一个输入（前面是各段素材 + 补的静音）
+    sfx_idx = inputs.count("-i")
+    if sfx_path is not None:
+        inputs += ["-i", str(sfx_path)]
+
+    # 画面：xfade 累进。offset = 「下一段从当前合成结果的第几秒开始叠进来」
+    current_v = vlabels[0]
+    running = lens[0]
+    points: list[float] = []
+    for i in range(1, len(paths)):
+        offset = running - seconds
+        points.append(offset)
+        label = f"x{i}"
+        chains.append(
+            f"[{current_v}][{vlabels[i]}]xfade=transition={xfade_name}"
+            f":duration={seconds}:offset={offset:.3f}[{label}]"
+        )
+        current_v = label
+        running = running + lens[i] - seconds
+
+    # 声音：acrossfade 链。它的总长同样等于 sum - (n-1)*d，所以与画面天然同步
+    current_a = alabels[0]
+    for i in range(1, len(paths)):
+        label = f"ax{i}"
+        chains.append(
+            f"[{current_a}][{alabels[i]}]acrossfade=d={seconds}:c1=tri:c2=tri[{label}]"
+        )
+        current_a = label
+
+    map_audio = current_a
+    if sfx_path is not None and points:
+        # 每个转场点贴一份：asplit 复制 n 份 → 各自 adelay 到转场起点 → amix 混回主音轨。
+        # `duration=first` 让混音结果以主音轨为准（音效的尾巴不会把成片拖长）
+        n = len(points)
+        chains.append(
+            f"[{sfx_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            f"asplit={n}" + "".join(f"[s{k}]" for k in range(n))
+        )
+        for k, at in enumerate(points):
+            ms = max(0, int(round(at * 1000)))
+            chains.append(f"[s{k}]adelay={ms}|{ms}[d{k}]")
+        chains.append(
+            f"[{current_a}]" + "".join(f"[d{k}]" for k in range(n))
+            + f"amix=inputs={n + 1}:duration=first:normalize=0[aout]"
+        )
+        map_audio = "aout"
+
+    ok, err = await _run(
+        [
+            ffmpeg, "-y", *inputs,
+            "-filter_complex", ";".join(chains),
+            "-map", f"[{current_v}]", "-map", f"[{map_audio}]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(out),
+        ],
+        _TIMEOUT_MERGE,
+    )
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError(f"加转场合并失败：{err}")
+    logger.info(
+        "带转场合并完成：%s 段 / 转场 %s(%s) %.2fs，成片约 %.2f 秒（硬切会是 %.2f 秒）",
+        len(paths), transition, xfade_name, seconds, running, sum(lens),
+    )
+    return out
 
 
 # ---------------------------------------------------------------- 音频
@@ -410,13 +717,14 @@ async def mux_audio(video: Path, audio: Path) -> Path:
 # ---------------------------------------------------------------- 静图缓动样片
 
 
-def _new_workdir() -> Path:
-    """给一次样片渲染开一个临时目录（在 storage 内，结束时整体删掉）。
+def _new_workdir(prefix: str = "animatic") -> Path:
+    """给一次本地渲染开一个临时目录（在 storage 内，结束时整体删掉）。
 
     放在 storage 内是为了守住本模块「文件全落在 storage 目录内」的约定；
-    目录名带 uuid，两次渲染不会互相踩。
+    目录名带 uuid，两次渲染不会互相踩。`prefix` 只是给排查时看的东西起个名
+    （样片是 animatic、转场音效是 sfx）。
     """
-    work = settings_storage_dir() / "tmp" / f"animatic-{uuid.uuid4().hex[:12]}"
+    work = settings_storage_dir() / "tmp" / f"{prefix}-{uuid.uuid4().hex[:12]}"
     work.mkdir(parents=True, exist_ok=True)
     return work
 

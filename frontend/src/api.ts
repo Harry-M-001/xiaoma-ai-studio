@@ -15,6 +15,8 @@ import type {
   ModalityMeta,
   ModelOption,
   ModelSpec,
+  MergeArgs,
+  MergePreview,
   NavMeta,
   ParamOptionItem,
   PreflightResult,
@@ -26,6 +28,7 @@ import type {
   ShareExportResult,
   ShareImportResult,
   ShareLicense,
+  TransitionOptions,
   Project,
   CanvasDoc,
   CanvasNodeSchema,
@@ -262,10 +265,34 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ asset_id: assetId, t }),
     }),
-  mergeVideos: (assetIds: number[]) =>
+  transitionOptions: () => request<TransitionOptions>("/api/director/transitions"),
+  /**
+   * 合并前算账：成片多长、比硬切短多少、这样接行不行。
+   *
+   * **纯读**（后端只跑 ffprobe 量时长，不写盘不编码），所以可以放心在每次改动后调，
+   * 让「会变短」这件事在**点合并之前**就说出来，而不是等片子出来发现短了。
+   */
+  mergePreview: (args: MergeArgs) =>
+    request<MergePreview>("/api/director/merge/preview", {
+      method: "POST",
+      body: JSON.stringify({
+        asset_ids: args.assetIds,
+        transition: args.transition ?? "cut",
+        transition_seconds: args.transitionSeconds ?? null,
+        sfx: args.sfx ?? "",
+        sfx_asset_id: args.sfxAssetId ?? null,
+      }),
+    }),
+  mergeVideos: (args: MergeArgs) =>
     request<Asset>("/api/director/merge", {
       method: "POST",
-      body: JSON.stringify({ asset_ids: assetIds }),
+      body: JSON.stringify({
+        asset_ids: args.assetIds,
+        transition: args.transition ?? "cut",
+        transition_seconds: args.transitionSeconds ?? null,
+        sfx: args.sfx ?? "",
+        sfx_asset_id: args.sfxAssetId ?? null,
+      }),
     }),
   // ---- 项目 ----
   listProjects: () =>
