@@ -1,4 +1,4 @@
-# 小马AI工坊 · XiaoMa AI Studio
+﻿# 小马AI工坊 · XiaoMa AI Studio
 
 > 一个部署在自己电脑上的个人 AI 创作工作台：填一个接口地址和 API Key，就能接入任意模型，完成**文本对话、图片生成、视频生成、配音**，或在画布上把节点连成工作流一键执行，产物自动沉淀到本地资产库。
 
@@ -30,7 +30,8 @@
 | 数字人 / 对白 | 一张图（或分镜图 / 角色设定图）+ 一条配音 → 一段会说话的视频：在视频生成页或画布视频节点上选「对白音轨」即可，走火山方舟 Seedance 的参考音频（`role=reference_audio`）。**配音比所选时长长时会被拦下**并告诉你把时长调到几秒（不会悄悄改时长，那是改钱）；**不做逐字口型对齐的承诺**——官方没有这类开关，它给的是「这个人用这个音色说这句话」 |
 | 提示词库 | 可复用模板：内置 10 个常用模板，支持搜索 / 筛选 / 新建 / 编辑 / 删除，一键套用到对话、图片、视频创作页 |
 | 任务中心 | 全部生成任务集中管理：状态筛选、进行中自动刷新、**重新生成沿用当时的参数快照**（只改你在弹窗里显式改的项，重跑出来的任务仍挂在原画布节点上）、**产物一键在文件管理器里打开**、取消 / 删除；生成前可开启二次确认防误触 |
-| 导演台 | 本地视频粗剪：导入视频 → 标记入/出点 → FFmpeg 截取片段 → 时间线排序 → 合并导出成片；片段可一键送去「AI 改造」（作为首帧图生视频）。自动检测 FFmpeg，未安装时给出各系统安装指引 |
+| 导演台 | 本地视频粗剪：导入视频 → 标记入/出点 → FFmpeg 截取片段 → 时间线排序 → **片段之间接转场（硬切 / 叠化 / 过黑 / 白闪 / 横划 / 圆形展开）与转场音效（内置四款本机现场合成，也可用资产库里的音频）** → **烧字幕**导出成片；片段可一键送去「AI 改造」（作为首帧图生视频）。自动检测 FFmpeg，未安装时给出各系统安装指引 |
+| **字幕** | 把字幕烧进成片：**10 款版式**（纪录片下三分之一 / 居中极简 / 电影感大字 / 综艺花字 / 新闻条 / 宋体文艺 / 古风楷体 / 对白式 / 标题美术字 / 顶部说明），**版式由你直接选、画风只提供推荐值**（选过之后换画风不动它）；字号可调；每段填一句话即可，**时间轴按成片里各段的区间自动算**（配了转场会跟着变短，不用手填时间码）。预览是**后端真渲染一帧**，不是前端近似画；中文字体**内置一款、其余三款就地下载**（下到数据目录、自动校验 sha256） |
 | 资产库 | 所有产物与上传素材本地归档、预览、下载、删除、分页 |
 | 模型服务 | 多服务管理、服务商预设、连接测试、按能力（文本/图片/视频/音频）配置模型、一键启停；**粘贴一个 Key 就接入**（自动认归属、发一次真实请求、通了才保存）、**自动检测本机 Ollama 并一键接入**（不需要云账号） |
 | 在线更新 | 「系统设置 → 关于与更新」查看当前版本与代码提交；有新版本时直接点「一键更新」（git pull → 依赖清单变了才装依赖 → 前端有改动才重建）。更新源支持 Gitee / GitHub，一个不通会自动换另一个；Docker 与压缩包安装会给出对应的升级做法 |
@@ -76,6 +77,153 @@ xiaoma-ai-studio/
 └── .env.example
 ```
 
+## 环境要求
+
+**先看你用哪种方式装**，它们要装的东西不一样：
+
+| 安装方式 | 你要自己装的东西 |
+| --- | --- |
+| **Windows 便携包**（方式 0） | **只有 ffmpeg**（想用导演台 / 样片 / 字幕时才需要）。Python 运行时、依赖都在包里 |
+| **Docker**（方式二） | 只有 Docker。ffmpeg 已打进镜像 |
+| **git clone / 压缩包 + 一键脚本**（方式 A/B） | **Python 3.11+、Node.js 20+、ffmpeg**（git 装了才能用「一键更新」） |
+
+下面是每一样的具体说明与下载地址。
+
+### 1. Python 3.11+（源码方式必需）
+
+**下载**：<https://www.python.org/downloads/>（选 3.11 或 3.12，**别选最新的 3.13+**：部分依赖还没有预编译包，pip 会退化成源码编译而失败）
+
+**核对**：
+
+```bash
+python --version      # 期望 Python 3.11.x / 3.12.x
+where python          # Windows：第一个应当是 python.org 装的那个
+```
+
+**三个坑**（都有人踩过）：
+
+- 安装时**务必勾选 `Add python.exe to PATH`**，装完重开一个终端窗口。
+- **别用微软商店版**：它只是个「跳板」，本身不干活。到「设置 → 应用 → 高级应用设置 → 应用执行别名」把 `python.exe` / `python3.exe` 两个别名关掉，再从 python.org 装官方版。
+- **别用 ComfyUI 整合包里的 Python**：那是嵌入式精简版，没有 `venv` 模块，虚拟环境根本建不出来。所以**不要把本项目放进 ComfyUI 的 `custom_nodes` 目录**（详见下方「放在哪个目录」）。
+
+### 2. Node.js 20+（源码方式必需，便携包不需要）
+
+**下载**：<https://nodejs.org/>（LTS 版即可）
+
+**核对**：
+
+```bash
+node --version        # 期望 v20.x 及以上
+npm --version
+```
+
+国内网络装前端依赖慢的话，换一下源：
+
+```bash
+npm config set registry https://registry.npmmirror.com
+```
+
+### 3. ffmpeg（导演台 / 静图样片 / 字幕需要）
+
+它是**唯一一个不在包里的外部工具**，因为各平台装法差异大、体积也大。**装不装都不影响启动与对话、出图、出视频**；装不了也只会影响下面这几处：
+
+| 用到 ffmpeg 的功能 | 说明 |
+| --- | --- |
+| 导演台 | 截取片段、排序合并、转场与转场音效、**烧字幕**、截帧 |
+| 分镜图的「静图样片」 | 把分镜图 + 缓动运镜渲染成一条样片 |
+
+**安装（任选一种，装完重开一个终端）**：
+
+| 系统 | 命令 |
+| --- | --- |
+| Windows | `winget install Gyan.FFmpeg` |
+| macOS | `brew install ffmpeg` |
+| Debian / Ubuntu | `sudo apt install ffmpeg` |
+| Fedora | `sudo dnf install ffmpeg` |
+| 手动下载 | <https://www.gyan.dev/ffmpeg/builds/>（Windows，选 **essentials** 或完整包，解压后把 `bin` 加进 PATH） |
+
+**核对**：
+
+```bash
+ffmpeg -version
+ffprobe -version
+```
+
+> ⚠️ **烧字幕要 `libass`，请用完整构建，别用裁剪版。**
+> 裁剪版 ffmpeg（一些软件自带的、`--disable-everything` 编译出来的那种）少了 `ass` / `subtitles`
+> 滤镜，而**截取、合并、转场看起来全都正常**——只有烧字幕时才会失败。核对一下：
+>
+> ```bash
+> ffmpeg -hide_banner -filters | findstr ass            # Windows
+> ffmpeg -hide_banner -filters | grep -E ' (ass|subtitles) '   # macOS / Linux
+> ```
+>
+> 有 `ass` 与 `subtitles` 两行就没问题。winget 的 Gyan 构建、brew 的 ffmpeg、各发行版自带的
+> ffmpeg 都带 libass。
+
+**想指定用哪一个 ffmpeg**（机器上有多个、或者装在奇怪的位置）：在 `backend/.env` 里填绝对路径：
+
+```ini
+FFMPEG_PATH=D:\tools\ffmpeg\bin\ffmpeg.exe
+```
+
+### 4. Git（只有 git 安装与「一键更新」需要）
+
+**下载**：<https://git-scm.com/downloads>
+
+```bash
+git --version
+```
+
+没有 git 也能用（下载压缩包解压即可），但应用里的「一键更新」会变成「只提示有新版本」。
+
+### 5. 可选：本机模型（都不装也能用，走云 API 即可）
+
+| 想做的事 | 装什么 | 地址 |
+| --- | --- | --- |
+| 完全本地跑文本模型，不用任何云账号 | **Ollama** | <https://ollama.com>（装好后应用会自动检测到，点「一键接入」） |
+| 用本机 ComfyUI 跑自己的工作流出图 / 出视频 | **ComfyUI** | <https://github.com/comfyanonymous/ComfyUI>（在「模型服务」里添加 `http://127.0.0.1:8188`） |
+
+### 6. 可选：字幕字体（内置一款，其余就地下载）
+
+烧字幕**开箱就能用**——思源黑体（Regular + Bold，约 33 MB）已随程序分发。
+
+另外三款不随包分发（体积原因），在导演台的字幕区或设置里点一下即可下载到**你的数据目录**
+（不进程序目录，重装不丢，下载后自动校验 sha256）：
+
+| 字体 | 体积 | 用途 |
+| --- | --- | --- |
+| 思源宋体 | 23.4 MB | 宋体 · 人文 / 叙事 |
+| 霞鹜文楷 | 24.4 MB | 楷体 · 古风 / 手写感 |
+| 得意黑 | 2.5 MB | 标题美术字（只覆盖通用规范汉字表 8105 字，生僻字会缺） |
+
+手动下载地址（想离线装或自己校验时用）：
+
+```
+https://gitee.com/haoruiM/xiaoma-ai-studio/releases/download/fonts-v1/NotoSerifCJKsc-Regular.otf
+https://gitee.com/haoruiM/xiaoma-ai-studio/releases/download/fonts-v1/LXGWWenKai-Regular.ttf
+https://gitee.com/haoruiM/xiaoma-ai-studio/releases/download/fonts-v1/SmileySans-Oblique.ttf
+```
+
+下好放进数据目录的 `fonts/` 子目录即可（默认 `backend/data/fonts/`）。三款都是 SIL OFL 1.1，
+允许再分发；授权原文与各文件 sha256 见 [`backend/assets/fonts/SOURCES.md`](./backend/assets/fonts/SOURCES.md)。
+
+### 一条命令查全部
+
+不确定自己缺什么，跑这个（它会把上面每一类都查一遍，并给出「缺什么、怎么装」）：
+
+```bash
+python backend/tools/env_report.py
+```
+
+装不上、起不来时先跑它，多数问题它会直接点出来；看不懂就把 `--report` 的输出整段发出来：
+
+```bash
+python backend/tools/env_report.py --report
+```
+
+---
+
 ## 下载项目
 
 **推荐用 `git clone`**。不是为了赶时髦：应用内的「一键更新」只在 git 安装下可用（走 `git pull --ff-only`，依赖或前端有变化才重装重建）；压缩包安装只能自己在设置页看到「有新版本」，然后手动去 Releases 重新下载覆盖。
@@ -112,7 +260,7 @@ git clone git@gitee.com:haoruiM/xiaoma-ai-studio.git
 只想拿某一个发行版、不想拉完整历史（体积小很多）：
 
 ```bash
-git clone -b v1.1.23 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
+git clone -b v1.1.25 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
 ```
 
 ### 方式 B：下载压缩包（不用装 git）
@@ -129,7 +277,7 @@ Windows PowerShell：
 Invoke-WebRequest -Uri https://github.com/Harry-M-001/xiaoma-ai-studio/archive/refs/heads/main.zip -OutFile xiaoma-ai-studio.zip
 ```
 
-要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.23`。
+要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.25`。
 
 > **注意**：Gitee 的「下载 ZIP / 下载压缩包」**需要先登录 Gitee 账号**，匿名访问只会跳到一个登录页，拿不到文件。所以要给不特定的人一个能直接下的地址，请用上面 GitHub 的直链。
 
@@ -144,7 +292,7 @@ Invoke-WebRequest -Uri https://github.com/Harry-M-001/xiaoma-ai-studio/archive/r
 
 ### 方式一：一键脚本（推荐）
 
-需要本机已安装 **Python 3.11+** 和 **Node.js 20+**。
+需要本机已安装 **Python 3.11+**、**Node.js 20+** 与 **ffmpeg**——下载地址、版本要求与核对命令都在上面的[环境要求](#环境要求)里，不确定就先跑一次 `python backend/tools/env_report.py`。
 
 - Windows：双击 `start.bat`（或在终端中运行）
 - macOS / Linux：
@@ -392,6 +540,18 @@ A：备份数据目录（默认 `backend/data`，Docker 为根目录 `./data`）
 **Q：点了「一键更新」但按钮是灰的？**
 A：三种情况：① 不是 `git clone` 安装（README 里的压缩包/Docker 方式），请按界面提示手动升级；② 本地有未提交改动，先 `git commit` 或 `git stash`；③ 还没配 `update.repo`，去「系统设置 → 系统配置」填上 `用户名/仓库名`。更新完成后记得重启服务。
 
+**Q：导演台 / 字幕用不了，说找不到 ffmpeg？**
+A：ffmpeg 要自己装（各平台命令见[环境要求](#环境要求)第 3 节），装完**重开一个终端**。装好后跑一次 `python backend/tools/env_report.py`，它会告诉你找到的是哪一个、以及**有没有字幕要用的 libass**。
+
+**Q：别的功能都正常，就是烧字幕报「没有字幕滤镜」？**
+A：你机器上的 ffmpeg 是裁剪版，缺 `libass`——截取、合并、转场都不受影响，只有烧字幕会失败，所以体检里现在会提前把它标出来。换一个完整构建即可（`winget install Gyan.FFmpeg` / `brew install ffmpeg` / `apt install ffmpeg`）。机器上有多个 ffmpeg 时，可以在 `backend/.env` 里用 `FFMPEG_PATH` 指定用哪一个。
+
+**Q：字幕版式为什么有时候跟着画风变、有时候不变？**
+A：版式**以你选的为准**：没自己选过时用画风的推荐值（水墨 → 古风楷体、赛博朋克 → 综艺花字…）；一旦你在字幕区选过某款，换画风就不会再动它了。这与产物版本的回滚、候选图的定稿是同一条原则——你显式说过的话不被别的东西推翻。
+
+**Q：字幕字体要联网下载吗？能离线用吗？**
+A：烧中文字幕**开箱就能用**（思源黑体已内置）。另外三款（思源宋体 / 霞鹜文楷 / 得意黑）在界面里点一下就会下到你的数据目录，也可以按[环境要求](#环境要求)第 6 节里的地址手动下了放进去，之后完全离线可用。
+
 **Q：出了错想反馈，需要提供什么？**
 A：先自己看一眼，多数问题不用问别人：任务中心里每张任务卡片都有「日志」按钮，能看到这个任务执行期间发生了什么。如果还是看不懂，去「系统设置 → 关于与更新 → 日志与诊断」点「导出日志」，它会生成一份诊断报告（环境体检结论 + 最近 200 条错误与警告），可以先在界面上完整看一遍，再复制或下载成 `.txt` 发给作者。
 
@@ -418,7 +578,12 @@ python backend/tools/env_report.py --report
 
 XiaoMa AI Studio is a self-hosted personal AI workbench for **chat, image generation, and video generation**. Bring your own endpoint and API key — everything is stored locally and encrypted; no bundled accounts, no third-party proxy.
 
-**Requirements:** Python 3.11+ and Node.js 20+.
+**Requirements:** **Python 3.11+**, **Node.js 20+**, and **ffmpeg** (needed only by the Director's
+Cut / subtitles; use a full build that includes `libass`). Download links and per-platform install
+commands are in the [环境要求](#环境要求) section above. If you are unsure what is missing, run
+`python backend/tools/env_report.py` — it checks every prerequisite and tells you what to install.
+
+The Windows portable package already bundles Python and all dependencies, so only ffmpeg is needed.
 
 ```bash
 # macOS / Linux

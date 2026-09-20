@@ -39,7 +39,7 @@ from app.database import Base  # noqa: E402
 from app.models import Asset  # noqa: E402
 from app.routers import director  # noqa: E402
 from app.schemas import DirectorMergeIn  # noqa: E402
-from app.services import ffmpeg_service, storage, transitions  # noqa: E402
+from app.services import ffmpeg_service, storage, subtitle_fonts, transitions  # noqa: E402
 
 
 def _info(**over) -> dict:
@@ -723,6 +723,157 @@ def test_merge_note_records_the_transition_in_the_asset():
             assert out.duration == 13, out.duration
 
         _run(scenario)
+
+
+# ------------------------------------------------------------------ 字幕接线（v1.1.25）
+
+
+@contextlib.contextmanager
+def _stub_burn(captured: dict) -> Iterator[None]:
+    """把「真去烧字幕」换成「记下收到的 ASS 与字体」，并产出一个占位文件。
+
+    这里**不动 `storage.abs_path`**：那条链上的 `_out_path()` 也要靠它把产物落在一个
+    测试认得的名字上（见 `_merge_with_subtitles`），两边各改一次会互相覆盖。
+    """
+    real_burn = ffmpeg_service.burn_subtitles
+    real_save = ffmpeg_service._save_asset_file
+
+    async def fake_burn(src, ass_text, *, font_keys, with_audio=True):  # noqa: ANN001, ARG001
+        captured["ass"] = ass_text
+        captured["fonts"] = list(font_keys)
+        captured["src"] = src
+        out = src.with_name("burned.mp4")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x00\x00\x00\x18ftypmp42" + bytes(32))
+        return out
+
+    ffmpeg_service.burn_subtitles = fake_burn  # type: ignore[assignment]
+    ffmpeg_service._save_asset_file = lambda p, ext: "2026-09/burned.mp4"  # noqa: ARG005
+    try:
+        yield
+    finally:
+        ffmpeg_service.burn_subtitles = real_burn  # type: ignore[assignment]
+        ffmpeg_service._save_asset_file = real_save
+
+
+def _merge_with_subtitles(tmp: str, count: int, **extra):
+    """一个内存库里**先建素材再合并**，回 `(产物, 捕获到的 ASS/字体)`。
+
+    素材与合并必须在同一个 `_run` 里：`_run` 每次都会新建一个内存库，
+    分两次调用的话第二次看到的是一张空表——报的会是「视频资产不存在」，
+    查半天才发现是测试脚手架的问题而不是代码的问题。
+    """
+    probes = {f"{i}.mp4": _info(duration=d) for i, d in enumerate([5.0, 4.0, 6.0])}
+    # 合并产物也走 probe（成片时长以量出来的为准），而它的名字由下面 abs_path 决定
+    probes["merged.mp4"] = _info(duration=14.0)
+    probes["burned.mp4"] = _info(duration=14.0)
+    cmds: list[list[str]] = []
+    captured: dict = {"tmp": tmp}
+    real_abs = storage.abs_path
+
+    def _abs(name: str) -> Path:
+        """素材按原名、其余（合并/烧字幕的产物）统一指到 merged.mp4。
+
+        不能一律指到 merged.mp4：路由是拿 `storage.abs_path(a.filename)` 去 probe 每一段素材的，
+        全都指到同一个文件的话三段时长会变成同一个值，字幕时间轴就测不出东西了。
+        也不能一律按原名：`_out_path()` 生成的产物名是随机十六进制，probe 表里没有它。
+        """
+        stem = Path(name).stem
+        return Path(tmp) / (f"{stem}.mp4" if stem.isdigit() else "merged.mp4")
+
+    async def scenario(db):
+        ids = []
+        for i in range(count):
+            a = await _add(db, name=f"{i}.mp4", duration=4)
+            ids.append(a.id)
+        # 预热滤镜探测：`check_ready` 的滤镜判据读缓存，没预热会误判成「没有 libass」
+        await ffmpeg_service.warm_subtitle_filter()
+        with _stub_ffmpeg(probes, cmds), _stub_burn(captured):
+            storage.abs_path = _abs
+            try:
+                return await director.merge_videos(
+                    DirectorMergeIn(asset_ids=ids, **extra), db
+                )
+            finally:
+                storage.abs_path = real_abs
+
+    return _run(scenario), captured
+
+
+def test_merge_burns_subtitles_and_records_them():
+    """勾了字幕：合完再烧，并把「几条 + 用了哪款版式」写进产物的来路。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings.DATA_DIR = tmp
+        out, cap = _merge_with_subtitles(
+            tmp, 3, transition="cut", subtitle_style="variety_pop",
+            subtitles=["第一句", "", "第三句"],
+        )
+        assert "ass" in cap, "没去烧字幕"
+        assert cap["fonts"] == ["noto_sans"], cap["fonts"]
+        assert "综艺花字" in (out.prompt or ""), out.prompt
+        assert "字幕 2 条" in (out.prompt or ""), out.prompt
+        # 空的那一段不产生 Dialogue
+        assert cap["ass"].count("Dialogue: 0,") == 2, cap["ass"]
+
+
+def test_merge_hands_the_merged_timeline_to_the_cues():
+    """**字幕时间轴要按成片算，不是各段时长累加。**
+
+    叠化 0.5 秒、三段 5/4/6：成片里各段起点是 0 / 4.5 / 8.0。
+    按累加会是 0 / 5.0 / 9.0——第三段整整早了 1 秒，用户看到的是「字幕比画面早出来一截」。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        settings.DATA_DIR = tmp
+        _out, cap = _merge_with_subtitles(
+            tmp, 3, transition="dissolve", transition_seconds=0.5,
+            subtitles=["甲", "乙", "丙"],
+        )
+        ass = cap["ass"]
+        assert "0:00:00.00,0:00:04.50" in ass, ass
+        assert "0:00:04.50,0:00:08.00" in ass, ass
+        assert "0:00:08.00,0:00:14.00" in ass, ass
+        assert "0:00:05.00" not in ass, "用的是各段时长累加（字幕会漂）"
+
+
+def test_merge_without_subtitles_does_not_burn_anything():
+    """没填字幕就不该多跑一遍编码——白白多花一次转码。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings.DATA_DIR = tmp
+        out, cap = _merge_with_subtitles(tmp, 2, subtitles=["", "  "])
+        assert "ass" not in cap, "全是空字幕竟然也去烧了"
+        assert "字幕" not in (out.prompt or ""), out.prompt
+
+
+def test_merge_refuses_when_the_subtitle_font_is_missing():
+    """字体没下就在**动手之前**拦住，而不是让 libass 静默回落系统字体。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        settings.DATA_DIR = tmp
+        real_user_dir = subtitle_fonts.user_dir
+        subtitle_fonts.user_dir = lambda: Path(tmp) / "empty-fonts"  # type: ignore[assignment]
+        try:
+            try:
+                _merge_with_subtitles(
+                    tmp, 2, subtitle_style="guofeng_kai", subtitles=["甲", "乙"]
+                )
+                raise AssertionError("字体没下竟然也烧下去了")
+            except HTTPException as e:
+                assert e.status_code == 400, e.status_code
+                assert "霞鹜文楷" in str(e.detail), e.detail
+        finally:
+            subtitle_fonts.user_dir = real_user_dir  # type: ignore[assignment]
+
+
+def test_subtitle_style_follows_the_users_choice_not_the_genre():
+    """导演台没有画风可选，所以版式就是用户选的那一款；没选就用默认。
+
+    用户选过之后不许被别的东西改掉——这条口径由 `subtitles.resolve_style` 一处实现。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        settings.DATA_DIR = tmp
+        _out, cap = _merge_with_subtitles(tmp, 2, subtitles=["甲", "乙"])
+        # 没选版式 → 默认那款（思源黑体）
+        assert cap["fonts"] == ["noto_sans"], cap["fonts"]
+        assert "Style: Default,Noto Sans CJK SC," in cap["ass"], cap["ass"][:200]
 
 
 if __name__ == "__main__":

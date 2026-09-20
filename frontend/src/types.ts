@@ -197,6 +197,74 @@ export interface MergeArgs {
   sfx?: string;
   /** 用资产库里自己的一条音频当音效（优先于 `sfx`） */
   sfxAssetId?: number | null;
+  /**
+   * 字幕版式 key。**空 = 没选过**（用默认版式）；非空 = 用户选的，谁都不许改。
+   * 与产物回滚、候选定稿同一个口径。
+   */
+  subtitleStyle?: string;
+  subtitleScale?: number;
+  /** 逐段一句字幕，按下标与片段对齐；空串 = 这一段不出字幕 */
+  subtitles?: string[];
+}
+
+// ---------- 字幕（版式与字体） ----------
+
+/**
+ * 字幕版式。**这是用户直接选的**，画风只提供默认值——一旦用户选过，
+ * 换画风不许动它（与产物回滚、候选定稿同一个口径）。
+ */
+export interface SubtitleStyle {
+  key: string;
+  label: string;
+  hint: string;
+  /** 用哪款字体（字体清单里的 key） */
+  font: string;
+  /** 那款字体的显示名，界面直接用，不自己查表 */
+  fontLabel: string;
+  /** 这款版式要的字体在本机能不能用 */
+  fontReady: boolean;
+  size: number;
+  align: number;
+  outline_w: number;
+  shadow: number;
+}
+
+/** 一款字体。`status`：ok（能用）/ missing（没下过）/ corrupt（下了但校验和不符） */
+export interface SubtitleFont {
+  key: string;
+  label: string;
+  family: string;
+  files: string[];
+  style: string;
+  hint: string;
+  coverage: string;
+  bundled: boolean;
+  bytes: number;
+  downloadBytes: number;
+  status: "ok" | "missing" | "corrupt";
+  present: boolean;
+}
+
+export interface SubtitleOptions {
+  styles: SubtitleStyle[];
+  fonts: SubtitleFont[];
+  defaultStyle: string;
+  /** 画风 key → 推荐版式 key。只在用户没选过时用来给默认值 */
+  recommended: Record<string, string>;
+  scale: { min: number; max: number; default: number };
+  /** 这台机器上的 ffmpeg 有没有 libass */
+  filterAvailable: boolean;
+  usableFonts: string[];
+  /** 空串 = 能烧；非空是一句可直接展示的理由 */
+  problem: string;
+  previewText: string;
+}
+
+export interface SubtitlePreviewResult {
+  style: string;
+  font: string;
+  /** 真渲染出来的那帧，JPEG 的 data URI */
+  image: string;
 }
 
 // ---------- 配音（语音合成） ----------

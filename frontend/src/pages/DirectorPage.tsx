@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { setDraftFirstFrame } from "../promptDraft";
-import type { Asset, MergeArgs, MergePreview, TransitionOptions } from "../types";
+import type { Asset, MergeArgs, MergePreview, SubtitleOptions, TransitionOptions } from "../types";
 import { downloadUrl } from "../components/TaskCard";
 import { Empty, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -75,6 +75,15 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   /** 合并前的算账结果（成片多长、比硬切短多少、这样接行不行） */
   const [preview, setPreview] = useState<MergePreview | null>(null);
 
+  // ---- 字幕 ----
+  // 版式**是用户直接选的**（画风只给默认值）；空串 = 没选过 → 用 defaultStyle。
+  // 与产物回滚、候选定稿同一个口径：用户显式选过之后，别处不许改。
+  const [subOptions, setSubOptions] = useState<SubtitleOptions | null>(null);
+  const [subtitleStyle, setSubtitleStyle] = useState("");
+  const [subtitleScale, setSubtitleScale] = useState(1);
+  /** 逐段一句话，按下标与时间线对齐；空串 = 这一段不出字幕 */
+  const [subtitles, setSubtitles] = useState<string[]>([]);
+
   useEffect(() => {
     (async () => {
       const [status, vids] = await Promise.all([api.ffmpegStatus(), api.listDirectorVideos()]);
@@ -94,6 +103,15 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
       .listAssets({ kind: "audio", limit: 60 })
       .then((r) => setAudioAssets(r.items))
       .catch(() => setAudioAssets([]));
+    api
+      .subtitleOptions()
+      .then((o) => {
+        setSubOptions(o);
+        setSubtitleScale(o.scale.default);
+      })
+      .catch(() => {
+        /* 字幕选项拉不到就不显示字幕区，粗剪本身不受影响 */
+      });
   }, []);
 
   const clipIds = clips.map((c) => c.id);
@@ -228,6 +246,9 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
         transition,
         transitionSeconds: trSeconds,
         ...sfxArgs,
+        subtitleStyle,
+        subtitleScale,
+        subtitles: clipIds.map((_, i) => subtitles[i] ?? ""),
       });
       setMerged(out);
       await loadVideos();
@@ -493,6 +514,20 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
                   </label>
                 </div>
 
+                <SubtitlePanel
+                  options={subOptions}
+                  clips={clips}
+                  styleKey={subtitleStyle}
+                  onStyleChange={setSubtitleStyle}
+                  scale={subtitleScale}
+                  onScaleChange={setSubtitleScale}
+                  texts={subtitles}
+                  onTextsChange={setSubtitles}
+                  onOptionsChange={setSubOptions}
+                  toastOk={toast.success}
+                  toastErr={toast.error}
+                />
+
                 {preview?.problem ? (
                   <div className="director-merge-warn">{preview.problem}</div>
                 ) : preview ? (
@@ -531,6 +566,204 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * 字幕：版式、字号、逐段一句话，以及**真渲染的版式预览**。
+ *
+ * 四条设计口径（都来自前面几次踩坑）：
+ *
+ * 1. **版式是用户直接选的，画风只给默认值。** 导演台没有画风可选，所以这里的取值就是
+ *    最终结果；一旦用户选过，别处不许改（与产物回滚、候选定稿同一个口径）。
+ * 2. **预览走后端真渲染一帧**，不在前端用 CSS 近似画。版式取决于 libass 的字体选择、
+ *    字形、描边、缩放、边距，前端再写一套必然对不上。
+ * 3. **字体缺了就地能下**。下到本机数据目录（不进程序目录），下完立即刷新可用状态。
+ *    「没下过」与「下坏了」分开说——后者要用户**重新**下载，同一句话会让他以为「我明明下过了」。
+ * 4. **字幕内容留空 = 这一段不出字幕**，不是「必填项没填」。所以措辞上说的是
+ *    「留空则这一段不出字幕」，而不是报错。
+ */
+function SubtitlePanel({
+  options,
+  clips,
+  styleKey,
+  onStyleChange,
+  scale,
+  onScaleChange,
+  texts,
+  onTextsChange,
+  onOptionsChange,
+  toastOk,
+  toastErr,
+}: {
+  options: SubtitleOptions | null;
+  clips: Asset[];
+  styleKey: string;
+  onStyleChange: (v: string) => void;
+  scale: number;
+  onScaleChange: (v: number) => void;
+  texts: string[];
+  onTextsChange: (v: string[]) => void;
+  onOptionsChange: (v: SubtitleOptions) => void;
+  toastOk: (m: string) => void;
+  toastErr: (m: string) => void;
+}) {
+  const [shot, setShot] = useState<string>("");
+  const [rendering, setRendering] = useState(false);
+  const [busyFont, setBusyFont] = useState("");
+
+  const style = options?.styles.find((s) => s.key === styleKey) ?? null;
+  const filled = texts.filter((t) => (t ?? "").trim()).length;
+
+  // 画面尺寸用第一段素材的；没有就用 1280x720（预览只是个示意，比例对就行）
+  const size = { width: clips[0]?.width || 1280, height: clips[0]?.height || 720 };
+
+  const render = async (nextStyle = styleKey, nextScale = scale) => {
+    if (!options?.filterAvailable) return;
+    setRendering(true);
+    try {
+      const r = await api.subtitlePreview({
+        style: nextStyle,
+        scale: nextScale,
+        text: "",
+        ...size,
+      });
+      setShot(r.image);
+    } catch (e) {
+      // 预览失败不该挡住导出：说一句就好，别把它做成一个必须过的关
+      toastErr(e instanceof Error ? e.message : "版式预览失败");
+    } finally {
+      setRendering(false);
+    }
+  };
+
+  const pickStyle = (v: string) => {
+    onStyleChange(v);
+    // 这款版式要的字体不在本机时**不去渲染**：后端会拒绝，弹一句错，而下面已经给了
+    // 「下载这款字体」的入口——那时候用户要做的是下载，不是看报错。
+    const target = options?.styles.find((s) => s.key === v);
+    if (target?.fontReady) void render(v, scale);
+  };
+
+  const download = async (key: string) => {
+    setBusyFont(key);
+    try {
+      const r = await api.downloadSubtitleFont(key);
+      // **整份替换**，不只换字体列表：版式里的 fontReady 也在这一份里。
+      // 只换一半的话会出现「下完了但提示还在」（走查时踩到过）。
+      onOptionsChange(r.options);
+      toastOk(r.message);
+      // 下完顺手把当前版式的预览渲出来——用户刚才就是为了看它才下的字体
+      const ready = r.options.styles.find((s) => s.key === (styleKey || r.options.defaultStyle));
+      if (ready?.fontReady) void render(styleKey || r.options.defaultStyle, scale);
+    } catch (e) {
+      toastErr(e instanceof Error ? e.message : "字体下载失败");
+    } finally {
+      setBusyFont("");
+    }
+  };
+
+  if (!options) return null;
+
+  if (!options.filterAvailable) {
+    return (
+      <div className="director-merge-warn">
+        这台机器上的 ffmpeg 没有字幕滤镜（libass），烧不了字幕。
+        换一个完整的 ffmpeg 构建就行——「系统设置 → 环境体检」里能看到当前用的是哪一个。
+      </div>
+    );
+  }
+
+  return (
+    <div className="director-subtitles">
+      <div className="director-transition-row">
+        <label className="field">
+          <span>字幕版式</span>
+          <select className="select" value={styleKey || options.defaultStyle} onChange={(e) => pickStyle(e.target.value)}>
+            {options.styles.map((s) => (
+              <option key={s.key} value={s.key}>
+                {s.label}
+                {s.fontReady ? "" : `（要下 ${s.fontLabel}）`}
+              </option>
+            ))}
+          </select>
+          <span className="field-hint">{style?.hint ?? ""}</span>
+        </label>
+        <label className="field">
+          <span>字号（倍）</span>
+          <input
+            className="input"
+            type="number"
+            step={0.1}
+            min={options.scale.min}
+            max={options.scale.max}
+            value={scale}
+            onChange={(e) => {
+              onScaleChange(Number(e.target.value));
+            }}
+            onBlur={() => void render(styleKey, scale)}
+          />
+          <span className="field-hint">
+            可取 {options.scale.min}–{options.scale.max} 倍
+          </span>
+        </label>
+      </div>
+
+      {style && !style.fontReady && (
+        <div className="director-sub-font-missing">
+          <span>
+            这款版式要用的「{style.fontLabel}」还没下载到本机
+          </span>
+          <button
+            className="btn btn-sm"
+            disabled={busyFont !== ""}
+            onClick={() => void download(style.font)}
+          >
+            {busyFont === style.font ? <Spinner /> : null}
+            {busyFont === style.font ? "下载中…" : "下载这款字体"}
+          </button>
+        </div>
+      )}
+
+      <div className="director-sub-shot">
+        {shot ? (
+          <img src={shot} alt="版式预览" className="director-sub-shot-img" />
+        ) : (
+          <div className="director-sub-shot-empty">
+            {rendering ? "正在渲染预览…" : "点「看看这版式」渲一帧，用的是真字体真描边"}
+          </div>
+        )}
+        <button className="btn btn-sm" disabled={rendering} onClick={() => void render()}>
+          {rendering ? <Spinner /> : null}
+          看看这版式
+        </button>
+      </div>
+
+      <div className="director-sub-lines">
+        <div className="director-sub-lines-head">
+          每段一句话（{filled} / {clips.length} 段有字幕；留空则这一段不出字幕）
+        </div>
+        {clips.map((c, i) => (
+          <div key={c.id} className="director-sub-line">
+            <span className="director-clip-no">{i + 1}</span>
+            <input
+              className="input"
+              value={texts[i] ?? ""}
+              placeholder={`第 ${i + 1} 段的一句话（${c.duration ?? "?"} 秒）`}
+              onChange={(e) => {
+                const next = [...texts];
+                while (next.length < clips.length) next.push("");
+                next[i] = e.target.value;
+                onTextsChange(next);
+              }}
+            />
+          </div>
+        ))}
+        <span className="field-hint">
+          时间轴按**成片**里各段的区间算（配了转场会跟着变短），不用手填时间码。
+        </span>
+      </div>
+    </div>
   );
 }
 

@@ -28,6 +28,8 @@ import type {
   ShareExportResult,
   ShareImportResult,
   ShareLicense,
+  SubtitleOptions,
+  SubtitlePreviewResult,
   TransitionOptions,
   Project,
   CanvasDoc,
@@ -292,7 +294,30 @@ export const api = {
         transition_seconds: args.transitionSeconds ?? null,
         sfx: args.sfx ?? "",
         sfx_asset_id: args.sfxAssetId ?? null,
+        subtitle_style: args.subtitleStyle ?? "",
+        subtitle_scale: args.subtitleScale ?? null,
+        subtitles: args.subtitles ?? [],
       }),
+    }),
+  // ---- 字幕（版式与字体） ----
+  /** 版式 + 字体 + 本机能不能烧。**一次给全**，前端不另抄任何一份表 */
+  subtitleOptions: () => request<SubtitleOptions>("/api/subtitles/options"),
+  /** 下载并安装一款字体（下到本机数据目录，不进程序目录） */
+  downloadSubtitleFont: (key: string) =>
+    request<{ ok: boolean; message: string; options: SubtitleOptions }>(
+      `/api/subtitles/fonts/${encodeURIComponent(key)}/download`,
+      { method: "POST" }
+    ),
+  /**
+   * 版式预览：后端**真渲染一帧**回来（JPEG 的 data URI）。
+   *
+   * 不在前端用 CSS 近似画：版式取决于 libass 的字体选择、字形、描边、缩放、边距，
+   * 前端再写一套必然对不上——「预览看着挺好、导出来不一样」是最伤信任的一种不一致。
+   */
+  subtitlePreview: (args: { style: string; scale?: number; text?: string; width: number; height: number }) =>
+    request<SubtitlePreviewResult>("/api/subtitles/preview", {
+      method: "POST",
+      body: JSON.stringify(args),
     }),
   // ---- 项目 ----
   listProjects: () =>

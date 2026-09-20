@@ -68,6 +68,10 @@ COPY_TREES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("backend/alembic", ()),
     ("backend/tools", ("make_portable.py",)),  # 打包脚本自己不进包
     ("frontend/webroot", ()),
+    # 随包字体（v1.1.25 起）：烧字幕要用，约 82 MB，是包里最大的一块非运行时内容。
+    # 不进包的话「选字体」这个功能在便携版里直接不可用，而源码版却是好的——那种
+    # 「同一个功能两种安装方式表现不一样」的坑最难查，所以宁可让包大一点。
+    ("backend/assets", ()),
 )
 
 # 进包的单个文件

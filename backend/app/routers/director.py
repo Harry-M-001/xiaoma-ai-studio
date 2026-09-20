@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import SessionLocal
 from app.models import Asset
 from app.schemas import AssetOut, DirectorExtractIn, DirectorMergeIn, DirectorProbeIn, DirectorThumbnailIn
-from app.services import ffmpeg_service, image_size, storage, transitions
+from app.services import ffmpeg_service, image_size, storage, subtitle_fonts, subtitles, transitions
 
 logger = logging.getLogger(__name__)
 
@@ -306,10 +306,19 @@ async def merge_videos(
     total = real or transitions.total_seconds(
         [d.get("duration") or 0 for d in durations], key, seconds
     )
+
+    # ---- 字幕（可选）：合完再烧，时间轴按**成片**里各段的区间算
+    subtitle_note = ""
+    burned = await _burn_subtitles_if_asked(payload, out_path, durations, key, seconds)
+    if burned is not None:
+        rel, subtitle_note, out_path = burned
+
     label = transitions.preset(key)["label"]
     note = f"{len(assets)} 段 · 转场 {label} {seconds:g}s"
     if sfx_label:
         note += f" · 音效 {sfx_label}"
+    if subtitle_note:
+        note += f" · 字幕 {subtitle_note}"
     asset = Asset(
         kind="video",
         filename=rel,
@@ -327,6 +336,66 @@ async def merge_videos(
     await db.commit()
     await db.refresh(asset)
     return _asset_out(asset)
+
+
+async def _burn_subtitles_if_asked(
+    payload: DirectorMergeIn,
+    merged: Path,
+    durations: list[dict],
+    key: str,
+    seconds: float,
+) -> tuple[str, str, Path] | None:
+    """要字幕就烧上去；不要就回 None。回 `(相对路径, 落库说明, 烧完的成片路径)`。
+
+    三件必须做对的事：
+
+    1. **时间轴按「成片里各段的区间」算**（`transitions.clip_spans`），不是各段时长累加。
+       配了转场之后成片会变短，累加会让字幕一段比一段提前——三段 0.5 秒转场、第三段
+       就偏了 1 秒，用户看到的是「字幕比画面早出来一截」。
+    2. **先拦住再干活**：字体没下 / 字体损坏 / 没有 libass，都在烧之前报错，
+       而不是让 libass 静默回落系统字体（那会出一部「有字幕但字体不对」的片子）。
+    3. **烧完要以新的成片为准重新起个名字再落库**：烧字幕是重编码，产物是**另一个文件**，
+       沿用旧文件名会让 `size` 对不上（而 size 是要给用户看的）。
+    """
+    texts = list(payload.subtitles or [])
+    if not texts or not any(str(t or "").strip() for t in texts):
+        return None
+
+    lens = [float(d.get("duration") or 0) for d in durations]
+    spans = transitions.clip_spans(lens, key, seconds)
+    cues = subtitles.cues_from_spans(spans, texts)
+    problem = subtitles.check_cues(cues)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+
+    style_key = subtitles.resolve_style(payload.subtitle_style)
+    ass = subtitles.build_ass(
+        cues,
+        style_key=style_key,
+        width=int(durations[0].get("width") or 1280),
+        height=int(durations[0].get("height") or 720),
+        size_scale=payload.subtitle_scale,
+    )
+    fonts = subtitles.fonts_used(style_key)
+    # 字体这条链的体检放在最前面：它要么过、要么给出一句人话，不让 ffmpeg 去报。
+    # **先预热滤镜探测**：`check_ready` 里的滤镜判据读的是缓存，缓存没预热时会把
+    # 「还没探过」当成「没有滤镜」，报一句完全错误的理由。
+    await ffmpeg_service.warm_subtitle_filter()
+    trouble = subtitle_fonts.check_ready(fonts)
+    if trouble:
+        raise HTTPException(status_code=400, detail=trouble)
+
+    try:
+        out = await ffmpeg_service.burn_subtitles(merged, ass, font_keys=fonts)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # 没字幕那版是中间产物：留着只会让 storage 里多一份没人认领的大文件
+        merged.unlink(missing_ok=True)
+
+    rel = ffmpeg_service._save_asset_file(out, "mp4")
+    st = subtitles.style(style_key) or {}
+    return rel, f"{len(cues)} 条 · {st.get('label') or style_key}", out
 
 
 async def _resolve_sfx(

@@ -1,0 +1,10 @@
+# 字体文件是二进制：不标记的话 git 会当文本处理，换行转换会**破坏字体文件**
+# （改一次仓库就多一份"被改坏了"的副本，而且是静默的——直到 libass 解析失败才发现）
+*.otf binary
+*.ttf binary
+*.woff2 binary
+
+# 便携包与前端构建产物（本来就在 .gitignore 里，这里再兜一层，避免误加）
+*.zip binary
+*.mp4 binary
+*.wav binary

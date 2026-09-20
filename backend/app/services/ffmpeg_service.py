@@ -125,8 +125,54 @@ async def _resolve_binaries() -> tuple[str | None, str | None]:
 
 def _reset_cache() -> None:
     """配置变更后调用，强制重新解析。"""
-    global _BIN_CACHE
+    global _BIN_CACHE, _SUBTITLE_FILTER
     _BIN_CACHE = None
+    _SUBTITLE_FILTER = None
+
+
+# 字幕滤镜探测结果。`None` = 还没探过；缓存是因为这个结论在一次进程生命周期里不会变
+# （ffmpeg 是启动时解析出来的那个），而它每次都要起一个外部进程去问、约几十毫秒——
+# 开一次界面就问一次是白等的。
+_SUBTITLE_FILTER: bool | None = None
+
+
+def subtitle_filter_available() -> bool:
+    """ffmpeg 有没有字幕滤镜（`ass` / `subtitles`，即 libass）。
+
+    **为什么必须探而不是假定有**：`ass` 与 `subtitles` 依赖 libass，而各种 ffmpeg 构建
+    并不都带（本项目在另一台机器上就撞到过一个只有 `scale,fps` 的裁剪版）。
+    不探的话，用户会在点下「导出」之后才拿到一句 `No such filter: 'ass'`——
+    那时候片子已经渲染了一半。
+
+    同步函数：它只读一个**已经缓存**的结论，不在请求线程里跑外部命令；结论由
+    `warm_subtitle_filter()` 在应用启动时预热。
+    """
+    return bool(_SUBTITLE_FILTER)
+
+
+async def warm_subtitle_filter() -> bool:
+    """预热字幕滤镜探测（应用启动时调一次）。"""
+    global _SUBTITLE_FILTER
+    if _SUBTITLE_FILTER is not None:
+        return _SUBTITLE_FILTER
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        _SUBTITLE_FILTER = False
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-hide_banner", "-filters",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+    except (FileNotFoundError, OSError, asyncio.TimeoutError):
+        _SUBTITLE_FILTER = False
+        return False
+    text = (out or b"").decode("utf-8", "replace")
+    # 只认滤镜名那一列，避免把构建说明里的 "libass" 字样算成有滤镜
+    _SUBTITLE_FILTER = bool(re.search(r"^\s*\S*\s+(ass|subtitles)\s+V->V\b", text, re.M))
+    logger.info("字幕滤镜探测：ass/subtitles %s", "可用" if _SUBTITLE_FILTER else "不可用")
+    return _SUBTITLE_FILTER
 
 
 async def _run(cmd: list[str], timeout: int) -> tuple[bool, str]:
@@ -638,6 +684,159 @@ async def _merge_with_transition(
         len(paths), transition, xfade_name, seconds, running, sum(lens),
     )
     return out
+
+
+# ---------------------------------------------------------------- 字幕烧录
+
+_TIMEOUT_SUBS = 1800
+
+
+async def burn_subtitles(
+    src: Path,
+    ass_text: str,
+    *,
+    font_keys: list[str],
+    with_audio: bool = True,
+) -> Path:
+    """把一份 ASS 字幕烧进视频，返回成片路径。
+
+    为什么走 ASS 而不是 `drawtext`：`drawtext` 要一条条手写时间轴与位置，而 ASS 本来
+    就是为「多行、逐条时间轴、描边/底色/对齐」设计的，libass 一次渲染完——版式库那个
+    模块产出的就是 ASS 文本，两边是同一件事的两半。
+
+    三件在实现里必须做对的事（都有实测依据）：
+
+    1. **`fontsdir=.` + 字体硬链接进工作目录**，不用绝对路径。filtergraph 有两层转义，
+       Windows 绝对路径得写成 `C\\\\:/path`（二级反斜杠）才对，实测一级转义会失败。
+       把 ass 与字体都放进工作目录、并把 ffmpeg 的 cwd 指过去，就完全绕开了这件事。
+    2. **只挂这次用到的那几份字体**。libass 会把 `fontsdir` 里的字体全量解析：
+       实测整库 80MB 要 0.16s、单份 0.08s。逐镜渲染时这个差价会累积。
+    3. **`cwd` 必须设成工作目录**。`ass=sub.ass:fontsdir=.` 里的相对路径以进程 cwd 为基准，
+       不设就会找不到文件——而且 ffmpeg 只会回一句 `fopen failed`，看不出是路径问题
+       （这个坑在验收脚本里踩过两次）。
+    """
+    # 这里**必须自己预热一次**，不能读缓存：`subtitle_filter_available()` 是同步的、
+    # 只读缓存，而缓存是应用启动时预热的。依赖「启动顺序」的话，任何在预热之前走到
+    # 这条路的调用（单测、脚本、后台任务）都会把「还没探过」当成「没有滤镜」，
+    # 报一句完全错误的理由。这个函数本身就是异步的，顺手探一次最省事。
+    if not await warm_subtitle_filter():
+        raise RuntimeError(
+            "这台机器上的 ffmpeg 没有字幕滤镜（libass），烧不了字幕。"
+            "换一个完整的 ffmpeg 构建再试"
+        )
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，烧不了字幕")
+
+    # 延迟 import：`subtitle_fonts` 要用本模块的滤镜探测，模块级互相 import 会成环。
+    # 字体只在真要烧字幕时才需要，放到这里没有额外代价。
+    from app.services import subtitle_fonts
+
+    # **字体缺了必须在这里就拦住。** 少了这一步，`stage_fonts` 只是「少挂几份」，
+    # libass 会**静默回落系统字体**——最后出一部「有字幕、但不是你要的那个字体」的片子，
+    # 而 ffmpeg 退出码是 0、没有任何异常。这类「不报错、悄悄给别的东西」正是最该拦的。
+    problem = subtitle_fonts.check_ready(font_keys)
+    if problem:
+        raise RuntimeError(problem)
+
+    work = _new_workdir("subs")
+    _staged = subtitle_fonts.stage_fonts(work, font_keys)
+    (work / "sub.ass").write_text(ass_text, encoding="utf-8")
+    out = _out_path("mp4")
+
+    cmd = [
+        ffmpeg, "-y",
+        "-i", str(src),
+        "-vf", "ass=sub.ass:fontsdir=.",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+    ]
+    cmd += ["-c:a", "copy"] if with_audio else ["-an"]
+    cmd += ["-movflags", "+faststart", str(out)]
+
+    ok, err = await _run_in(cmd, _TIMEOUT_SUBS, cwd=work)
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        raise RuntimeError(f"烧字幕失败：{err}")
+    logger.info("字幕烧录完成：挂载字体 %s，成片 %s", _staged, out.name)
+    return out
+
+
+async def render_subtitle_preview(
+    ass_text: str,
+    *,
+    font_keys: list[str],
+    width: int,
+    height: int,
+) -> bytes:
+    """渲一张带字幕的**静帧预览图**，直接回字节（JPEG）。
+
+    为什么是「真渲染一帧」而不是让前端拿 CSS 近似画一下：版式的效果取决于 libass 的
+    字体选择、字形、描边、缩放、边距，前端再写一套必然对不上——「预览看着挺好、导出来
+    不一样」是最伤信任的一种不一致。真渲一帧的成本只有几十毫秒。
+
+    底色用深灰而不是纯黑：纯黑上看不清黑色描边，而描边恰恰是版式的一部分。
+
+    **回字节而不是回路径**：预览不该进资产库（用一次就废，进了库就是一堆垃圾），
+    而落了盘又不登记就会变成谁也管不到的孤儿文件。直接读进内存、把临时目录删掉最干净。
+    """
+    import shutil
+
+    from app.services import subtitle_fonts
+
+    problem = subtitle_fonts.check_ready(font_keys)
+    if problem:
+        raise RuntimeError(problem)
+
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，渲不了预览")
+    w = max(320, min(3840, int(width or 1280)))
+    h = max(180, min(2160, int(height or 720)))
+    work = _new_workdir("subprev")
+    try:
+        subtitle_fonts.stage_fonts(work, font_keys)
+        (work / "sub.ass").write_text(ass_text, encoding="utf-8")
+        out = work / "preview.jpg"
+        ok, err = await _run_in(
+            [ffmpeg, "-y",
+             "-f", "lavfi", "-i", f"color=c=0x1E2430:s={w}x{h}:d=1",
+             "-vf", "ass=sub.ass:fontsdir=.",
+             "-frames:v", "1", "-q:v", "3", str(out)],
+            120, cwd=work,
+        )
+        if not ok or not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError(f"渲染字幕预览失败：{err}")
+        return out.read_bytes()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def _run_in(cmd: list[str], timeout: int, *, cwd: Path) -> tuple[bool, str]:
+    """在指定工作目录里跑命令。
+
+    单开一个而不是给 `_run` 加参数：`_run` 被十几处调用，加一个只在字幕这条链上用到的
+    参数会让每处都得想一下「我该不该传 cwd」，而字幕（还有它的预览）是唯一需要限定
+    相对路径基准的场景。
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, cwd=str(cwd),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return False, "系统未安装 ffmpeg / ffprobe"
+    except OSError as e:
+        return False, f"命令启动失败：{e}"
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return False, "处理超时，已终止"
+    if proc.returncode != 0:
+        tail = (stderr or b"")[-600:].decode("utf-8", "replace").strip()
+        return False, tail or f"退出码 {proc.returncode}"
+    return True, ""
 
 
 # ---------------------------------------------------------------- 音频

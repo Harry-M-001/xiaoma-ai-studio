@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import importlib.util
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -115,6 +117,31 @@ HINTS: dict[str, list[str]] = {
         "       若提示 8787 端口被占用，请先关掉占用该端口的程序；",
         "       其它情况请把上面的报错整段发给作者。",
     ],
+    "ffmpeg-missing": [
+        "[提示] 没找到 ffmpeg —— 不影响启动，但这几处用不了：",
+        "       · 导演台（截取片段 / 排序合并 / 转场 / 烧字幕）",
+        "       · 分镜图的「静图样片」、导演台截帧",
+        "       装法（任选一种，装完重开一个终端）：",
+        "       · Windows： winget install Gyan.FFmpeg",
+        "       · macOS：   brew install ffmpeg",
+        "       · Linux：   sudo apt install ffmpeg  （或 dnf / pacman 对应包）",
+        "       · 也可以手动下载： https://www.gyan.dev/ffmpeg/builds/ （选 essentials 完整包）",
+        "       装完用 ffmpeg -version 确认能调起来；也可以填 backend/.env 里的 FFMPEG_PATH 指定路径。",
+    ],
+    "ffmpeg-nolibass": [
+        "[警告] 这个 ffmpeg 缺少字幕滤镜（libass），烧不了字幕。",
+        "       注意：裁剪版 / 精简版 ffmpeg 通常少了它，而其它功能（截取、合并、转场）",
+        "       看起来都正常——只有在烧字幕时才会失败，所以现在就提醒你。",
+        "       处理办法：换一个带 libass 的完整构建。",
+        "       · Windows： winget install Gyan.FFmpeg  （Gyan 的 essentials 及以上都带 libass）",
+        "       · macOS：   brew install ffmpeg",
+        "       · Linux：   发行版自带的 ffmpeg 一般都有；Debian/Ubuntu 可 apt install libass9",
+        "       · 手动下载： https://www.gyan.dev/ffmpeg/builds/ （Windows，选 essentials 完整包）",
+        "       核对命令（有输出 ass 与 subtitles 两行即可）：",
+        "         ffmpeg -hide_banner -filters | findstr ass        （Windows）",
+        "         ffmpeg -hide_banner -filters | grep -E ' (ass|subtitles) '   （macOS / Linux）",
+        "       机器上有多个 ffmpeg 时，可以在 backend/.env 里用 FFMPEG_PATH 指定用哪一个。",
+    ],
 }
 
 
@@ -156,8 +183,11 @@ def _cmd_exe() -> str:
     return str(Path(root) / "System32" / "cmd.exe")
 
 
-def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
-    """跑一条外部命令，返回 (退出码, 第一行输出)。找不到命令返回 (-1, "")。
+def _run(cmd: list[str], timeout: int = 30, *, full: bool = False) -> tuple[int, str]:
+    """跑一条外部命令，返回 (退出码, 输出)。找不到命令返回 (-1, "")。
+
+    默认只回**第一行**——绝大多数用途只关心版本号那一行。要看完整输出（例如翻
+    ffmpeg 的滤镜清单判断有没有 libass）就传 `full=True`：只看第一行必然得出「没有」。
 
     Windows 上 npm / npx 这类其实是 `.cmd` 批处理，CreateProcess 不能直接
     执行，必须经 cmd.exe 转一手——否则会误报「命令不可用」。
@@ -181,6 +211,8 @@ def _run(cmd: list[str], timeout: int = 30) -> tuple[int, str]:
     except Exception:  # noqa: BLE001
         return -3, ""
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if full:
+        return proc.returncode or 0, out
     return proc.returncode or 0, out.splitlines()[0] if out else ""
 
 
@@ -327,6 +359,126 @@ def check_tooling(root: Path, *, need_node: bool) -> list[Finding]:
     return out
 
 
+# ffmpeg 的候选位置。与 `app/services/ffmpeg_service._WIN_CANDIDATES` 保持一致——
+# 体检要在「依赖还没装上」时也能跑，所以没法 import 应用那份，只能各自留一份。
+# **两处不一致会直接表现为误报**：这台机器上 `where ffmpeg` 命中的是某个编辑器自带的
+# 裁剪版（没有 libass），而应用自己会跳过它去用 winget 装的完整版。所以体检也必须
+# 候选全找一遍、挑最好的那个来判。
+_FFMPEG_CANDIDATES = (
+    r"{LOCALAPPDATA}\Microsoft\WinGet\Links\ffmpeg.exe",
+    r"{LOCALAPPDATA}\Microsoft\WinGet\Packages\*ffmpeg*\ffmpeg*\bin\ffmpeg.exe",
+    r"{LOCALAPPDATA}\Microsoft\WinGet\Packages\*ffmpeg*\bin\ffmpeg.exe",
+    r"{ProgramFiles}\ffmpeg\bin\ffmpeg.exe",
+    r"C:\ffmpeg\bin\ffmpeg.exe",
+    r"{USERPROFILE}\scoop\shims\ffmpeg.exe",
+)
+
+
+def ffmpeg_candidates() -> list[Path]:
+    """所有能想到的 ffmpeg 可执行文件位置，去重后按「先 PATH、后常见安装位置」排序。"""
+    found: list[Path] = []
+    env_path = (os.environ.get("FFMPEG_PATH") or "").strip()
+    if env_path:
+        found.append(Path(env_path))
+    which = shutil.which("ffmpeg")
+    if which:
+        found.append(Path(which))
+    if os.name == "nt":
+        for pattern in _FFMPEG_CANDIDATES:
+            tpl = pattern.format(
+                **{k: os.environ.get(k, "") for k in ("LOCALAPPDATA", "ProgramFiles", "USERPROFILE")}
+            )
+            for hit in sorted(glob.glob(tpl), reverse=True):
+                found.append(Path(hit))
+    seen: set[str] = set()
+    out: list[Path] = []
+    for p in found:
+        key = str(p).lower()
+        if key in seen or not p.exists():
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _has_libass(ffmpeg: Path) -> bool:
+    """这个 ffmpeg 有没有字幕滤镜（libass）。"""
+    code, listing = _run([str(ffmpeg), "-hide_banner", "-filters"], full=True)
+    return code == 0 and bool(re.search(r"^\s*\S*\s+(ass|subtitles)\s+V->V\b", listing, re.M))
+
+
+def check_ffmpeg() -> list[Finding]:
+    """查 ffmpeg / ffprobe，并**单独查字幕滤镜（libass）**。
+
+    为什么 libass 要单独报一条：裁剪版 ffmpeg 少了它，而截取、合并、转场这些看起来
+    全都正常——只有烧字幕时才会失败。等到那时候用户已经剪完片子了，所以现在就提醒。
+
+    **候选要全找一遍再挑**（与应用的解析口径一致）：只看 `shutil.which` 会误报——
+    比如某台机器上 PATH 里那个是编辑器自带的裁剪版，而应用其实用的是 winget 装的完整版。
+    """
+    out: list[Finding] = []
+    candidates = ffmpeg_candidates()
+    if not candidates:
+        return [
+            Finding(
+                WARN,
+                "未检测到 ffmpeg",
+                "导演台（截取 / 合并 / 转场 / 烧字幕）与静图样片需要它；不影响启动与其它功能。",
+                "运行「python backend/tools/env_report.py --hint ffmpeg-missing」看安装办法。",
+            )
+        ]
+
+    good: list[tuple[Path, str]] = []      # 有 libass 的
+    plain: list[tuple[Path, str]] = []     # 能用但没 libass 的
+    for path in candidates:
+        code, ver = _run([str(path), "-version"])
+        if code != 0:
+            continue
+        version_line = ver or ""
+        (good if _has_libass(path) else plain).append((path, version_line))
+
+    if good:
+        path, version_line = good[0]
+        out.append(Finding(OK, f"ffmpeg 可用：{version_line}", str(path)))
+        out.append(Finding(OK, "字幕滤镜（libass）可用", "ass / subtitles", ""))
+        if plain:
+            # 不静默：用户可能就是想用 PATH 里那个，得让他知道应用选的是哪一个
+            out.append(
+                Finding(
+                    WARN,
+                    f"另有 {len(plain)} 个 ffmpeg 没有 libass（应用不会用它）",
+                    "；".join(str(p) for p, _v in plain[:3]),
+                    "应用优先用带 libass 的那个；想改指定路径可以填 backend/.env 的 FFMPEG_PATH。",
+                )
+            )
+    else:
+        path, version_line = plain[0]
+        out.append(Finding(OK, f"ffmpeg 可用：{version_line}", str(path)))
+        out.append(
+            Finding(
+                WARN,
+                "字幕滤镜（libass）不可用",
+                "找到的 ffmpeg 里没有 ass / subtitles 滤镜，所以烧不了字幕；截取、合并、转场不受影响。",
+                "运行「python backend/tools/env_report.py --hint ffmpeg-nolibass」看换构建的办法。",
+            )
+        )
+
+    # ffprobe 要与选中的那个 ffmpeg **成对**：它们本来是一起发布的，版本不搭会出怪问题
+    # （比如新 ffprobe 读旧 ffmpeg 产的流）。所以先看同一个 bin 目录里有没有，再退回 PATH。
+    chosen = (good or plain)[0][0]
+    sibling = chosen.with_name("ffprobe" + chosen.suffix)
+    ffprobe = str(sibling) if sibling.exists() else (shutil.which("ffprobe") or None)
+    out.append(
+        Finding(OK, "ffprobe 可用", ffprobe)
+        if ffprobe
+        else Finding(
+            WARN, "未检测到 ffprobe", "",
+            "它与 ffmpeg 通常一起提供，缺了会让时长/分辨率读不出来（合并、转场、字幕都靠它）。",
+        )
+    )
+    return out
+
+
 def check_venv_and_deps(root: Path) -> list[Finding]:
     out: list[Finding] = []
     vpy = venv_python(root)
@@ -447,6 +599,7 @@ def collect_findings(
     findings += check_interpreter(root)
     findings += check_location(root)
     findings += check_tooling(root, need_node=need_node)
+    findings += check_ffmpeg()
     findings += check_venv_and_deps(root)
     if check_port:
         findings += check_port_free(port)

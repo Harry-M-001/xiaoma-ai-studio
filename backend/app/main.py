@@ -35,10 +35,11 @@ from app.routers import (
     projects,
     providers,
     share,
+    subtitles,
     system,
     update,
 )
-from app.services import config_center_service, log_service, ollama_service
+from app.services import config_center_service, ffmpeg_service, log_service, ollama_service
 from app.services.runner import runner
 
 # 控制台保留完整信息（开发/本机排查用），文件那份会脱敏后再写，
@@ -67,6 +68,10 @@ async def lifespan(app: FastAPI):
     # 先把「本机有没有 Ollama」探一次，让首屏那条引导横幅不用等探测：
     # 冷探测实测要 0.6–2.6 秒，而带缓存之后只要十几毫秒。
     asyncio.create_task(ollama_service.detect())
+    # 字幕滤镜（libass）探一次：字幕设置页要拿它决定「能不能烧」，
+    # 不预热的话那一次请求会同步等一个几十毫秒的外部进程，而且首屏可能先于预热拿到
+    # 「还没探过 = 没有」这个错的结论。
+    asyncio.create_task(ffmpeg_service.warm_subtitle_filter())
     name = config_center_service.runtime_value("app.name", APP_NAME)
     logger.info("%s v%s 启动完成：http://%s:%s", name, __version__, settings.HOST, settings.PORT)
     yield
@@ -95,6 +100,7 @@ app.include_router(chat.router)
 app.include_router(generation.router)
 app.include_router(audio.router)
 app.include_router(director.router)
+app.include_router(subtitles.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(share.router)

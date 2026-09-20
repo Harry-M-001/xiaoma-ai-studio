@@ -149,6 +149,55 @@ def shortfall(durations: list[float], key: object, seconds: float) -> float:
     return seconds * (len(durations) - 1)
 
 
+def clip_starts(durations: list[float], key: object, seconds: float) -> list[float]:
+    """每一段在**成片**里的起点（秒）。
+
+    字幕时间轴必须用它，不能用「各段时长累加」——配了转场之后每接一次就少一个转场时长，
+    第二段实际是从 `len0 - seconds` 开始的。按累加算的话，后面每一段都会提前
+    `seconds * i`，越往后偏得越多（三段 0.5 秒转场、第三段就偏了 1 秒，
+    用户看到的就是「字幕比画面早出来一截」）。
+    """
+    if is_cut(key) or len(durations) < 2:
+        return _cumulative(durations)
+    out: list[float] = []
+    running = 0.0
+    for i, dur in enumerate(durations):
+        if i:
+            running = running + durations[i - 1] - seconds
+        out.append(max(0.0, round(running, 3)))
+        del dur
+    return out
+
+
+def _cumulative(durations: list[float]) -> list[float]:
+    out: list[float] = []
+    running = 0.0
+    for dur in durations:
+        out.append(round(running, 3))
+        running += dur
+    return out
+
+
+def clip_spans(
+    durations: list[float], key: object, seconds: float
+) -> list[tuple[float, float]]:
+    """每一段在成片里占的区间 `(起, 止)`。
+
+    止 = **下一段的起点**（不是「起点 + 本段时长」）：转场那一段是两段交叠的，
+    按「起点 + 时长」算会让相邻两条字幕重叠 `seconds` 秒——屏幕上两行字叠在一起。
+    最后一段的止 = 成片总长。
+    """
+    if not durations:
+        return []
+    starts = clip_starts(durations, key, seconds)
+    total = total_seconds(durations, key, seconds)
+    out: list[tuple[float, float]] = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else total
+        out.append((start, round(max(start, end), 3)))
+    return out
+
+
 def sfx_seconds(transition_seconds: float) -> float:
     """音效该合成多长：比转场长一个尾巴，让它响在转场之后而不是被一起切掉。"""
     return round(min(MAX_SECONDS + SFX_TAIL, transition_seconds + SFX_TAIL), 3)

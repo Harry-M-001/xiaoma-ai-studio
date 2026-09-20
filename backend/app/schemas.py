@@ -201,6 +201,26 @@ class DirectorMergeIn(BaseModel):
     sfx: str = ""
     # 或者直接用资产库里的一条音频当音效；给了它就以它为准（内置 key 忽略）
     sfx_asset_id: int | None = None
+    # ---- 字幕（v1.1.25）----
+    # 版式 key。**空 = 没选过**，用默认版式；非空 = 用户选的，谁都不许改
+    subtitle_style: str = ""
+    # 字号缩放，1.0 为版式自带大小；超范围由服务端夹到边界
+    subtitle_scale: float | None = None
+    # 逐段一句字幕，按下标与 asset_ids 对齐；空串 / 缺位 = 这一段不出字幕。
+    # 时间轴由**成片**里各段的区间算（`transitions.clip_spans`）——
+    # 配了转场之后成片会变短，用「各段时长累加」会让字幕一段比一段提前。
+    subtitles: list[str] = Field(default_factory=list)
+
+
+class SubtitlePreviewIn(BaseModel):
+    """字幕版式预览：真渲染一帧，让用户看到最终效果。"""
+
+    style: str = ""
+    scale: float | None = None
+    # 留空则用内置示例文本（带繁体与生僻字，用来暴露缺字与字体回退）
+    text: str = ""
+    width: int = 1280
+    height: int = 720
 
 
 class VideoGenerateIn(BaseModel):

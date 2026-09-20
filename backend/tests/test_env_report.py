@@ -164,6 +164,168 @@ def test_hint_renders():
     assert "--report" in out  # 每条提示都要顺手告诉用户怎么把报告发回来
 
 
+def test_every_hint_renders_without_crashing():
+    """每一个提示键都要能打出来，而且都要告诉用户怎么把报告发回来。
+
+    `--hint <key>` 是「启动脚本失败时唯一能看到的解释」，某一条打不出来就等于
+    那一类失败对用户完全不可读。
+    """
+    import contextlib
+    import io
+
+    for key in env.HINTS:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = env.main(["--hint", key])
+        assert code == 0, key
+        out = buf.getvalue()
+        assert out.strip(), f"{key} 打出来是空的"
+        assert "--report" in out, f"{key} 没告诉用户怎么把报告发回来"
+
+
+def test_ffmpeg_hints_tell_how_to_install():
+    """ffmpeg 的两条提示必须写清「怎么装」——只说「找不到 ffmpeg」等于没说。"""
+    for key in ("ffmpeg-missing", "ffmpeg-nolibass"):
+        assert key in env.HINTS, key
+        text = "\n".join(env.HINTS[key])
+        assert "winget" in text and "brew" in text, f"{key} 没给各平台的装法"
+        assert "http" in text, f"{key} 没给下载地址"
+
+
+LIBASS_FILTERS = " .. ass               V->V   Render ASS subtitles onto input video\n .. subtitles         V->V   Render text subtitles\n"
+TRIMMED_FILTERS = " TS scale             V->V   Scale the input video size\n .. fps               V->V   ...\n"
+
+
+def _fake_ffmpeg(candidates: list[Path], tables: dict[str, str]):
+    """把 `ffmpeg_candidates` 与 `_run` 换掉，模拟机器上有哪几个 ffmpeg。
+
+    `tables` 的键是路径字符串，值是 `-filters` 的输出（用来判有没有 libass）。
+    **键要先过 `str(Path(...))` 归一化**：Windows 上 `Path("C:/x/f.exe")` 的 `str()`
+    是反斜杠，直接拿正斜杠字符串当键会一条都命中不了——那样测试会「因为全都查不到
+    libass」而走进另一个分支，看起来像代码错了。
+    """
+    normalized = {str(Path(k)): v for k, v in tables.items()}
+    real_candidates = env.ffmpeg_candidates
+    real_run = env._run
+
+    def fake_candidates() -> list[Path]:
+        return list(candidates)
+
+    def fake_run(cmd, timeout=30, *, full=False):  # noqa: ANN001, ARG001
+        path = str(cmd[0])
+        if "-version" in cmd:
+            return 0, f"ffmpeg version 9.9 fake at {path}"
+        if "-filters" in cmd:
+            return 0, normalized.get(path, "")
+        return 0, ""
+
+    env.ffmpeg_candidates = fake_candidates  # type: ignore[assignment]
+    env._run = fake_run  # type: ignore[assignment]
+    try:
+        return env.check_ffmpeg()
+    finally:
+        env.ffmpeg_candidates = real_candidates  # type: ignore[assignment]
+        env._run = real_run  # type: ignore[assignment]
+
+
+def test_check_ffmpeg_reports_missing_as_a_warning():
+    """没装 ffmpeg 只该是警告：它不影响启动，也不影响对话/出图/出视频。"""
+    out = _fake_ffmpeg([], {})
+    assert [f.level for f in out] == [env.WARN], out
+    # 必须写清「哪些功能会受影响」，否则用户以为整个应用坏了
+    assert "导演台" in out[0].detail, out[0].detail
+
+
+def test_check_ffmpeg_prefers_the_build_that_has_libass():
+    """**候选要全找一遍再挑**——只看 `which` 会误报。
+
+    真实现场（本机就是这样）：PATH 里那个是某编辑器自带的裁剪版（没有 libass），
+    而应用实际用的是 winget 装的完整版。体检若只报 PATH 里那个，用户会看到一个
+    根本不存在的警告。
+    """
+    trimmed = "C:/some/app/ffmpeg.exe"
+    full = "C:/winget/ffmpeg.exe"
+    out = _fake_ffmpeg(
+        [Path(trimmed), Path(full)], {trimmed: TRIMMED_FILTERS, full: LIBASS_FILTERS}
+    )
+    titles = {f.title: f.level for f in out}
+    assert any("libass）可用" in t and v == env.OK for t, v in titles.items()), titles
+    # 挑中的是带 libass 的那个（比路径要比归一化后的，Windows 上是反斜杠）
+    picked = next(f.detail for f in out if f.title.startswith("ffmpeg 可用"))
+    assert str(Path(full)) in picked, picked
+    # 另一个不静默略过：要让用户知道应用不用它
+    assert any("没有 libass" in t for t in titles), titles
+
+
+def test_check_ffmpeg_warns_when_only_a_trimmed_build_exists():
+    """只有裁剪版时要说清「烧不了字幕」并指向换构建的提示。"""
+    trimmed = "C:/some/app/ffmpeg.exe"
+    out = _fake_ffmpeg([Path(trimmed)], {trimmed: TRIMMED_FILTERS})
+    warn = next(f for f in out if "libass" in f.title)
+    assert warn.level == env.WARN, warn.title
+    assert "ffmpeg-nolibass" in warn.hint, warn.hint
+    # 也要说清「不影响什么」，免得用户以为整条链都废了
+    assert "不受影响" in warn.detail or "不影响" in warn.detail, warn.detail
+
+
+def test_check_ffmpeg_reads_the_full_filter_list():
+    """判 libass 必须读**完整**的 `-filters` 输出。
+
+    `_run` 默认只回第一行；只看第一行必然得出「没有 libass」，而应用里那份
+    `subtitle_filter_available()` 用的是全文——两处结论不一致就是误报。
+    """
+    real_run = env._run
+    real_candidates = env.ffmpeg_candidates
+    seen: list[bool] = []
+
+    def fake_run(cmd, timeout=30, *, full=False):  # noqa: ANN001, ARG001
+        if "-filters" in cmd:
+            seen.append(full)
+            # 只有整段里才看得到 ass：第一行是 scale
+            return 0, TRIMMED_FILTERS + LIBASS_FILTERS
+        return 0, "ffmpeg version 9.9"
+
+    env._run = fake_run  # type: ignore[assignment]
+    env.ffmpeg_candidates = lambda: [Path("C:/x/ffmpeg.exe")]  # type: ignore[assignment]
+    try:
+        out = env.check_ffmpeg()
+    finally:
+        env._run = real_run  # type: ignore[assignment]
+        env.ffmpeg_candidates = real_candidates  # type: ignore[assignment]
+    assert seen and all(seen), "查滤镜清单时没要完整输出"
+    assert any("libass）可用" in f.title for f in out), [f.title for f in out]
+
+
+def test_readme_documents_the_required_tools():
+    """README 必须写清「要装什么、去哪下、怎么核对」。
+
+    这是新人第一眼要看的东西；漏了 ffmpeg（尤其是它的 libass 要求）会直接表现成
+    「别的都能用、就是烧字幕失败」，而那时用户已经剪完片子了。
+    """
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    for need in (
+        "## 环境要求",
+        "https://www.python.org/downloads/",
+        "https://nodejs.org/",
+        "winget install Gyan.FFmpeg",
+        "brew install ffmpeg",
+        "libass",
+        "FFMPEG_PATH",
+        "backend/tools/env_report.py",
+        "backend/assets/fonts/SOURCES.md",
+    ):
+        assert need in text, f"README 里少了：{need}"
+    # 三种安装方式各自要装什么，必须在同一张表里说清
+    assert "Windows 便携包" in text and "只有 ffmpeg" in text, "没说清便携包只需要 ffmpeg"
+    # 字体手动下载地址（想离线装或自己校验的人要用）
+    for url in (
+        "fonts-v1/NotoSerifCJKsc-Regular.otf",
+        "fonts-v1/LXGWWenKai-Regular.ttf",
+        "fonts-v1/SmileySans-Oblique.ttf",
+    ):
+        assert url in text, f"README 里少了字体地址：{url}"
+
+
 def test_launchers_reference_the_checker():
     """两个启动脚本都必须先跑体检。
 
