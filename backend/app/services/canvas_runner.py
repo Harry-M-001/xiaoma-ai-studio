@@ -136,6 +136,10 @@ def asset_view(asset: Asset, params: dict | None = None) -> dict:
         "category": asset.category,
         "label": label,
         "title": title,
+        # 「这一张属于哪一组候选」：前端靠它把同一镜 / 同一资产的几张排成一组来挑定稿。
+        # 分组规则只在后端有一份（candidate_key），前端不重写一遍——
+        # 两处各判一次的话，会出现「界面上分在一组的，后端其实不是一组」。
+        "candidateKey": candidate_key(data),
     }
 
 
@@ -210,14 +214,97 @@ def version_pin_of(node: dict) -> str:
     return str((node.get("data") or {}).get("versionKey") or "").strip()
 
 
-async def _latest_task_assets(
-    db: AsyncSession, project_id: int, node_id: int | str, version_key: object = None
-) -> list[Asset]:
-    """取某画布节点要交付给下游的那一版产物（按生成顺序）。
+def candidate_key(params: dict) -> str:
+    """把「一组候选」算出来：同一组的几张是同一个位置的备选，最多挑一张定稿。
 
-    默认是**最新一版**；节点上回滚过（`data.versionKey` 指到旧的一版）就给那一版——
-    这是「回滚」真正生效的地方：下游节点、预览、体检、样片都从这里取产物，
-    所以只要这一处认了，整条链读到的就是旧那一版。
+    分组依据是「这组图是什么」里**最稳定的那个身份**，没有就整节点一组：
+
+    - 分镜图节点：按**镜号**（一镜出 4 张 = 这一镜的四个备选）
+    - 资产设定图节点：按**资产名**（一个角色出 4 张）
+    - 普通图片节点：整节点一组（同一个提示词出的 4 张就是四个候选）
+
+    **不用任务 id 分组**：任务 id 每生成一次就变，拿它当键会让「在上一版里定稿的那张」
+    在生成新版之后变成指向不存在的键——而用户想表达的是「这个镜位用这张」，
+    与它是第几次生成的无关。
+    """
+    shot = str(params.get("shot_no") or "").strip()
+    if shot:
+        return f"shot:{shot}"
+    name = str(params.get("asset_name") or "").strip()
+    if name:
+        return f"asset:{name}"
+    return ""
+
+
+def picks_of(node: dict) -> dict[str, int]:
+    """节点上「每组定稿了哪一张」（`data.picks`）；没定稿就是空字典 = 组内全部交付。
+
+    定稿与回滚同一个口径：**只有用户显式点过才写，生成新产物不会动它**。
+    落在节点 data 上而不是新开一列——「交付哪几张」和「交付哪一版」是同一个层级的决定，
+    都该跟着图走（分享码导出导入时也能一起带走）。
+
+    读的时候把认不出来的值丢掉（手改 JSON / 老数据都可能有脏值），
+    一个脏值不该让整张图打不开。
+    """
+    raw = (node.get("data") or {}).get("picks")
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in raw.items():
+        try:
+            aid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if aid > 0:
+            out[str(key)] = aid
+    return out
+
+
+def apply_picks(
+    assets: list[Asset], keys: dict[int, str], picks: dict[str, int]
+) -> list[Asset]:
+    """按定稿过滤：**定了稿的那一组只留定稿那张**，没定稿的组原样交付。
+
+    `keys` 是「资产 id → 候选组键」（由它所属任务的参数算出来，见 `candidate_key`）。
+
+    定稿指不到任何一张时（那一版里没有它，比如回滚到了定稿之前的那一版），
+    这一组**保持整组交付**——与「回滚指不到版本时退回最新」是同一个口径：
+    不因为一次选择失效就让下游什么都读不到。节点面板会如实说明这件事。
+    """
+    if not picks:
+        return assets
+    groups: dict[str, list[Asset]] = {}
+    for a in assets:
+        groups.setdefault(keys.get(a.id, ""), []).append(a)
+
+    keep: set[int] = set()
+    for key, group in groups.items():
+        picked = picks.get(key)
+        if picked is not None and any(a.id == picked for a in group):
+            keep.add(picked)
+        else:
+            keep.update(a.id for a in group)
+    return [a for a in assets if a.id in keep]
+
+
+async def _latest_task_assets(
+    db: AsyncSession,
+    project_id: int,
+    node_id: int | str,
+    version_key: object = None,
+    picks: dict[str, int] | None = None,
+) -> list[Asset]:
+    """取某画布节点要交付给下游的那几张产物（按生成顺序）。
+
+    这是「这个节点交付什么」的**唯一出口**，两道显式选择都在这里生效：
+
+    - **版本**（`data.versionKey`）：默认给最新一版；回滚过就给回滚到的那一版。
+    - **定稿**（`data.picks`）：一组候选里只留定稿那张；没定稿的组整组交付。
+
+    「一处判断」是刻意的：下游取值、预览计数、分镜体检、静图样片都从这里取，
+    所以只要这里认了，整条链读到的就是同一批产物。分几处各判一次的话，
+    迟早出现「画布上显示的是这一张、下游用的是另一张」——而这正是这一项要修的问题
+    （以前逐镜出视频遇到「一镜多张」时只能拿到最后生成的那张，用户挑不了）。
 
     一个版本里可能有多个任务（资产链 / 分镜图 / 逐镜视频一次运行派 N 个任务），
     它们带着同一个批次标记，按标记收齐——否则节点上只会显示最后一个任务的图。
@@ -244,7 +331,13 @@ async def _latest_task_assets(
         .where(Asset.task_id.in_([t.id for t in tasks]))
         .order_by(Asset.id.asc())
     )
-    return list(arow.scalars().all())
+    assets = list(arow.scalars().all())
+    if not picks:
+        return assets
+
+    # 资产属于哪一组候选：看它所属任务的参数（镜号 / 资产名）
+    keys = {t.id: candidate_key(read_task_params(t)) for t in tasks}
+    return apply_picks(assets, {a.id: keys.get(a.task_id or 0, "") for a in assets}, picks)
 
 
 # 版本列表里每版带几张产物缩略图：用户是靠「看一眼」认出版本的，标题里的时间帮不上忙
@@ -694,7 +787,11 @@ async def _assets_by_shot(db: AsyncSession, assets: list[Asset]) -> dict[str, As
     分镜图节点在建任务时把镜号写进了 `params_json`，这里顺着 `Asset.task_id`
     读回来，就知道每张图是哪一镜的。**靠镜号配对而不是靠顺序**：上游可能被
     「生成镜数」截断过，两边的顺序不一定对得齐，按顺序配会张冠李戴。
-    同一镜有多张（多张采样）时保留最新的一张。
+
+    同一镜有多张（多张采样）时，**用户在节点上定稿的那张说了算**——定稿在
+    `_latest_task_assets` 里就已经生效了，所以传进来的通常每镜只剩一张。
+    没定稿时退回「保留最新生成的那张」：这是老行为，可预期但确实不是用户挑的，
+    所以节点面板会提示「这一镜还有别的候选，可以定稿一张」。
     """
     task_ids = {a.task_id for a in assets if a.task_id}
     if not task_ids:
@@ -1162,7 +1259,9 @@ async def _create_node_task(
         if mode == "text2video":
             pass  # 纯文本生成，上游/手动媒体一律忽略
         elif mode == "first_last":
-            # 参考位约定：第 1 张=首帧，第 2 张=尾帧
+            # 参考位约定：第 1 张=首帧，第 2 张=尾帧。
+            # 上游「一镜多张候选」时上游已按定稿过滤过，所以这里拿到的就是用户挑的那张；
+            # 没定稿时会按生成顺序取前两张（老行为），节点面板会提示可以定稿。
             frames = images[:2]
             if not frames:
                 raise ValueError("首尾帧模式需要至少一张首帧图片（连接上游图片节点或在图库选择）")
@@ -1239,7 +1338,8 @@ async def _resolve_upstream(
             upstream.append((src["id"], src, []))
             continue
         pin = version_pin_of(src) if use_pins else ""
-        assets = await _latest_task_assets(db, project_id, src["id"], pin)
+        picks = picks_of(src) if use_pins else {}
+        assets = await _latest_task_assets(db, project_id, src["id"], pin, picks)
         upstream.append((src["id"], src, assets))
     return upstream
 
@@ -1501,7 +1601,9 @@ async def preview_graph(project_id: int) -> dict:
                 for _sid, s, assets in upstream
                 if is_runnable(s["type"]) and not assets and not _doc_override_text(s)
             ]
-            existing = await _latest_task_assets(db, project_id, nid, version_pin_of(node))
+            existing = await _latest_task_assets(
+                db, project_id, nid, version_pin_of(node), picks_of(node)
+            )
 
             item: dict = {
                 "id": nid,
@@ -1673,7 +1775,9 @@ async def lint_graph(project_id: int) -> dict:
             if not ntype or not nid:
                 continue
             label = NODE_SCHEMAS.get(ntype, {}).get("label") or ntype
-            assets = await _latest_task_assets(db, project_id, nid, version_pin_of(node))
+            assets = await _latest_task_assets(
+                db, project_id, nid, version_pin_of(node), picks_of(node)
+            )
             # 手改正文 > 已生成的正文。
             # 注意**不能**再兜底到 `node.data.prompt`：对文档节点来说 prompt 是「生成要求」
             # （比如「请按三幕结构改写，每镜不超过 4 秒」），不是内容。把它当内容会对着
@@ -1856,7 +1960,9 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
                     "请把上游「分镜」节点接进来"
                 )
 
-            assets = await _latest_task_assets(db, project_id, node_id, version_pin_of(node))
+            assets = await _latest_task_assets(
+                db, project_id, node_id, version_pin_of(node), picks_of(node)
+            )
             by_shot = await _assets_by_shot(db, assets)
             if not by_shot:
                 raise AnimaticInputError("这个节点还没有出过分镜图，先运行一次再出样片")

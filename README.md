@@ -112,7 +112,7 @@ git clone git@gitee.com:haoruiM/xiaoma-ai-studio.git
 只想拿某一个发行版、不想拉完整历史（体积小很多）：
 
 ```bash
-git clone -b v1.1.22 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
+git clone -b v1.1.23 --depth 1 https://github.com/Harry-M-001/xiaoma-ai-studio.git
 ```
 
 ### 方式 B：下载压缩包（不用装 git）
@@ -129,7 +129,7 @@ Windows PowerShell：
 Invoke-WebRequest -Uri https://github.com/Harry-M-001/xiaoma-ai-studio/archive/refs/heads/main.zip -OutFile xiaoma-ai-studio.zip
 ```
 
-要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.22`。
+要固定版本就把 `refs/heads/main` 换成 `refs/tags/v1.1.23`。
 
 > **注意**：Gitee 的「下载 ZIP / 下载压缩包」**需要先登录 Gitee 账号**，匿名访问只会跳到一个登录页，拿不到文件。所以要给不特定的人一个能直接下的地址，请用上面 GitHub 的直链。
 

@@ -791,12 +791,36 @@ input, textarea, select { font-family: inherit; }
   grid-template-columns: repeat(auto-fill, minmax(var(--thumb, 88px), 1fr));
 }
 .canvas-prodcell {
-  position: relative; padding: 0; aspect-ratio: 1; cursor: zoom-in;
+  position: relative; aspect-ratio: 1;
   border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
-  background: var(--surface-2); display: block;
+  background: var(--surface-2);
 }
 .canvas-prodcell:hover { border-color: var(--primary); }
-.canvas-prodcell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 已定稿的那张要有明显标记：下游只用它，用户得一眼看出是哪张 */
+.canvas-prodcell.is-picked { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+.canvas-prodthumb {
+  display: block; width: 100%; height: 100%; padding: 0;
+  border: 0; background: none; cursor: zoom-in;
+}
+.canvas-prodthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/*
+ * 「定稿」按钮：**常显**，只在「这一组有多张」时才出现（一张没什么可挑的）。
+ *
+ * 本来做成悬停才显示（格子多的时候更清爽），但那样有两个问题：
+ * ① 用户不悬停就不知道有这个功能，而它决定下游用哪张——这种事不该藏；
+ * ② 悬停态在无鼠标/触屏上根本不出现。所以宁可让密集的网格稍微满一点。
+ * 底色半透明，鼠标移到它自己身上才变实，免得一片格子都在喊。
+ */
+.canvas-pick {
+  position: absolute; top: 4px; right: 4px; z-index: 1;
+  padding: 1px 7px; border-radius: 999px; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(0, 0, 0, 0.45); color: #fff;
+  font-size: 10px; font-weight: 600; line-height: 1.6;
+  opacity: 0.85; transition: opacity 0.12s, background 0.12s;
+}
+.canvas-pick:hover { opacity: 1; background: rgba(0, 0, 0, 0.75); }
+.canvas-pick.on { opacity: 1; background: var(--primary); border-color: var(--primary); }
 .canvas-prodlabel {
   position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 5px 3px;
   font-size: 10px; font-weight: 600; color: #fff; text-align: left;

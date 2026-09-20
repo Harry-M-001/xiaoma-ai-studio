@@ -171,6 +171,13 @@ interface NodePanelCtx {
    * 「标签已经是第 1 版、缩略图还是第 2 版」。
    */
   pickVersion: (id: string, key: string | null) => void;
+  /**
+   * 给某一组候选定稿（`assetId` 传 `null` = 取消这一组的定稿）。
+   *
+   * 组键由后端在产物里给出（`candidateKey`：镜号 / 资产名 / 整节点），**前端不自己分组**——
+   * 两处各判一次会出现「界面上分在一组的，后端其实不是一组」。
+   */
+  pickCandidate: (id: string, groupKey: string, assetId: number | null) => void;
   /** 把同一个风格套到画布上所有支持风格的节点（省得七八个节点逐个选） */
   applyStyleToAll: (key: string) => void;
   /** 按屏幕像素平移动画布（浮框超出可视区时用来自动让位） */
@@ -1696,6 +1703,23 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
   const features = schema.features ?? [];
   // 图片产物（文档 / 视频不走这个网格）
   const imageProducts = (status?.assets ?? []).filter((a) => a.kind === "image");
+  /**
+   * 候选与定稿：同一组的几张是同一镜 / 同一资产的备选，挑一张定稿给下游用。
+   *
+   * **组键来自后端**（产物里的 `candidateKey`），前端只负责按它数个数——
+   * 分组规则重写一遍的话，会出现「界面上分在一组的，后端其实不是一组」。
+   */
+  const picks = (data.picks as Record<string, number> | undefined) ?? {};
+  const groupSize = new Map<string, number>();
+  for (const a of imageProducts) {
+    const k = a.candidateKey ?? "";
+    groupSize.set(k, (groupSize.get(k) ?? 0) + 1);
+  }
+  /** 有多张可挑的组数（只有一张的组不给「定稿」按钮——没得挑） */
+  const pickableGroups = [...groupSize.values()].filter((n) => n > 1).length;
+  const pickedGroups = Object.keys(picks).filter((k) => groupSize.has(k)).length;
+  /** 定稿指不到当前这一版的任何一张（回滚到了定稿之前、或换了版本）——要如实说 */
+  const pickMissing = Object.keys(picks).filter((k) => !groupSize.has(k)).length;
   // 产物版本栈：节点上回滚到的那一版（空 = 跟最新），与后端读的是同一个字段
   const versionPin = String(data.versionKey ?? "");
   const versionItems = versions?.items ?? [];
@@ -2295,19 +2319,49 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
             )}
           </div>
           <div className="canvas-prodgrid" style={{ "--thumb": `${ctx.thumb}px` } as React.CSSProperties}>
-            {imageProducts.map((a, i) => (
-              <button
-                key={a.id}
-                type="button"
-                className="canvas-prodcell"
-                onClick={() => ctx.preview(a.url, a.title || a.name)}
-                title={a.title || a.name}
-              >
-                <img src={a.url} alt={a.label || a.name} loading="lazy" />
-                <span className="canvas-prodlabel">{a.label || `#${i + 1}`}</span>
-              </button>
-            ))}
+            {imageProducts.map((a, i) => {
+              const key = a.candidateKey ?? "";
+              // 只有「这一组不止一张」时才给定稿按钮：一张没什么可挑的
+              const many = (groupSize.get(key) ?? 0) > 1;
+              const picked = many && picks[key] === a.id;
+              return (
+                <div key={a.id} className={picked ? "canvas-prodcell is-picked" : "canvas-prodcell"}>
+                  <button
+                    type="button"
+                    className="canvas-prodthumb"
+                    onClick={() => ctx.preview(a.url, a.title || a.name)}
+                    title={a.title || a.name}
+                  >
+                    <img src={a.url} alt={a.label || a.name} loading="lazy" />
+                    <span className="canvas-prodlabel">{a.label || `#${i + 1}`}</span>
+                  </button>
+                  {many && (
+                    <button
+                      type="button"
+                      className={picked ? "canvas-pick on" : "canvas-pick"}
+                      onClick={() => ctx.pickCandidate(id, key, picked ? null : a.id)}
+                      title={picked ? "取消定稿（下游不再只认这一张）" : "定稿：下游只用这一张"}
+                    >
+                      {picked ? "已定稿" : "定稿"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
+          {pickableGroups > 0 && (
+            <div className="field-hint">
+              {pickedGroups > 0
+                ? `下游只用已定稿的那张（${pickedGroups} 组已定稿）；没定稿的组会把整组都交给下游。`
+                : "这几组都有多张候选：点格子右上角「定稿」，下游就只用挑中的那一张；不定稿时下游会拿到整组。"}
+            </div>
+          )}
+          {pickMissing > 0 && (
+            <div className="field-hint danger">
+              有 {pickMissing} 组定稿指不到当前这一版的图（多半是回滚到了定稿之前的那一版，或又生成了一版）——
+              那几组现在会把整组交给下游。重新点一次「定稿」即可。
+            </div>
+          )}
           <div className="field-hint">
             {String(data.nodeType) === ASSET_IMAGE_KIND
               ? "点开可放大；资产名已入库，下游提到名字会自动挂图"
@@ -3245,6 +3299,25 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     versionSwitchPending.current = true;
   }, []);
 
+  /**
+   * 给某一组候选定稿。
+   *
+   * 不需要像版本那样补刷状态：产物网格展示的是**全部候选**（不然用户没法挑），
+   * 定稿只影响「下游拿哪一张」，所以改完等自动保存落库就够了。
+   */
+  const pickCandidate = useCallback((id: string, groupKey: string, assetId: number | null) => {
+    setNodes((prev) =>
+      prev.map((n) => {
+        if (n.id !== id) return n;
+        const next: Record<string, number> = { ...((n.data.picks as Record<string, number>) ?? {}) };
+        if (assetId === null) delete next[groupKey];
+        else next[groupKey] = assetId;
+        return { ...n, data: { ...n.data, picks: next } };
+      })
+    );
+    setDirty(true);
+  }, []);
+
   // 一个风格套全链：只改支持 styleSelect 的节点，其余节点不动
   const applyStyleToAll = useCallback(
     (key: string) => {
@@ -3437,6 +3510,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       running,
       updateNode: updateNodeData,
       pickVersion,
+      pickCandidate,
       applyStyleToAll,
       nudgeViewport,
       preview: previewProduct,
@@ -3460,6 +3534,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       renderAnimatic,
       updateNodeData,
       pickVersion,
+      pickCandidate,
       applyStyleToAll,
       nudgeViewport,
       previewProduct,

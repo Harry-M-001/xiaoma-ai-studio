@@ -295,6 +295,13 @@ export interface CanvasNodeData {
    * 节点上会把这件事标出来（不然就成了静默行为）。
    */
   versionKey?: string | null;
+  /**
+   * 每一组候选里定稿的那一张（`{组键: 资产 id}`）。组键由后端给（镜号 / 资产名 / 整节点）；
+   * 空对象 = 还没定过稿，下游按老行为取（一组全给）。
+   *
+   * 与 `versionKey` 一样：只有用户点了「定稿」才写，生成新产物不会动它。
+   */
+  picks?: Record<string, number> | null;
   /** 导演风格卡标识（空 = 不注入风格） */
   styleKey?: string;
   /**
@@ -661,6 +668,8 @@ export interface CanvasNodeStatus {
     label?: string;
     /** 悬停说明：镜号+景别运镜+自动挂的参考图，或资产名+类型 */
     title?: string;
+    /** 这一张属于哪一组候选（同一组的几张是同一镜 / 同一资产的备选，只能挑一张定稿） */
+    candidateKey?: string;
   }[];
   progress?: number;
   error?: string | null;
