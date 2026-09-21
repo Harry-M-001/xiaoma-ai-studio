@@ -10,6 +10,8 @@ import type {
   ConfigMap,
   ConfigScopesMeta,
   ConfigSnapshot,
+  EngineJob,
+  EnginePageData,
   LogExport,
   LogsStatus,
   ModalityMeta,
@@ -446,6 +448,27 @@ export const api = {
   // 运镜词表：分镜表里那一栏的合法写法。体检报「不在词表里」时前端拿它显示可选值，
   // 前端不写死这份清单（与其它 meta 接口同一个口径）。
   listCameraMoves: () => request<CameraMoveTable>("/api/meta/camera-moves"),
+
+  // ---- 本机引擎（批次 9）----
+  // 清单、体检、装没装上、下到哪儿了，全在这一个接口里（前端不另抄表）
+  listEngines: () => request<EnginePageData>("/api/engines"),
+  /** 用户点了「重新检测」（刚插上显卡 / 刚装完驱动时用） */
+  refreshEngineHardware: () =>
+    request<EnginePageData>("/api/engines/hardware/refresh", { method: "POST" }),
+  downloadEngine: (key: string) =>
+    request<{ job: EngineJob }>(`/api/engines/${key}/download`, { method: "POST" }),
+  cancelEngine: (key: string) =>
+    request<{ job: EngineJob }>(`/api/engines/${key}/cancel`, { method: "POST" }),
+  removeEngine: (key: string) =>
+    request<{ key: string; freed: number; freedText: string }>(
+      `/api/engines/${key}/remove`,
+      { method: "POST" },
+    ),
+  verifyEngine: (key: string) =>
+    request<{ key: string; ok: boolean; bytes: number; detail: string }>(
+      `/api/engines/${key}/verify`,
+      { method: "POST" },
+    ),
 
   // ---- 在线更新 ----
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),

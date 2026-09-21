@@ -294,6 +294,86 @@ export interface SpeechResult {
   speed: number;
 }
 
+/* ---------------- 本机引擎（批次 9） ----------------
+ *
+ * 形状与 `/api/engines` 一一对应：清单（体积 / sha256 / 授权 / 下载地址）、
+ * 这台机器的体检、以及每一项此刻装没装上、下到哪儿了。
+ * 前端**不抄任何一份表**：档位建议、能不能装、为什么，都是后端算好给的。
+ */
+
+export interface EngineHardware {
+  gpuNames: string[];
+  gpuText: string;
+  hasGpu: boolean;
+  nvidia: boolean;
+  vulkan: boolean;
+  vulkanDevice: string;
+  cores: number;
+  ramGb: number;
+}
+
+export interface EngineJob {
+  key: string;
+  label: string;
+  phase: string;
+  done: number;
+  total: number;
+  error: string;
+  note: string;
+}
+
+export interface EngineItem {
+  key: string;
+  label: string;
+  kind: string;
+  kindLabel: string;
+  why: string;
+  note: string;
+  size: number;
+  sizeText: string;
+  license: string;
+  homepage: string;
+  url: string;
+  filename: string;
+  archive: string;
+  archiveLabel: string;
+  marker: string;
+  /** 清单里的数是怎么来的：upstream-digest / local-download */
+  proof: string;
+  needs: string[];
+  missingNeeds: string[];
+  needsLabel: string;
+  level: string;
+  levelLabel: string;
+  reason: string;
+  installed: boolean;
+  installedMarker: string;
+  archiveBytes: number;
+  archiveComplete: boolean;
+  archivePath: string;
+  downloading: boolean;
+  job: EngineJob | null;
+}
+
+export interface EngineLocalService {
+  key: string;
+  label: string;
+  running: boolean;
+  detail: string;
+  route: string;
+}
+
+export interface EnginePageData {
+  hardware: EngineHardware;
+  headline: string;
+  engines: EngineItem[];
+  job: EngineJob | null;
+  phaseLabels: Record<string, string>;
+  installedCount: number;
+  installedServices: EngineLocalService[];
+  totalSizeText: string;
+}
+
 /* ---------------- 配置域（后端注册表驱动，前端不写死清单） ---------------- */
 
 /** 公开配置：键 → 值。如 app.name / defaults.temperature / limits.upload_max_mb */

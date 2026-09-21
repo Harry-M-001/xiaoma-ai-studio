@@ -29,6 +29,7 @@ from app.routers import (
     chat,
     comfy,
     director,
+    engines,
     generation,
     logs,
     meta,
@@ -39,7 +40,13 @@ from app.routers import (
     system,
     update,
 )
-from app.services import config_center_service, ffmpeg_service, log_service, ollama_service
+from app.services import (
+    config_center_service,
+    engine_install,
+    ffmpeg_service,
+    log_service,
+    ollama_service,
+)
 from app.services.runner import runner
 
 # 控制台保留完整信息（开发/本机排查用），文件那份会脱敏后再写，
@@ -80,6 +87,8 @@ async def lifespan(app: FastAPI):
         await patrol_task
     except asyncio.CancelledError:
         pass
+    # 正在下载的本机引擎要停下来：不然进程关了、那条 httpx 连接还挂着写文件
+    await engine_install.shutdown()
     runner.shutdown()
 
 
@@ -101,6 +110,7 @@ app.include_router(generation.router)
 app.include_router(audio.router)
 app.include_router(director.router)
 app.include_router(subtitles.router)
+app.include_router(engines.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(share.router)

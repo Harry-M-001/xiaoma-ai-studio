@@ -328,7 +328,8 @@ register(
             {"key": "workflow", "label": "工作流", "icon": "workflow", "route": "workflow", "group_name": "main", "sort_order": 10, "enabled": False},
             {"key": "community", "label": "社区", "icon": "community", "route": "community", "group_name": "main", "sort_order": 11, "enabled": False, "requires_auth": True},
             {"key": "providers", "label": "模型服务", "icon": "settings", "route": "providers", "group_name": "settings", "sort_order": 1},
-            {"key": "settings", "label": "系统设置", "icon": "sliders", "route": "settings", "group_name": "settings", "sort_order": 2},
+            {"key": "engines", "label": "本机引擎", "icon": "cpu", "route": "engines", "group_name": "settings", "sort_order": 2},
+            {"key": "settings", "label": "系统设置", "icon": "sliders", "route": "settings", "group_name": "settings", "sort_order": 3},
         ],
     )
 )

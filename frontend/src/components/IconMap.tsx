@@ -15,6 +15,7 @@ import {
   Clapperboard,
   Home,
   FolderOpen,
+  Cpu,
 } from "lucide-react";
 
 /** 图标组件类型：与 lucide-react 的组件签名保持一致 */
@@ -46,6 +47,8 @@ const ICON_MAP: Record<string, IconComponent> = {
   clapperboard: Clapperboard,
   home: Home,
   folder: FolderOpen,
+  cpu: Cpu,
+  chip: Cpu,
 };
 
 /** 按名称取图标组件，未知名称回落到 Circle */

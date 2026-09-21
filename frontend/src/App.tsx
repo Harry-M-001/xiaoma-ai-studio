@@ -12,6 +12,7 @@ import ChatPage from "./pages/ChatPage";
 import ImagePage from "./pages/ImagePage";
 import VideoPage from "./pages/VideoPage";
 import SpeechPage from "./pages/SpeechPage";
+import EnginesPage from "./pages/EnginesPage";
 import AssetsPage from "./pages/AssetsPage";
 import PromptsPage from "./pages/PromptsPage";
 import TasksPage from "./pages/TasksPage";
@@ -44,11 +45,12 @@ const DEFAULT_NAV: NavMeta[] = [
   { key: "tasks", label: "任务中心", icon: "tasks", route: "tasks", group: "main", requires_auth: false },
   { key: "director", label: "导演台", icon: "clapperboard", route: "director", group: "main", requires_auth: false },
   { key: "providers", label: "模型服务", icon: "settings", route: "providers", group: "settings", requires_auth: false },
+  { key: "engines", label: "本机引擎", icon: "cpu", route: "engines", group: "settings", requires_auth: false },
   { key: "settings", label: "系统设置", icon: "sliders", route: "settings", group: "settings", requires_auth: false },
 ];
 
 /** 前端已实现的页面路由；导航里出现的其它 route 视为「未安装模块」 */
-const KNOWN_ROUTES = new Set(["home", "projects", "canvas", "chat", "image", "video", "speech", "assets", "prompts", "tasks", "director", "providers", "settings"]);
+const KNOWN_ROUTES = new Set(["home", "projects", "canvas", "chat", "image", "video", "speech", "assets", "prompts", "tasks", "director", "providers", "engines", "settings"]);
 
 /** route → modules.* 开关键，用于按配置关闭模块 */
 const MODULE_KEYS: Record<string, string> = {
@@ -257,6 +259,8 @@ function Shell() {
         return <DirectorPage onNavigate={setRoute} />;
       case "providers":
         return <ProvidersPage />;
+      case "engines":
+        return <EnginesPage />;
       case "settings":
         return <SettingsPage onMetaChanged={loadMeta} />;
       default:
