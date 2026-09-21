@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import math
 
+from . import speech
+
 # 配音结尾那零点零几秒是编码器的尾巴，不是台词——比它短就当作「读得完」
 TAIL_TOLERANCE = 0.05
 
@@ -133,6 +135,62 @@ def voice_for(speaker: str, mapping: dict[str, str], default: str) -> str:
     if name and name in mapping:
         return mapping[name]
     return str(default or "")
+
+
+def voice_plan(
+    segments: list[tuple[str, str]], mapping: dict[str, str], default: str
+) -> list[dict]:
+    """把按句的 `(说话人, 这一句)` 归成「一段一音色」的执行计划。
+
+    返回每一项：`{"voice", "speakers", "text", "sentences"}`，顺序不变。
+
+    **相邻同音色的句子必须并成一段**，理由有两条：
+    1. 同一个人说三句话切成三次合成，是白花两次钱；
+    2. 每两段之间会补一小段静音（见 `ffmpeg_service.join_audio`），并段就少两处接缝。
+
+    「说话人不同但音色相同」也并段（比如两个没配音色的角色都落到默认音色）：
+    念出来是同一个嗓子，分两段没有任何好处。
+    """
+    out: list[dict] = []
+    for speaker, text in segments:
+        body = str(text or "").strip()
+        if not body:
+            continue
+        voice = voice_for(speaker, mapping, default)
+        who = str(speaker or "").strip()
+        if out and out[-1]["voice"] == voice:
+            last = out[-1]
+            last["text"] = speech.join_lines([last["text"], body])
+            last["sentences"] += 1
+            if who and who not in last["speakers"]:
+                last["speakers"].append(who)
+            continue
+        out.append({
+            "voice": voice,
+            "speakers": [who] if who else [],
+            "text": body,
+            "sentences": 1,
+        })
+    return out
+
+
+def plan_summary(plan: list[dict]) -> str:
+    """一镜的对白计划写成人话（进日志与产物说明）。
+
+    一行一个人时只写「小焰（nova）」；一镜多人时写成「小焰（nova）→ 老陈（默认音色）」——
+    用户看到成片里两个人的声音时，能对上日志里的这一行。
+    """
+    if not plan:
+        return ""
+    def one(item: dict) -> str:
+        who = "/".join(item["speakers"]) if item["speakers"] else "未标注说话人"
+        return f"{who}（{item['voice'] or '默认音色'}）"
+    return " → ".join(one(p) for p in plan)
+
+
+def utterance_count(plan: list[dict]) -> int:
+    """这一镜要合成几次（= 要花几次语音调用的钱）。"""
+    return len(plan)
 
 
 def skip_reason(*, shot_no: str, audio_seconds: float | None, shot_seconds: int) -> str:

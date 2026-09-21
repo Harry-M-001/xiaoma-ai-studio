@@ -1018,6 +1018,74 @@ async def probe_audio_seconds(path: Path) -> float | None:
     return value if value > 0 else None
 
 
+async def join_audio(paths: list[Path], *, gap: float = 0.15) -> Path:
+    """把几条配音按顺序拼成一条，段与段之间补一小段静音。返回成片路径（在 storage 内）。
+
+    为什么要留缝：不同音色的两段直接对接时，上一句的尾音会和下一句的头音咬在一起
+    （各家 TTS 输出首尾的静音长度不一样），听着像一个人在抢话。0.15 秒足够听出「换人了」，
+    又不会让整条明显变长——**但它确实会变长**，所以调用方算「这一镜读不读得完」时
+    量的是拼完之后的时长（`probe_audio_seconds` 量的就是成品）。
+
+    **只有一条时原样返回它**：一镜一人的情形与以前完全一样，不重编码、不复制、
+    不引入这一版之外的任何新风险。
+    """
+    if not paths:
+        raise ValueError("没有可拼接的配音")
+    if len(paths) == 1:
+        return paths[0]
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，拼不了配音")
+    gap = max(0.0, min(2.0, float(gap)))
+    n = len(paths)
+
+    cmd: list[str] = [ffmpeg, "-y"]
+    for p in paths:
+        cmd += ["-i", str(p)]
+    # 静音源排在所有配音之后，索引就是 n..n+(n-2)；用 `anullsrc` 的 `d=` 定长，
+    # 省掉「-t 放在 -i 前还是后」这种两可的写法
+    for _ in range(n - 1):
+        cmd += ["-f", "lavfi", "-i", f"anullsrc=r=48000:cl=stereo:d={gap:.3f}"]
+
+    # 统一成同一档格式再拼：各段可能来自不同模型/不同采样率，不统一会在 concat 处爆
+    chains = [
+        f"[{i}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[s{i}]"
+        for i in range(n)
+    ]
+    order: list[str] = []
+    for i in range(n):
+        order.append(f"[s{i}]")
+        if i < n - 1 and gap > 0:
+            order.append(f"[{n + i}:a]")
+    chains.append("".join(order) + f"concat=n={len(order)}:v=0:a=1[out]")
+
+    out = _out_path("wav")
+    ok, err = await _run(
+        [*cmd, "-filter_complex", ";".join(chains), "-map", "[out]",
+         "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", str(out)],
+        _TIMEOUT_MUX,
+    )
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        out.unlink(missing_ok=True)
+        raise RuntimeError(f"拼接配音失败：{err}")
+    logger.info("配音拼接完成：%s 段（段间 %.2f 秒静音）→ %s", n, gap, out.name)
+    return out
+
+
+def new_workdir(prefix: str = "work") -> Path:
+    """公开的临时工作目录。**调用方必须用 `drop_workdir` 收走**（放在 finally 里）。
+
+    公开出来是因为「一镜多人」那条链要在里面放几句临时音频；而「临时目录忘了删」
+    这件事在本项目里真的发生过（`storage/tmp` 下积了 14 个），所以收尾函数一并给出来。
+    """
+    return _new_workdir(prefix)
+
+
+def drop_workdir(path: Path) -> None:
+    """收走一个临时目录（不存在也不报错）。"""
+    shutil.rmtree(path, ignore_errors=True)
+
+
 async def mux_audio(video: Path, audio: Path) -> Path:
     """把一条音轨封进无声成片，返回新文件路径。
 

@@ -102,16 +102,31 @@ def test_api_paths_match_the_backend_routes():
 
 
 def test_the_result_shape_matches_the_frontend_type():
-    """`synthesize_to_asset` 返回的键 → 前端 `SpeechResult` 的字段，一个都不能少。"""
+    """`synthesize_to_asset` 返回的键 → 前端 `SpeechResult` 的字段，一个都不能少。
+
+    这一版把「合成」与「落库」拆成了两层（一镜多人要按句各合成一次，而中间那几句
+    **不登记资产**），所以契约分在两处：`synthesize_bytes` 给哪几个键、
+    `synthesize_to_asset` 再补什么。只看其中一处会漏掉真正回给前端的东西。
+    """
     service = _text(BACKEND / "app" / "services" / "speech_service.py")
-    block = service[service.index("return asset, {") :]
-    keys = set(re.findall(r'"(\w+)":', block[: block.index("\n    }")]))
-    assert keys == {"chars", "seconds", "modelKey", "model", "voice", "speed"}, keys
+    made = service[service.index("return result.audio, result.content_type, {") :]
+    keys = set(re.findall(r'"(\w+)":', made[: made.index("\n    }")]))
+    assert keys == {"chars", "text", "modelKey", "model", "voice", "speed"}, keys
+
+    saved = service[
+        service.index("async def synthesize_to_asset") : service.index("async def synthesize_to_temp")
+    ]
+    assert 'return asset, {**info, "seconds": seconds}' in saved, (
+        "「落库」那一层没把合成给的键原样带上（前端会拿到一个空壳）"
+    )
+
     types = _text(SRC / "types.ts")
     result = types[types.index("export interface SpeechResult") :]
     result = result[: result.index("}")]
-    for key in keys:
+    for key in sorted(keys - {"text"}):
+        # `text` 是原样回显（前端不声明也用不到），其余每个键界面都要读
         assert key in result, f"前端 SpeechResult 里没有 {key}"
+    assert "seconds" in result, "前端 SpeechResult 里没有 seconds"
     assert "asset: Asset" in result, "返回里没带上资产（界面要靠它播放与下载）"
     # 音色清单的形状
     voices = _text(BACKEND / "app" / "routers" / "audio.py")

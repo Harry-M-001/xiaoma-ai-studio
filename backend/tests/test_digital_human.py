@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -38,6 +40,7 @@ from app.providers.openai_compat import OpenAICompatAdapter  # noqa: E402
 from app.services import (  # noqa: E402
     canvas_runner,
     digital_human,
+    ffmpeg_service,
     provider_store,
     runner,
     speech_service,
@@ -589,6 +592,16 @@ SHEET = """## 场景1 | 黄昏的站台
 # 这一份里镜头3 的台词（20 字 ≈ 4.4 秒）读不完 2 秒的镜
 SHEET_LONG = SHEET.replace("台词：你终于来了", "台词：他抬起头看着站台的尽头，轻轻叹了口气")
 
+# 一镜多人：两个人在**同一行**里说话（分镜表里最常见的写法）。
+# 两句各 4 字，配上下面的替身（0.25 秒/字）就是各 1.0 秒：
+# 分头算是 2.0 秒、拼完是 2.15 秒——**这两个数分属不同的判据**，见下面那条测试。
+SHEET_TWO_VOICES = """## 场景1 | 黄昏的站台
+
+### 镜头1 | 中景 | 固定 | 6s
+- 画面：两人对峙
+- 台词：小焰：你来了。老陈：我不走。
+"""
+
 
 def test_the_voice_map_forgives_colons_but_reports_junk():
     """「角色=音色」小表：中文冒号要认（用户十有八九这么打），认不出的行要报出来。
@@ -668,6 +681,57 @@ def _stub_tts(*, per_char: float = 0.22, fail_on: tuple[str, ...] = ()):
         yield calls
     finally:
         (speech_service.synthesize_to_asset, speech_service.default_model_key) = real  # type: ignore[assignment]
+
+
+def _ffmpeg_or_skip() -> str | None:
+    ff, _probe = asyncio.run(ffmpeg_service._resolve_binaries())
+    if not ff:
+        print("    跳过：本机没有可用的 ffmpeg", file=sys.stderr)
+    return ff
+
+
+@contextlib.contextmanager
+def _stub_tts_parts(ffmpeg: str, *, per_char: float = 0.25):
+    """替身：接管「一句 → 一条临时音频」，并**真的**写出一段能拼的 wav。
+
+    一镜多人那条路的中间几句走的是 `synthesize_to_temp`（只落临时目录、不登记资产），
+    所以这里替的是它、而不是 `synthesize_to_asset`。
+
+    时长按字数算（0.25 秒/字），与本机假 TTS 的口径一致；关键是它给出的是**真文件**，
+    后面那段拼接（`ffmpeg_service.join_audio`）跑的是真 ffmpeg——这一版的判据全压在
+    「拼完多长」上，只有真拼一次才量得出来。
+    """
+    calls: list[dict] = []
+
+    async def fake_default(db):  # noqa: ANN001, ANN202
+        return "5:tts-1"
+
+    async def fake_to_temp(db, *, model_key, text, voice="", speed=1.0, work, index):  # noqa: ANN001, ANN202
+        seconds = round(len(text) * per_char, 3)
+        path = work / f"seg{index}.wav"
+        ok, err = await ffmpeg_service._run(
+            [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+             f"sine=frequency=440:duration={seconds}",
+             "-ar", "48000", "-ac", "2", str(path)],
+            120,
+        )
+        assert ok, err
+        calls.append({"text": text, "voice": voice, "path": path, "work": work})
+        return path, {"chars": len(text), "seconds": seconds, "text": text, "voice": voice}
+
+    real = (speech_service.synthesize_to_temp, speech_service.default_model_key)
+    speech_service.synthesize_to_temp = fake_to_temp  # type: ignore[assignment]
+    speech_service.default_model_key = fake_default  # type: ignore[assignment]
+    try:
+        yield calls
+    finally:
+        (speech_service.synthesize_to_temp, speech_service.default_model_key) = real  # type: ignore[assignment]
+
+
+def _drop_asset_files(*assets: Asset) -> None:
+    """把测试里真的落到 storage 的成片删掉：跑测试不该在用户的数据目录里留东西。"""
+    for a in assets:
+        (ffmpeg_service.settings_storage_dir() / a.filename).unlink(missing_ok=True)
 
 
 def _doc(nodes: list[dict]) -> dict:
@@ -857,6 +921,9 @@ def test_the_preview_note_tells_the_user_about_the_extra_billing():
     assert '"dialogueCalls": dialogue_calls' in src, "预览没把额外调用次数给出去"
     assert "还会额外做" in src and "语音合成" in src, "没有那句提示"
     assert 'tp.get("shot_dialogue")' in src, "预览没有从任务上数这一镜会不会配对白"
+    # 一镜多人时次数会多于镜数，脚本里要说清「每句各一次、拼成一条」，
+    # 不然用户看到「5 镜 9 次合成」只会以为算错了
+    assert "每一句各合成一次" in src and "拼成这一镜的一条配音" in src, "没说一镜多人怎么算"
 
 
 def test_the_panel_says_what_happens_to_the_shots_that_do_not_fit():
@@ -866,6 +933,262 @@ def test_the_panel_says_what_happens_to_the_shots_that_do_not_fit():
     assert "不会出片" in block, "没说读不完的镜头会怎样"
     assert "shotDialogue: e.target.checked" in block, "开关没写回节点"
     assert "shotVoice" in block and "shotVoices" in block, "音色设置没接上"
+    # 一镜多人的写法要给个例子：用户不会自己想到「同行里再写一个角色名」就能换嗓子
+    assert "一镜里换好几个人说话" in block, "没告诉用户一镜里能换人说话"
+    assert "小焰：你终于来了。老陈：我不走。" in block, "没给出同行的写法示例"
+
+
+def test_voice_plan_groups_sentences_by_voice_and_keeps_order():
+    """一镜多人的执行计划：按句归音色、顺序不变、每一次合成都要数进去。"""
+    mapping = {"小焰": "nova", "老陈": "alloy"}
+    segs = [("小焰", "你终于来了。"), ("老陈", "我不走。"), ("小焰", "随你。")]
+    plan = digital_human.voice_plan(segs, mapping, "")
+    assert [p["voice"] for p in plan] == ["nova", "alloy", "nova"], plan
+    assert [p["text"] for p in plan] == ["你终于来了。", "我不走。", "随你。"], plan
+    assert digital_human.utterance_count(plan) == 3
+
+
+def test_voice_plan_merges_adjacent_sentences_of_one_voice():
+    """同一个人连着说几句 → **只合成一次**。
+
+    不并的话：多花两次钱，而且段间会各塞一段静音——白白多出两处接缝，
+    而接缝正是这一版要小心的事。
+    """
+    plan = digital_human.voice_plan(
+        [("小焰", "你终于来了。"), ("小焰", "我不走。"), ("小焰", "随你。")], {}, "nova"
+    )
+    assert len(plan) == 1 and plan[0]["sentences"] == 3, plan
+    assert plan[0]["text"] == "你终于来了。我不走。随你。", plan
+    # 「说话人不同但音色相同」也并段：念出来是同一个嗓子，分两段没有任何好处
+    plan = digital_human.voice_plan([("小焰", "甲。"), ("老陈", "乙。")], {}, "nova")
+    assert len(plan) == 1 and plan[0]["speakers"] == ["小焰", "老陈"], plan
+
+
+def test_voice_plan_never_invents_a_speaker():
+    """认不出说话人就用默认音色，并写「未标注说话人」——**不猜**一个角色出来。"""
+    plan = digital_human.voice_plan([("", "你终于来了。")], {"小焰": "nova"}, "def")
+    assert plan[0]["voice"] == "def" and plan[0]["speakers"] == [], plan
+    assert "未标注" in digital_human.plan_summary(plan)
+
+
+def test_plan_summary_names_every_voice_in_order():
+    """日志里那一行要能对上成片里的两个声音：按顺序写清「谁用什么音色」。"""
+    plan = digital_human.voice_plan([("小焰", "甲。"), ("老陈", "乙。")], {"小焰": "nova"}, "")
+    text = digital_human.plan_summary(plan)
+    assert "小焰" in text and "nova" in text, text
+    assert "老陈" in text and "默认音色" in text, text
+    assert text.index("小焰") < text.index("老陈"), text
+
+
+def test_the_dry_run_counts_one_call_per_sentence():
+    """预览里数的必须是**次数**：一镜多人是每句一次，记成 True 会把这一跑的账少算。"""
+    src = _text(BACKEND / "app" / "services" / "canvas_runner.py")
+    assert 'params["shot_dialogue"] = digital_human.utterance_count(plan)' in src, (
+        "逐镜对白在预览里没有记「要合成几次」"
+    )
+    assert 'dialogue_calls += int(tp.get("shot_dialogue") or 0)' in src, "对账没有按次数累加"
+
+
+def test_the_runner_builds_one_track_from_several_voices():
+    """一镜多人：每句各合成一条 → 拼成这一镜的一条 → 只登记成品那一条。"""
+    src = _text(BACKEND / "app" / "services" / "canvas_runner.py")
+    assert "async def _shot_dialogue_audio(" in src, "没有「把这一镜的对白做成一条音频」的函数"
+    assert "speech_service.synthesize_to_temp(" in src, "中间那几句没有走临时文件"
+    assert "ffmpeg_service.join_audio(parts)" in src, "没有把几句拼成一条"
+    assert "speech_service.register_audio_asset(" in src, "拼好的那一条没有登记成资产"
+    assert "ffmpeg_service.drop_workdir(work)" in src, "临时目录没有收走"
+
+
+def test_joining_several_voices_really_produces_one_longer_track():
+    """真跑 ffmpeg：三段 0.4/0.5/0.6 秒 → 拼完应当约 1.5 + 2×0.15 秒。
+
+    段间那点静音是**有意加的**（两种音色直接对接会咬在一起），但它确实让总时长变长，
+    而「这一镜读不读得完」用的就是拼完的时长——所以这条必须真的量一次，不能靠算术想当然。
+    """
+
+    async def case():
+        from app.services import ffmpeg_service
+
+        ff, _ = await ffmpeg_service._resolve_binaries()
+        if not ff:
+            return "skip"
+        work = Path(tempfile.mkdtemp(prefix="join_voices_"))
+        try:
+            parts: list[Path] = []
+            for i, sec in enumerate((0.4, 0.5, 0.6)):
+                p = work / f"t{i}.wav"
+                ok, err = await ffmpeg_service._run(
+                    [ff, "-y", "-f", "lavfi", "-i",
+                     f"sine=frequency={300 + i * 100}:duration={sec}",
+                     "-ar", "48000", "-ac", "2", str(p)],
+                    120,
+                )
+                assert ok, err
+                parts.append(p)
+
+            # 只有一条时**原样返回**：不重编码、不复制（一镜一人的路与以前完全一样）
+            same = await ffmpeg_service.join_audio([parts[0]])
+            assert same == parts[0], "只有一条时不该重新编码"
+
+            joined = await ffmpeg_service.join_audio(parts)
+            seconds = await ffmpeg_service.probe_audio_seconds(joined)
+            assert seconds is not None, "量不出拼完的时长"
+            assert 1.4 <= seconds <= 1.95, f"拼完应当约 1.8 秒，实际 {seconds:.2f}"
+            joined.unlink(missing_ok=True)
+            return "ok"
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    assert asyncio.run(case()) in ("ok", "skip")
+
+
+def test_one_shot_with_two_speakers_gets_one_joined_track():
+    """一镜里两个人说话：每句各合一次 → **真拼**成这一镜的一条 → 只登记那一条。
+
+    这一版的核心，整链真跑：替身只替「合成」那一步（真调要花钱），
+    拼接、量时长、登记资产都是真的。四件事一起验：逐句换音色、只出一条音轨、
+    中间那几句不进资产库、临时目录收干净。
+    """
+    ffmpeg = _ffmpeg_or_skip()
+    if not ffmpeg:
+        return
+    registered: list[Asset] = []
+
+    async def scenario(db):  # noqa: ANN001
+        pid, images = await _seed_shots(db, SHEET_TWO_VOICES, shots=("1",))
+        node = _shot_video_node(shotDialogue=True, shotVoices="小焰=nova\n老陈=alloy")
+        with _stub_video_model(), _stub_tts_parts(ffmpeg) as calls:
+            tasks = await canvas_runner._create_shot_video_tasks(
+                db, pid, node, SHEET_TWO_VOICES, images
+            )
+
+        # ① 一句一次，同一行里换人也要认出来并逐句换音色
+        assert [c["text"] for c in calls] == ["你来了。", "我不走。"], calls
+        assert [c["voice"] for c in calls] == ["nova", "alloy"], calls
+        assert len({str(c["work"]) for c in calls}) == 1, "几句中间音频没落在同一个一次性目录里"
+        assert calls[0]["work"].name.startswith("shotvoice-"), calls[0]["work"]
+
+        # ② 这一镜只出一条视频任务，挂的是拼好的那一条
+        assert len(tasks) == 1, [t.params_json for t in tasks]
+        params = json.loads(tasks[0].params_json)
+        rows = (await db.execute(
+            select(Asset).where(Asset.kind == "audio", Asset.source == "shot")
+        )).scalars().all()
+        registered.extend(rows)
+        assert len(rows) == 1, f"中间那几句也进资产库了：{[a.name for a in rows]}"
+        audio = rows[0]
+        assert params["audio_ref_asset_id"] == audio.id, params
+        assert audio.name == "对白 · 镜头1", audio.name
+        # 说明里要能看出这一镜用了两个嗓子：成片里听到两个声音时，能对上是哪儿来的
+        for token in ("小焰", "nova", "老陈", "alloy"):
+            assert token in audio.prompt, f"产物说明里少了 {token}：{audio.prompt}"
+
+        # ③ 时长量的是**拼完**那一条：1.0 + 1.0 + 段间 0.15 秒静音
+        seconds = await ffmpeg_service.probe_audio_seconds(
+            ffmpeg_service.settings_storage_dir() / audio.filename
+        )
+        assert seconds is not None and 2.05 <= seconds <= 2.35, f"拼完应当约 2.15 秒，实际 {seconds}"
+        assert digital_human.dialogue_seconds(seconds) == 3, "拼完之后要 3 秒才读得完"
+        # 分头算只有 2.0 秒——正是这一版的差别所在（下一条测试验它的后果）
+        assert digital_human.dialogue_seconds(2.0) == 2, "两段分头之和不该等于拼完的长度"
+        # 资产上的 duration 是给人看的取整值（2.15 → 2）；判据用的是 dialogue_seconds
+        assert audio.duration == 2, audio.duration
+        # 分镜表写的 6 秒没被改动过（改时长就是改钱）
+        assert params["duration"] == 6, params
+
+        # ④ 中间那几句没有留在盘上，临时目录也收走了
+        for c in calls:
+            assert not c["path"].exists(), f"中间音频没删：{c['path']}"
+            assert not c["work"].exists(), f"临时目录没删：{c['work']}"
+
+    try:
+        _db_run(scenario)
+    finally:
+        _drop_asset_files(*registered)
+
+
+def test_a_shot_that_only_fits_before_joining_is_refused_with_numbers():
+    """判据量的是**拼完**的长度，不是各句之和。
+
+    两句各 1.0 秒：分头算是 2.0 秒，正好塞进 2 秒的镜；拼完约 2.15 秒就塞不下了。
+    量错成「分头之和」的话这一镜会被派出去，用户拿到的成片是第二个人话没说完——
+    而钱已经花了。
+    """
+    ffmpeg = _ffmpeg_or_skip()
+    if not ffmpeg:
+        return
+    sheet = SHEET_TWO_VOICES.replace("固定 | 6s", "固定 | 2s")
+    registered: list[Asset] = []
+
+    async def scenario(db):  # noqa: ANN001
+        pid, images = await _seed_shots(db, sheet, shots=("1",))
+        node = _shot_video_node(shotDialogue=True, shotVoices="小焰=nova\n老陈=alloy")
+        raised = ""
+        with _stub_video_model(), _stub_tts_parts(ffmpeg) as calls:
+            try:
+                await canvas_runner._create_shot_video_tasks(db, pid, node, sheet, images)
+            except ValueError as e:
+                raised = str(e)
+
+        # 配音是便宜的那一头：先试配出来才知道塞不下
+        assert len(calls) == 2, calls
+        assert "一镜都没配上" in raised, raised
+        # 报错必须指向台词和时长，**不能**说「分镜图与镜头对不上」——
+        # 图与镜号在这儿是对的，那么说会让用户去反复核对镜号
+        assert "分镜图与镜头对不上" not in raised, f"报错指向错了地方：{raised}"
+        assert "3 秒" in raised and "2 秒" in raised, f"没说清差在哪儿：{raised}"
+        assert "分镜表里这一镜的时长" in raised, f"建议没指向他能改的那个地方：{raised}"
+        rows = (await db.execute(
+            select(Asset).where(Asset.kind == "audio", Asset.source == "shot")
+        )).scalars().all()
+        registered.extend(rows)
+        saved = (await db.execute(select(Task).where(Task.kind == "video"))).scalars().all()
+        assert not saved, "塞不下还派了视频任务（那是拿视频钱换半句话）"
+
+    try:
+        _db_run(scenario)
+    finally:
+        _drop_asset_files(*registered)
+
+
+def test_a_run_with_both_problems_reports_both_of_them():
+    """两种原因同时出现时两条都要说。
+
+    只说「镜号对不上」的话，用户补齐了图还是跑不起来（台词照样读不完），
+    于是再报一次错、再补一次——一次能说完的事不该拆成两轮。
+    """
+    ffmpeg = _ffmpeg_or_skip()
+    if not ffmpeg:
+        return
+    # 镜头1 只有 2 秒（拼完 2.15 秒读不完），镜头2 没有分镜图
+    sheet = SHEET_TWO_VOICES.replace("固定 | 6s", "固定 | 2s") + """
+### 镜头2 | 近景 | 固定 | 5s
+- 画面：同上
+- 台词：小焰：你来了。老陈：我不走。
+"""
+    registered: list[Asset] = []
+
+    async def scenario(db):  # noqa: ANN001
+        pid, images = await _seed_shots(db, sheet, shots=("1",))  # 只给镜头1 造图
+        node = _shot_video_node(shotDialogue=True, shotVoices="小焰=nova\n老陈=alloy")
+        raised = ""
+        with _stub_video_model(), _stub_tts_parts(ffmpeg):
+            try:
+                await canvas_runner._create_shot_video_tasks(db, pid, node, sheet, images)
+            except ValueError as e:
+                raised = str(e)
+
+        assert "分镜图与镜头对不上" in raised and "镜号 2" in raised, raised
+        assert "另外" in raised and "3 秒" in raised, f"对白那一半没说：{raised}"
+        rows = (await db.execute(
+            select(Asset).where(Asset.kind == "audio", Asset.source == "shot")
+        )).scalars().all()
+        registered.extend(rows)
+
+    try:
+        _db_run(scenario)
+    finally:
+        _drop_asset_files(*registered)
 
 
 if __name__ == "__main__":

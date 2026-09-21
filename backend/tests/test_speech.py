@@ -157,6 +157,71 @@ def test_dialogue_parts_reads_one_shots_line_and_speaker():
         assert speech.dialogue_parts(_shot("4", empty)) == ("", ""), empty
 
 
+def test_dialogue_segments_splits_by_sentence_and_speaker():
+    """按**句**切、逐句带说话人——一镜里两个人说话时音色就是靠这个逐句换的。
+
+    为什么切到句而不是行：「小焰：你终于来了。我不走。」这种**一行两句**的写法很常见，
+    按行切的话整行只能用一个音色，另一个人的台词会用别人的嗓子念出来。
+    """
+    assert speech.dialogue_segments("小焰：你终于来了。我不走。") == [
+        ("小焰", "你终于来了。"), ("小焰", "我不走。")]
+
+    # 逐句换人：第二行自己带标签
+    assert speech.dialogue_segments("小焰：你终于来了。\n老陈：我不走。") == [
+        ("小焰", "你终于来了。"), ("老陈", "我不走。")]
+
+    # 一行里换人（句首写了另一个标签）：换人 + 标签不念出来
+    assert speech.dialogue_segments("小焰：你终于来了。老陈：我不走。") == [
+        ("小焰", "你终于来了。"), ("老陈", "我不走。")]
+
+    # 英文标点也要切（模型写台词时中英混着来）
+    assert [t for _, t in speech.dialogue_segments("Wait! 等一下。")] == ["Wait!", "等一下。"]
+
+    # 没有标点的一行就是一整句
+    assert speech.dialogue_segments("他在门口站住") == [("", "他在门口站住")]
+
+
+def test_dialogue_segments_keeps_the_old_speaker_inheritance():
+    """说话人的口径与以前完全一致：**这一行写了标签就以它为准，没写就跟着上一位**。
+
+    分镜表里最常见的写法是「小焰：你终于来了」后面跟一行不带标签的续句——
+    那一行仍然是「小焰」说的，不能因为没写标签就退回默认音色。
+    """
+    segs = speech.dialogue_segments("小焰：你终于来了\n我不走")
+    assert [s for s, _ in segs] == ["小焰", "小焰"], segs
+    # 完全没标签 → 说话人空串（调用方退回默认音色，**不猜**）
+    assert [s for s, _ in speech.dialogue_segments("你终于来了\n我不走")] == ["", ""]
+    # 占位符与空行不算台词
+    for empty in ("（无）", "无", "—", "", "   "):
+        assert speech.dialogue_segments(empty) == [], empty
+    # 只剩标签没有正文：不产出空句子
+    assert speech.dialogue_segments("小焰：") == []
+
+
+def test_one_speaker_dialogue_reads_the_same_through_both_entries():
+    """同一个人说完整镜时，`dialogue_segments` 拼回去必须与 `dialogue_parts` **一字不差**。
+
+    两个入口对同一份台词给出两套说法，就会出现「这一镜到底念的是哪一版」这种查不清的事。
+    （一镜多人的那种情形本来就会与 `dialogue_parts` 不同——那是这一版有意加的。）
+
+    只许差**句间空格**：切句时那点空格落在哪一句身上对念出来没有影响
+    （「Wait! 等一下」两种拼法读起来一样），所以比较前把空格都去掉。
+    """
+    for dialogue in (
+        "小焰：你终于来了。",
+        "小焰：你终于来了。我不走。",
+        "小焰：你终于来了\n我不走",
+        "他在门口站住\n她回过头",
+        "小焰：Wait! 等一下。",
+        "你终于来了",
+    ):
+        segs = speech.dialogue_segments(dialogue)
+        joined = speech.join_lines([t for _, t in segs])
+        want = speech.dialogue_parts(_shot("1", dialogue))[0]
+        squash = lambda s: "".join(s.split())  # noqa: E731
+        assert squash(joined) == squash(want), f"{dialogue}：{joined!r} vs {want!r}"
+
+
 def test_narration_and_per_shot_dialogue_agree_on_what_a_line_is():
     """整段旁白与逐镜对白必须对「这一镜有没有台词」给出同一个答案。
 
@@ -498,6 +563,31 @@ def test_synthesize_stores_an_audio_asset_with_the_upstream_bytes():
     assert captured["closed"] is True, "适配器没关，httpx 连接会攒到进程退出"
     assert captured["resolve"] == ("7:tts-1", "audio"), "没有按 audio 能力解析模型"
     assert captured["saved"][1] == "audio/wav" and captured["saved"][2] == "wav", captured["saved"]
+
+
+def test_the_per_sentence_audio_only_lands_in_the_workdir():
+    """一镜多人的中间那几句：只落临时目录，**一次都不写进 storage、不登记资产**。
+
+    这几句是过程产物。登进资产库只会多出一堆「配音 · 你」这种垃圾条目，
+    而用户要的是这一镜拼好的那一条——所以这里验的是「没留下东西」。
+    """
+    raw = b"\xff\xfb\x90\x00" * 32
+    with _stub_pipeline(audio=raw, content_type="audio/mpeg", seconds=1.2) as captured:
+        async def scenario(db):  # noqa: ANN001
+            with tempfile.TemporaryDirectory() as tmp:
+                work = Path(tmp)
+                path, meta = await speech_service.synthesize_to_temp(
+                    db, model_key="7:tts-1", text="你来了。", voice="nova", work=work, index=2
+                )
+                # 扩展名跟着上游的内容类型（认不出来才会落到 mp3，这里给的就是 mp3）
+                assert path == work / "seg2.mp3", path
+                assert path.read_bytes() == raw, "临时文件里的字节和上游给的不一致"
+                assert meta["seconds"] == 1.2 and meta["voice"] == "nova", meta
+                assert "saved" not in captured, "中间那几句也写进 storage 了"
+                rows = (await db.execute(select(Asset))).scalars().all()
+                assert not rows, "中间那几句被登记成资产了"
+
+        _db_run(scenario)
 
 
 def test_bad_text_never_reaches_the_upstream():

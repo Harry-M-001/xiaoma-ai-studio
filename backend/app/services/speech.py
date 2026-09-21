@@ -134,7 +134,7 @@ def speaker_of(line: str) -> str:
     return match.group(0).strip().strip("【[]】:： \t").strip()
 
 
-def _join_lines(lines: list[str]) -> str:
+def join_lines(lines: list[str]) -> str:
     """把各条台词接成一段：只在上一条**没有句末标点**时才补一个句号。
 
     一律用「。」去 join 会在「……还没来。」后面再补一个，念出来是一段多余的停顿；
@@ -171,19 +171,58 @@ def narration_from_shots(shots: Iterable[object]) -> tuple[str, int]:
             text = strip_speaker(part)
             if text:
                 lines.append(text)
-    return _join_lines(lines), len(lines)
+    return join_lines(lines), len(lines)
 
 
 def dialogue_parts(shot: object) -> tuple[str, str]:
     """这一镜的台词与它的说话人，返回 `(要念的文本, 说话人)`；没有台词返回 `("", "")`。
 
-    说话人取**第一条**可念台词上的标签。一镜里换好几个人说话是另一件事
-    （那要按句切分、每句一条音轨），不是这一版的范围——这一版一镜一条配音。
+    说话人取**第一条**可念台词上的标签。一镜里换好几个人说话的走 `dialogue_segments`
+    （按句切、每句一个说话人）；这个函数留着的用途是「整镜一个人的那种简单情形」
+    以及不需要分辨说话人的地方。
     """
     parts = _speakable_lines(getattr(shot, "dialogue", ""))
     speaker = speaker_of(parts[0]) if parts else ""
     lines = [t for t in (strip_speaker(p) for p in parts) if t]
-    return _join_lines(lines), speaker
+    return join_lines(lines), speaker
+
+
+# 句末标点：切句用。**中英文都要**——模型写台词时中英混着来（「Wait。等一下」也见过）。
+_SENTENCE_END = "。！？!?…；;"
+_SENTENCE_SPLIT = re.compile(rf"(?<=[{re.escape(_SENTENCE_END)}])")
+
+
+def dialogue_segments(dialogue: object) -> list[tuple[str, str]]:
+    """把「台词」那一栏切成**按句**的 `(说话人, 这一句)`，顺序不变。
+
+    为什么切到「句」而不是「行」：一镜里两个人说话时音色必须**逐句**换，而分镜表里
+    「小焰：你终于来了。我不走。」这种**一行写两句**的写法很常见——按行切的话整行只能
+    用一个音色，另一个人的台词就会用别人的嗓子念出来，而用户只看到「音色没生效」。
+
+    说话人的口径与以前**完全一致**（`dialogue_parts` 的那一套）：这一行写了标签就以它为准，
+    没写就跟着上一位。认不出任何标签时说话人是空串，由调用方退回默认音色——**不猜**。
+    """
+    out: list[tuple[str, str]] = []
+    current = ""
+    for raw in _speakable_lines(dialogue):
+        who = speaker_of(raw)
+        if who:
+            current = who
+        for piece in _SENTENCE_SPLIT.split(strip_speaker(raw).strip()):
+            text = piece.strip()
+            if not text:
+                continue
+            # **句首的标签也算换人**：分镜表里「小焰：你终于来了。老陈：我不走。」写成一行的
+            # 很常见；不认它的话，第二句会用小焰的嗓子念，还会把「老陈：」这三个字念出来。
+            # 判据与行首完全一样（同一个 `_SPEAKER_PREFIX`：短标签 + 冒号），不另立一套。
+            inner = speaker_of(text)
+            if inner:
+                current = inner
+                text = strip_speaker(text).strip()
+                if not text:
+                    continue
+            out.append((current, text))
+    return out
 
 
 def asset_name(text: str) -> str:

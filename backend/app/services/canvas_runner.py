@@ -812,6 +812,70 @@ async def _assets_by_shot(db: AsyncSession, assets: list[Asset]) -> dict[str, As
     return out
 
 
+async def _shot_dialogue_audio(
+    db: AsyncSession,
+    *,
+    plan: list[dict],
+    model_key: str,
+    shot_no: str,
+) -> tuple[Asset, float | None]:
+    """把这一镜的对白做成**一条**音频资产，回 `(资产, 秒数)`。
+
+    三种情形走同一条出口，只是内部做法不同：
+
+    - **整镜一个人**（最常见）：一次合成整镜的台词——与以前完全一样，不多花一次钱。
+    - **一镜里有好几个人**：按句各合成一条，**再拼成这一镜的一条**。provider 那边只认
+      一条参考音频，所以必须在本地拼好；拼接时段间补一小段静音（见 `join_audio`），
+      否则两种音色会咬在一起，听着像一个人抢话。
+    - 中间那几句**只落临时目录、不登记资产**：它们拼完就没用了，登进资产库只会多出
+      一堆「配音 · 你」这种垃圾条目，而用户要的是这一镜的成品那一条。
+
+    秒数返回的是**拼完之后**的时长：它比各段之和多出段间静音，而「这一镜读不读得完」
+    用的就是它。
+    """
+    speakers = digital_human.plan_summary(plan)
+    name = f"对白 · 镜头{shot_no}"
+    if len(plan) == 1:
+        item = plan[0]
+        asset, meta = await speech_service.synthesize_to_asset(
+            db,
+            model_key=model_key,
+            text=str(item["text"]),
+            voice=str(item["voice"]),
+            source="shot",
+            name=name,
+            note=f"逐镜对白（{speakers}）",
+        )
+        return asset, meta["seconds"]
+
+    work = ffmpeg_service.new_workdir("shotvoice")
+    try:
+        parts: list[Path] = []
+        for i, item in enumerate(plan):
+            path, _meta = await speech_service.synthesize_to_temp(
+                db,
+                model_key=model_key,
+                text=str(item["text"]),
+                voice=str(item["voice"]),
+                work=work,
+                index=i,
+            )
+            parts.append(path)
+        joined = await ffmpeg_service.join_audio(parts)
+        asset, meta = await speech_service.register_audio_asset(
+            db,
+            path=joined,
+            text="\n".join(str(i["text"]) for i in plan),
+            name=name,
+            note=f"逐镜对白（{speakers}）",
+            source="shot",
+        )
+        return asset, meta["seconds"]
+    finally:
+        # 临时目录必须收走：里面是几句中间音频，一次一积（这条链上踩过同类漏）
+        ffmpeg_service.drop_workdir(work)
+
+
 def _prev_shot_image(
     shots: list[storyboard_sheet.Shot], idx: int, by_shot: dict[str, Asset]
 ) -> Asset | None:
@@ -922,16 +986,18 @@ async def _create_shot_video_tasks(
             )
         default_voice = speech.sanitize_voice(data.get("shotVoice"))
 
-    # 先把「哪几镜要说话」挑出来：一句台词都没有时**立刻报错**，一个字的钱都别花
-    texts: dict[str, str] = {}
-    speakers: dict[str, str] = {}
+    # 先把「哪几镜要说话、每一镜要几句」挑出来：一句台词都没有时**立刻报错**，一个字的钱都别花
+    plans: dict[str, list[dict]] = {}
     if dialogue_on:
         for shot in shots:
-            text, speaker = speech.dialogue_parts(shot)
-            if text:
-                texts[str(shot.no)] = text
-                speakers[str(shot.no)] = speaker
-        if not texts:
+            plan = digital_human.voice_plan(
+                speech.dialogue_segments(getattr(shot, "dialogue", "")),
+                voice_map,
+                default_voice,
+            )
+            if plan:
+                plans[str(shot.no)] = plan
+        if not plans:
             raise ValueError(
                 "「逐镜对白」开着，但这份分镜表里一句台词都没有。"
                 "可以先去「分镜」节点给每镜补一行「台词：…」，或者把这个开关关掉"
@@ -996,30 +1062,24 @@ async def _create_shot_video_tasks(
             params["injected_names"] = injected
 
         # 逐镜对白：这一镜有台词就配出来挂上；配不了就**不派这一镜的视频**
-        if dialogue_on and str(shot.no) in texts:
+        if dialogue_on and str(shot.no) in plans:
+            plan = plans[str(shot.no)]
             if dry_run:
-                # 预览绝不花钱：只标出「这一镜会多做一次配音合成」，让预估的账说得清
-                params["shot_dialogue"] = True
+                # 预览绝不花钱：只标出「这一镜要合成几次」。**一镜多人时是每句一次**，
+                # 所以这里记的是**次数**而不是一个 True——记 True 的话账会少算。
+                params["shot_dialogue"] = digital_human.utterance_count(plan)
             else:
-                speaker = speakers.get(str(shot.no), "")
-                voice = digital_human.voice_for(speaker, voice_map, default_voice)
                 try:
-                    audio, meta = await speech_service.synthesize_to_asset(
-                        db,
-                        model_key=tts_key,
-                        text=texts[str(shot.no)],
-                        voice=voice,
-                        source="shot",
-                        name=f"对白 · 镜头{shot.no}",
-                        note=f"逐镜对白（说话人：{speaker or '未标注'}）",
+                    audio, seconds = await _shot_dialogue_audio(
+                        db, plan=plan, model_key=tts_key, shot_no=str(shot.no)
                     )
                 except AdapterError as e:
                     dialogue_skipped.append(f"镜头{shot.no} 的配音没做成：{e}")
                     continue
                 problem = digital_human.check_duration(
                     requested=int(params.get("duration") or 0),
-                    audio_seconds=meta["seconds"],
-                    name=audio.name or texts[str(shot.no)],
+                    audio_seconds=seconds,
+                    name=audio.name or "",
                     duration_hint="分镜表里这一镜的时长",
                 )
                 if problem:
@@ -1028,14 +1088,14 @@ async def _create_shot_video_tasks(
                     dialogue_skipped.append(
                         digital_human.skip_reason(
                             shot_no=str(shot.no),
-                            audio_seconds=meta["seconds"],
+                            audio_seconds=seconds,
                             shot_seconds=int(params.get("duration") or 0),
                         )
                     )
                     continue
                 params["audio_ref_asset_id"] = audio.id
                 params["dialogue_note"] = digital_human.attach_note(
-                    name=audio.name or "", seconds=meta["seconds"]
+                    name=audio.name or "", seconds=seconds
                 )
                 voiced += 1
 
@@ -1052,11 +1112,22 @@ async def _create_shot_video_tasks(
         tasks.append(task)
 
     if not tasks:
+        # 「一条都没派」有两种完全不同的原因，必须分开说。混在一起报
+        # 「分镜图与镜头对不上」的话，用户会去反复核对镜号（那儿其实没错），
+        # 而真正要改的是台词长度或这一镜的时长——**报错的指向错，比不报错更费时间**。
+        if missing:
+            also = ("另外，" + "；".join(dialogue_skipped) + "。") if dialogue_skipped else ""
+            raise ValueError(
+                "分镜图与镜头对不上：上游给了 "
+                f"{len(by_shot)} 张带镜号的图（镜号 {'、'.join(sorted(by_shot))}），"
+                f"而分镜表要的是镜号 {'、'.join(missing)}。"
+                "常见原因是两边「生成镜数」填得不一样——请让「分镜图」节点覆盖到这些镜号"
+                + also
+            )
         raise ValueError(
-            "分镜图与镜头对不上：上游给了 "
-            f"{len(by_shot)} 张带镜号的图（镜号 {'、'.join(sorted(by_shot))}），"
-            f"而分镜表要的是镜号 {'、'.join(missing)}。"
-            "常见原因是两边「生成镜数」填得不一样——请让「分镜图」节点覆盖到这些镜号"
+            "「逐镜对白」一镜都没配上，这一跑没有派任何视频任务："
+            + "；".join(dialogue_skipped)
+            + "。台词已经试配过了（配音资产在资产库里），改完分镜表再跑一次即可"
         )
 
     if dry_run:
@@ -1636,9 +1707,9 @@ async def preview_graph(project_id: int) -> dict:
                     by_kind[t.kind] = by_kind.get(t.kind, 0) + 1
                     tp = read_task_params(t)
                     # 逐镜对白会**额外**做语音合成：它不是任务，所以不在「调用次数」里，
-                    # 但它是真花钱的一次调用——不摆出来的话，这一跑的账就少算了
-                    if tp.get("shot_dialogue"):
-                        dialogue_calls += 1
+                    # 但它是真花钱的一次调用——不摆出来的话，这一跑的账就少算了。
+                    # 一镜多人时这一镜是**每句一次**，所以这里加的是次数（不是 1）。
+                    dialogue_calls += int(tp.get("shot_dialogue") or 0)
                     for aid in _referenced_asset_ids(tp):
                         hits[aid] = hits.get(aid, 0) + 1
                 item["kinds"] = by
@@ -1716,7 +1787,9 @@ async def preview_graph(project_id: int) -> dict:
                 "level": "warning",
                 "text": f"逐镜对白：这一跑还会额外做 {dialogue_calls} 次语音合成"
                 "（按所选语音服务计费，不计在上面那个次数里），"
-                "再把每段配音分别附给对应镜头的视频。",
+                "再把每段配音分别附给对应镜头的视频。"
+                "一镜里有几个人说话时，每一句各合成一次、再拼成这一镜的一条配音"
+                "（段与段之间补一点点静音，所以拼完比各句之和略长）。",
             }
         )
     if reused:
