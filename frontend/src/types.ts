@@ -758,6 +758,63 @@ export interface CameraMoveTable {
 }
 
 /**
+ * 去字幕（v1.1.27）：要处理的那一块区域 + 四种手法的取舍。
+ *
+ * 坐标是**源视频像素**（不是显示尺寸）：界面按显示尺寸换算去画框，
+ * 后端也按源视频像素去裁。混用这两种坐标的表现是「看着框住了、结果处理的是别处」。
+ */
+export interface RemovalBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * 一种手法在当前这个框上能不能用。
+ *
+ * `available` 为 false 时 `reason` 一定非空——**不能用的要说明为什么**，
+ * 静默从列表里消失会让用户以为是程序坏了。
+ */
+export interface RemovalMethod {
+  key: string;
+  label: string;
+  /** 一句话说这个手法做什么（「把紧邻的一条画面拉过来盖住」） */
+  short: string;
+  /** 这一手法的取舍：什么时候看着自然、什么时候会留痕 */
+  hint: string;
+  available: boolean;
+  reason: string;
+}
+
+export interface RemovalFrame {
+  /** 真帧（JPEG data URI），框就画在这上面 */
+  image: string;
+  /** 源视频尺寸（框的坐标系） */
+  width: number;
+  height: number;
+  /** 这一帧的时间点（可能被夹过）与片长 */
+  seconds: number;
+  duration: number;
+  /** 推荐框：底部一条 */
+  box: RemovalBox;
+  methods: RemovalMethod[];
+  defaultMethod: string;
+}
+
+export interface RemovalPreview {
+  /** 处理后的同一帧 */
+  image: string;
+  /** 后端实际用的框（会把越界的夹回来、宽高取偶数） */
+  box: RemovalBox;
+  method: string;
+  label: string;
+  /** 这一手法的代价，跟着预览一起回来 */
+  note: string;
+  methods: RemovalMethod[];
+}
+
+/**
  * 静图缓动样片的出片报告。
  *
  * `skipped` / `truncated` 必须显示出来：一条样片少了哪几镜、为什么少，

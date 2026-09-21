@@ -28,6 +28,10 @@ import type {
   ShareExportResult,
   ShareImportResult,
   ShareLicense,
+  RemovalBox,
+  RemovalFrame,
+  RemovalMethod,
+  RemovalPreview,
   SubtitleOptions,
   SubtitlePreviewResult,
   TransitionOptions,
@@ -319,6 +323,36 @@ export const api = {
     request<SubtitlePreviewResult>("/api/subtitles/preview", {
       method: "POST",
       body: JSON.stringify(args),
+    }),
+  // ---- 去字幕（v1.1.27） ----
+  /**
+   * 取一帧用来框选字幕区域，**一次回齐**：帧 + 源视频尺寸 + 推荐框 + 四种手法能不能用。
+   *
+   * 尺寸回的是源视频像素（框的坐标系），显示用的图后端缩到 1280 以内。
+   * 分几次拿会出现「框按旧尺寸画、手法按新尺寸判」这种对不上的中间状态。
+   */
+  removalFrame: (args: { assetId: number; t?: number }) =>
+    request<RemovalFrame>("/api/director/subtitle-removal/frame", {
+      method: "POST",
+      body: json({ asset_id: args.assetId, t: args.t ?? 0 }),
+    }),
+  /** 只问「这个框上四种手法各能不能用」——拖动之后可选项会变，而且它不碰 ffmpeg */
+  removalCheck: (args: { assetId: number; box: RemovalBox }) =>
+    request<{ box: RemovalBox; methods: RemovalMethod[]; defaultMethod: string }>(
+      "/api/director/subtitle-removal/check",
+      { method: "POST", body: json({ asset_id: args.assetId, box: args.box }) }
+    ),
+  /** 去字幕预览：后端把同一帧跑一遍同一套滤镜，回 JPEG data URI（不是前端近似画） */
+  removalPreview: (args: { assetId: number; t: number; box: RemovalBox; method: string }) =>
+    request<RemovalPreview>("/api/director/subtitle-removal/preview", {
+      method: "POST",
+      body: json({ asset_id: args.assetId, t: args.t, box: args.box, method: args.method }),
+    }),
+  /** 按这个框与手法处理整段，产物作为**新资产**入库（不动原片） */
+  removeSubtitles: (args: { assetId: number; box: RemovalBox; method: string }) =>
+    request<Asset>("/api/director/subtitle-removal", {
+      method: "POST",
+      body: json({ asset_id: args.assetId, box: args.box, method: args.method }),
     }),
   // ---- 项目 ----
   listProjects: () =>

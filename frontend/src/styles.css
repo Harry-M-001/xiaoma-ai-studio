@@ -1327,6 +1327,90 @@ input, textarea, select { font-family: inherit; }
 .director-sub-line .input { flex: 1; min-width: 0; }
 .director-merged { display: flex; flex-direction: column; gap: 10px; }
 .director-merged video { width: 100%; border-radius: var(--radius-sm); background: #000; }
+
+/* ============ 去字幕（在真帧上框选 + 四种手法 + 真帧对比） ============ */
+
+.subrm-dialog { width: min(880px, 94vw); max-height: 92vh; }
+.subrm-body {
+  flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.subrm-loading {
+  display: flex; align-items: center; gap: 8px;
+  padding: 18px; font-size: 12.5px; color: var(--text-2);
+}
+/* 框选的画布：容器宽度由布局决定，框用百分比定位，所以缩放窗口不会错位 */
+.subrm-canvas {
+  position: relative; width: 100%; user-select: none; touch-action: none;
+  border-radius: var(--radius-sm); overflow: hidden; background: #1E2430;
+  border: 1px solid var(--border);
+  /* `flex: 0 0 auto` 不能省——**和 v1.1.26 那个「点不动的 1px」是同一个坑**：
+     `.subrm-body` 是可滚动的 flex 列，这个盒子又写了 `overflow: hidden`，
+     `min-height: auto` 随之失效，于是它被压成 1px 高。这次更严重：
+     它被压扁就等于「框选的那块画面看不见、也拖不动」，而框选正是这个弹窗的主要动作。
+     规矩记下来：**放在可滚动 flex 列里的盒子，写了 overflow: hidden 就必须配 flex: 0 0 auto。** */
+  flex: 0 0 auto;
+}
+.subrm-canvas img { display: block; width: 100%; height: auto; }
+/* 遮罩用一个超大的外阴影做：框内保持原样、框外压暗，一眼看出「要动的是哪一块」 */
+.subrm-box {
+  position: absolute; box-sizing: border-box;
+  border: 1.5px solid var(--primary);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .45);
+  cursor: move;
+}
+.subrm-handle {
+  position: absolute; width: 12px; height: 12px; border-radius: 3px;
+  background: var(--primary); border: 1.5px solid #fff;
+}
+.subrm-handle-nw { left: -6px; top: -6px; cursor: nwse-resize; }
+.subrm-handle-ne { right: -6px; top: -6px; cursor: nesw-resize; }
+.subrm-handle-sw { left: -6px; bottom: -6px; cursor: nesw-resize; }
+.subrm-handle-se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+
+.subrm-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.subrm-row .field { min-width: 220px; flex: 1; }
+.subrm-time { display: flex; align-items: center; gap: 8px; }
+.subrm-time input[type="range"] { flex: 1; min-width: 0; }
+.subrm-presets { display: flex; gap: 6px; }
+.subrm-geo { margin-left: auto; font-size: 11.5px; }
+
+.subrm-methods { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.subrm-method {
+  display: flex; flex-direction: column; gap: 3px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); padding: 8px 10px;
+}
+.subrm-method.on { border-color: var(--primary); background: var(--primary-soft); }
+/* 用不了的手法仍然列出来（灰掉并写清原因）——静默消失会让用户以为程序坏了 */
+.subrm-method.off { opacity: .62; cursor: not-allowed; }
+.subrm-method input { margin: 0; }
+.subrm-method-label { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.subrm-method-short { font-size: 11.5px; line-height: 1.6; color: var(--text-2); }
+
+.subrm-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.subrm-compare figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.subrm-compare img {
+  width: 100%; height: auto; border-radius: var(--radius-sm);
+  background: #1E2430; border: 1px solid var(--border);
+}
+.subrm-compare figcaption { font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+.subrm-placeholder {
+  display: flex; align-items: center; justify-content: center;
+  aspect-ratio: 16 / 9; font-size: 12.5px; color: var(--text-3);
+  background: #1E2430; border-radius: var(--radius-sm); border: 1px dashed var(--border);
+}
+.subrm-note {
+  font-size: 11.5px; line-height: 1.7; color: var(--text-2);
+  background: var(--surface-2); border-radius: var(--radius-sm);
+  border-left: 3px solid var(--primary); padding: 8px 10px;
+}
+.subrm-foot {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: auto; padding-top: 4px;
+}
+.subrm-foot .muted { font-size: 11.5px; margin-right: auto; }
+
 .task-error { background: var(--danger-soft); color: var(--danger); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 10px; word-break: break-word; }
 .gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
 .gen-item { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); aspect-ratio: 1; cursor: pointer; }

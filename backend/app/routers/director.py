@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import shutil
 from pathlib import Path
@@ -15,8 +16,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
 from app.models import Asset
-from app.schemas import AssetOut, DirectorExtractIn, DirectorMergeIn, DirectorProbeIn, DirectorThumbnailIn
-from app.services import ffmpeg_service, image_size, storage, subtitle_fonts, subtitles, transitions
+from app.schemas import (
+    AssetOut,
+    DirectorExtractIn,
+    DirectorMergeIn,
+    DirectorProbeIn,
+    DirectorThumbnailIn,
+    RemovalApplyIn,
+    RemovalCheckIn,
+    RemovalFrameIn,
+    RemovalPreviewIn,
+)
+from app.services import (
+    ffmpeg_service,
+    image_size,
+    storage,
+    subtitle_fonts,
+    subtitle_removal,
+    subtitles,
+    transitions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +240,166 @@ async def list_transitions() -> dict:
             "default": transitions.DEFAULT_SECONDS,
         },
     }
+
+
+@router.post("/subtitle-removal/frame")
+async def removal_frame(payload: RemovalFrameIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """取一帧用来框选字幕区域，并把这一框上的可选项**一次回齐**。
+
+    为什么一次回齐（帧 + 尺寸 + 推荐框 + 四种手法能不能用）：这些量彼此相关，
+    分几次拿就会出现「框按旧尺寸画、手法按新尺寸判」这种对不上的中间状态。
+
+    尺寸回的是**源视频**的像素（框坐标系），显示用的图另缩到 1280 以内——
+    前端按显示尺寸换算去画框。
+    """
+    a = await _get_video_asset(db, payload.asset_id)
+    path = storage.abs_path(a.filename)
+    info = await ffmpeg_service.probe(path)
+    width = int(info.get("width") or 0)
+    height = int(info.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="读不出这个视频的尺寸，没法框选")
+    duration = float(info.get("duration") or 0)
+    # 时间点夹在片长之内：拖到最右端时那一帧可能取不到，回退一点点
+    t = min(max(0.0, float(payload.t)), max(0.0, duration - 0.05)) if duration else 0.0
+    try:
+        raw, width, height = await ffmpeg_service.removal_frame(path, t)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    box = subtitle_removal.default_box(width, height)
+    return {
+        "image": "data:image/jpeg;base64," + base64.b64encode(raw).decode(),
+        "width": width,
+        "height": height,
+        "seconds": round(t, 3),
+        "duration": round(duration, 3),
+        "box": box,
+        "methods": subtitle_removal.method_rows(box, width, height),
+        "defaultMethod": subtitle_removal.default_method(box, width, height),
+    }
+
+
+def _resolve_removal(box_raw: dict, method: str, width: int, height: int) -> tuple[dict, str, dict]:
+    """把「框 + 手法」收拾成一个能跑的请求，收拾不了就报能看懂的话。
+
+    返回（夹好的框，手法 key，这一手法的行）。三件事都在这里判：框夹进画面、
+    手法认不认识、在当前框上能不能用。
+    """
+    box = subtitle_removal.sanitize_box(box_raw, width, height)
+    problem = subtitle_removal.box_problem(box, width, height)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    method = (method or "").strip() or subtitle_removal.default_method(box, width, height)
+    rows = {r["key"]: r for r in subtitle_removal.method_rows(box, width, height)}
+    row = rows.get(method)
+    if row is None:
+        raise HTTPException(status_code=400, detail=f"不认识的手法：{method}")
+    if not row["available"]:
+        raise HTTPException(status_code=400, detail=str(row["reason"]))
+    return box, method, row
+
+
+@router.post("/subtitle-removal/check")
+async def removal_check(payload: RemovalCheckIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """只算「这个框上四种手法各能不能用」。**不碰 ffmpeg**，所以拖动松手后可以随便调。
+
+    为什么要有它：可选项随框变（框挪到画面中间时「裁掉」就不能用了）。界面上那份
+    可用性要是只在打开弹窗时算一次，用户拖动之后看到的还是旧结论——于是「界面说能选、
+    点了才报错」。这类不一致比直接不给选更让人不信任。
+    """
+    a = await _get_video_asset(db, payload.asset_id)
+    info = await ffmpeg_service.probe(storage.abs_path(a.filename))
+    width = int(info.get("width") or 0)
+    height = int(info.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="读不出这个视频的尺寸")
+    box = subtitle_removal.sanitize_box(payload.box.model_dump(), width, height)
+    return {
+        "box": box,
+        "methods": subtitle_removal.method_rows(box, width, height),
+        "defaultMethod": subtitle_removal.default_method(box, width, height),
+    }
+
+
+@router.post("/subtitle-removal/preview")
+async def removal_preview(payload: RemovalPreviewIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """把去字幕**真渲一帧**出来看。
+
+    只渲一帧而不是整段：整段要几十秒到几分钟，而用户是拖着框反复看的。
+    预览与成品走**同一套滤镜参数**（`subtitle_removal.filter_args`），所以「看着行」
+    就等于「导出来行」——这一点和字幕版式预览是同一条口径。
+    """
+    a = await _get_video_asset(db, payload.asset_id)
+    path = storage.abs_path(a.filename)
+    info = await ffmpeg_service.probe(path)
+    width = int(info.get("width") or 0)
+    height = int(info.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="读不出这个视频的尺寸，没法预览")
+
+    box, method, row = _resolve_removal(payload.box.model_dump(), payload.method, width, height)
+    try:
+        raw = await ffmpeg_service.render_removal_preview(
+            path, payload.t, box=box, method=method, width=width, height=height
+        )
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "image": "data:image/jpeg;base64," + base64.b64encode(raw).decode(),
+        "box": box,
+        "method": method,
+        "label": row["label"],
+        # 手法的那句取舍要跟着预览一起回来：用户看着效果，同时看到代价
+        "note": row["hint"],
+        "methods": subtitle_removal.method_rows(box, width, height),
+    }
+
+
+@router.post("/subtitle-removal", response_model=AssetOut)
+async def remove_subtitles(payload: RemovalApplyIn, db: AsyncSession = Depends(get_db)) -> AssetOut:
+    """按这个框与手法把整段的字幕去掉，产物进资产库。
+
+    产物是**新资产**，不动原片：手法有四种、框也可能要试几次，把原片覆盖掉就等于
+    让用户没法回头（与产物版本栈、候选定稿是同一条口径：原来的东西不许被悄悄改掉）。
+    """
+    a = await _get_video_asset(db, payload.asset_id)
+    path = storage.abs_path(a.filename)
+    info = await ffmpeg_service.probe(path)
+    width = int(info.get("width") or 0)
+    height = int(info.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise HTTPException(status_code=400, detail="读不出这个视频的尺寸，去不了字幕")
+
+    box, method, row = _resolve_removal(payload.box.model_dump(), payload.method, width, height)
+    try:
+        out_path = await ffmpeg_service.remove_subtitles(
+            path, box=box, method=method, width=width, height=height
+        )
+    except (RuntimeError, ValueError) as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    rel = ffmpeg_service._save_asset_file(out_path, "mp4")
+    # 尺寸以**产物**为准：裁掉那一路会把画面变矮，照抄源视频的宽高就是错的
+    meta = await ffmpeg_service.probe(storage.abs_path(rel))
+    used = Path(a.original_name or "video").stem
+    asset = Asset(
+        kind="video",
+        filename=rel,
+        original_name=f"{used}_去字幕-{row['label']}.mp4",
+        content_type="video/mp4",
+        size=out_path.stat().st_size,
+        source="clip",
+        width=meta.get("width") or width,
+        height=meta.get("height") or height,
+        duration=int(float(meta.get("duration") or 0)) or a.duration,
+    )
+    db.add(asset)
+    await db.commit()
+    await db.refresh(asset)
+    logger.info("去字幕产物入库：%s（手法 %s，框 %s）", asset.original_name, method, box)
+    return _asset_out(asset)
 
 
 async def _clip_seconds(payload: DirectorMergeIn, db: AsyncSession) -> list[float | None]:

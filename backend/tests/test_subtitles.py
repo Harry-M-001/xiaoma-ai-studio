@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -633,6 +634,54 @@ def test_all_test_functions_have_unique_names():
         names = re.findall(r"^def (test_\w+)\(", path.read_text(encoding="utf-8"), re.M)
         dup = [n for n, c in Counter(names).items() if c > 1]
         assert not dup, f"{path.name} 里有重名的测试函数（后者会静默覆盖前者）：{dup}"
+
+
+def test_burning_subtitles_does_not_leave_its_workdir_behind():
+    """烧字幕的临时工作目录必须收走（成功失败都要）。
+
+    里面是 `fontsdir=.` 要求的字体（同卷硬链接，不额外占盘）与那份 ass。漏删一次就积一个目录
+    ——清尾时在 `storage/tmp` 下数到了 13 个 `subs-*`。这类「每次调用留一点」的漏在功能上
+    完全看不出来（画面、时长、声音全对），只会在别人的磁盘上慢慢长。
+    """
+
+    async def case():
+        from app.services import ffmpeg_service
+
+        ff, _ = await ffmpeg_service._resolve_binaries()
+        if not ff:
+            return "skip"
+        tmp_root = ffmpeg_service.settings_storage_dir() / "tmp"
+
+        def subs_dirs() -> set[str]:
+            return {p.name for p in tmp_root.glob("subs-*")} if tmp_root.exists() else set()
+
+        before = subs_dirs()
+        src = tmp_root / "_t_subs_src.mp4"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        ok, err = await ffmpeg_service._run(
+            [ff, "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25:duration=1",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p", str(src)],
+            300,
+        )
+        assert ok, err
+        try:
+            ass = ("[Script Info]\nScriptType: v4.00+\nPlayResX: 320\nPlayResY: 180\n\n"
+                   "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, OutlineColour,"
+                   " BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing,"
+                   " Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV,"
+                   " Encoding\nStyle: S,Noto Sans CJK SC,20,&H00FFFFFF,&H00000000,&H80000000,"
+                   "-1,0,0,0,100,100,0,0,1,2,0,2,10,10,6,1\n\n[Events]\nFormat: Layer, Start,"
+                   " End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+                   "Dialogue: 0,0:00:00.00,0:00:01.00,S,,0,0,0,,测试\n")
+            out = await ffmpeg_service.burn_subtitles(src, ass, font_keys=[subtitle_fonts.BUILTIN_KEY])
+            out.unlink(missing_ok=True)
+            left = subs_dirs() - before
+            assert not left, f"烧完字幕留下了工作目录：{sorted(left)}"
+            return "ok"
+        finally:
+            src.unlink(missing_ok=True)
+
+    assert asyncio.run(case()) in ("ok", "skip")
 
 
 if __name__ == "__main__":

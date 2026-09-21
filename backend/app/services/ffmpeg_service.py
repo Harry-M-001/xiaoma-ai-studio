@@ -280,6 +280,12 @@ def _as_int(raw: object) -> int | None:
         return None
 
 
+def _even(value: float) -> int:
+    """取偶数：编码器要偶数尺寸（宽高取奇数时会直接失败或补边）。"""
+    n = int(value)
+    return n - (n % 2)
+
+
 def _out_path(ext: str) -> Path:
     """生成 storage 内的绝对输出路径。"""
     rel = storage.save_bytes(b"", f"video/{ext}", preferred_ext=ext)
@@ -740,21 +746,28 @@ async def burn_subtitles(
         raise RuntimeError(problem)
 
     work = _new_workdir("subs")
-    _staged = subtitle_fonts.stage_fonts(work, font_keys)
-    (work / "sub.ass").write_text(ass_text, encoding="utf-8")
-    out = _out_path("mp4")
+    try:
+        _staged = subtitle_fonts.stage_fonts(work, font_keys)
+        (work / "sub.ass").write_text(ass_text, encoding="utf-8")
+        out = _out_path("mp4")
 
-    cmd = [
-        ffmpeg, "-y",
-        "-i", str(src),
-        "-vf", "ass=sub.ass:fontsdir=.",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-pix_fmt", "yuv420p",
-    ]
-    cmd += ["-c:a", "copy"] if with_audio else ["-an"]
-    cmd += ["-movflags", "+faststart", str(out)]
+        cmd = [
+            ffmpeg, "-y",
+            "-i", str(src),
+            "-vf", "ass=sub.ass:fontsdir=.",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+        ]
+        cmd += ["-c:a", "copy"] if with_audio else ["-an"]
+        cmd += ["-movflags", "+faststart", str(out)]
 
-    ok, err = await _run_in(cmd, _TIMEOUT_SUBS, cwd=work)
+        ok, err = await _run_in(cmd, _TIMEOUT_SUBS, cwd=work)
+    finally:
+        # **工作目录要删**：里面是按 `fontsdir=.` 要求放进去的字体（同卷硬链接，不占额外空间，
+        # 但目录会一次一个地积在 storage/tmp 下，13 次烧字幕就是 13 个目录）。
+        # 这一条是清尾时发现的：写的时候只顾着「渲染要用的东西得在位」，
+        # 忘了不管成功失败都得收走。产物已经写在 `_out_path` 上，删它不影响结果。
+        shutil.rmtree(work, ignore_errors=True)
     if not ok or not out.exists() or out.stat().st_size == 0:
         raise RuntimeError(f"烧字幕失败：{err}")
     logger.info("字幕烧录完成：挂载字体 %s，成片 %s", _staged, out.name)
@@ -809,6 +822,134 @@ async def render_subtitle_preview(
         return out.read_bytes()
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 去字幕
+
+_TIMEOUT_REMOVE = 1800
+
+
+async def removal_frame(src: Path, t: float, *, max_side: int = 1280) -> tuple[bytes, int, int]:
+    """取一帧给「框选字幕区域」用，回（JPEG 字节，**源视频宽**，**源视频高**）。
+
+    注意宽度高度回的是**源视频**的尺寸，不是这张 JPEG 的尺寸：框操作用的是源视频坐标系，
+    界面按显示尺寸缩放去画框。回成 JPEG 尺寸的话，框一换算就错位——而且是在
+    「用户眼睛看着对、结果位置偏了」这种最难查的地方错位。
+
+    同时把显示用的图缩到 `max_side` 以内：4K 的一帧直接传给前端有十几 MB，
+    而框选根本不需要那个分辨率。
+    """
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，取不了帧")
+    info = await probe(src)
+    width = int(info.get("width") or 0)
+    height = int(info.get("height") or 0)
+    if width <= 0 or height <= 0:
+        raise RuntimeError("读不出这个视频的尺寸，没法框选")
+
+    work = _new_workdir("subrm_frame")
+    try:
+        out = work / "frame.jpg"
+        scale = min(1.0, max_side / max(width, height))
+        vf: list[str] = []
+        if scale < 1.0:
+            vf = ["-vf", f"scale={_even(width * scale)}:{_even(height * scale)}"]
+        ok, err = await _run_in(
+            [ffmpeg, "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(src),
+             *vf, "-frames:v", "1", "-q:v", "3", str(out)],
+            _TIMEOUT_FRAME, cwd=work,
+        )
+        if not ok or not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError(f"取帧失败：{err}")
+        return out.read_bytes(), width, height
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def render_removal_preview(
+    src: Path,
+    t: float,
+    *,
+    box: dict[str, int],
+    method: str,
+    width: int,
+    height: int,
+) -> bytes:
+    """把「去字幕」真渲一帧出来看（回 JPEG 字节）。
+
+    和三处一致：**预览必须是后端真渲染**，而不是前端拿 CSS 近似画一块。
+    去字幕的效果取决于滤镜对周围真实像素的取样，前端再写一套必然对不上——
+    而「预览看着挺好、导出来不一样」是最伤信任的一种不一致。
+
+    做法是**先把那一帧取成图片、再对图片跑同一套滤镜**：整段跑一遍要几十秒到几分钟，
+    而只渲一帧是几十毫秒，用户才能拖着框反复看。同一套滤镜参数由
+    `subtitle_removal.filter_args()` 出，所以预览与成品走的是同一条算式。
+    """
+    from app.services import subtitle_removal
+
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，渲不了预览")
+    args = subtitle_removal.filter_args(method, box, width, height)
+
+    work = _new_workdir("subrm_prev")
+    try:
+        still = work / "frame.png"
+        ok, err = await _run_in(
+            [ffmpeg, "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(src),
+             "-frames:v", "1", str(still)],
+            _TIMEOUT_FRAME, cwd=work,
+        )
+        if not ok or not still.exists():
+            raise RuntimeError(f"取帧失败（预览用）：{err}")
+        out = work / "preview.jpg"
+        ok, err = await _run_in(
+            [ffmpeg, "-y", "-i", str(still), *args, "-frames:v", "1", "-q:v", "3", str(out)],
+            120, cwd=work,
+        )
+        if not ok or not out.exists() or out.stat().st_size == 0:
+            raise RuntimeError(f"预览渲染失败：{err}")
+        return out.read_bytes()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+async def remove_subtitles(
+    src: Path,
+    *,
+    box: dict[str, int],
+    method: str,
+    width: int,
+    height: int,
+) -> Path:
+    """按手法把框里的字幕去掉，返回成片路径。音轨原样带过去（这一步不动声音）。
+
+    为什么音轨是 `-c:a copy` 而不是重编码：这一步只改画面，音频一个采样都不该动——
+    重编码一次就是一次无谓的损失，而用户完全看不出为什么。
+    """
+    from app.services import subtitle_removal
+
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        raise RuntimeError("未找到可用的 ffmpeg，去不了字幕")
+    args = subtitle_removal.filter_args(method, box, width, height)
+    out = _out_path("mp4")
+    work = _new_workdir("subrm")
+    try:
+        ok, err = await _run_in(
+            [ffmpeg, "-y", "-i", str(src), *args,
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(out)],
+            _TIMEOUT_REMOVE, cwd=work,
+        )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    if not ok or not out.exists() or out.stat().st_size == 0:
+        out.unlink(missing_ok=True)
+        raise RuntimeError(f"去字幕失败：{err}")
+    logger.info("去字幕完成：手法 %s，框 %s，产物 %s", method, box, out.name)
+    return out
 
 
 async def _run_in(cmd: list[str], timeout: int, *, cwd: Path) -> tuple[bool, str]:

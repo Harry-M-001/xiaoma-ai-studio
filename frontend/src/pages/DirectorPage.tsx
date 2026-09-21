@@ -4,6 +4,8 @@ import {
   ArrowUp,
   Clapperboard,
   Download,
+  Eraser,
+  Eye,
   Film,
   Scissors,
   Sparkles,
@@ -13,8 +15,18 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { setDraftFirstFrame } from "../promptDraft";
-import type { Asset, MergeArgs, MergePreview, SubtitleOptions, TransitionOptions } from "../types";
+import type {
+  Asset,
+  MergeArgs,
+  MergePreview,
+  RemovalBox,
+  RemovalFrame,
+  RemovalPreview,
+  SubtitleOptions,
+  TransitionOptions,
+} from "../types";
 import { downloadUrl } from "../components/TaskCard";
+import { Dialog } from "../components/Dialog";
 import { Empty, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
@@ -42,6 +54,422 @@ function fmt(t: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${ms}`;
 }
 
+/**
+ * 框的最小边（像素）。与后端 `subtitle_removal.MIN_SIDE` 是同一个数：
+ * 后端会把越界的框夹回来，但**拖动时就该停住**，不然用户以为自己拖动了、其实没动。
+ * 更小也不行——退化成一两条线的框 ffmpeg 不报错，等于什么都没做。
+ */
+const BOX_MIN = 8;
+
+type BoxMode = "move" | "nw" | "ne" | "sw" | "se";
+
+function clampBox(mode: BoxMode, orig: RemovalBox, dx: number, dy: number,
+                  W: number, H: number): RemovalBox {
+  const right = orig.x + orig.w;
+  const bottom = orig.y + orig.h;
+  const cl = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+  let x = orig.x;
+  let y = orig.y;
+  let w = orig.w;
+  let h = orig.h;
+  if (mode === "move") {
+    x = cl(orig.x + dx, 0, Math.max(0, W - orig.w));
+    y = cl(orig.y + dy, 0, Math.max(0, H - orig.h));
+  } else {
+    if (mode === "nw" || mode === "sw") {
+      x = cl(orig.x + dx, 0, right - BOX_MIN);
+      w = right - x;
+    } else {
+      w = cl(orig.w + dx, BOX_MIN, W - orig.x);
+    }
+    if (mode === "nw" || mode === "ne") {
+      y = cl(orig.y + dy, 0, bottom - BOX_MIN);
+      h = bottom - y;
+    } else {
+      h = cl(orig.h + dy, BOX_MIN, H - orig.y);
+    }
+  }
+  return { x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h) };
+}
+
+/**
+ * 在真帧上拖出「哪一块要处理」。
+ *
+ * 为什么是拖框而不是填坐标：字幕在画面里的位置只能看，说不出来——填 x/y/宽/高
+ * 会让每个人先量三遍。框的坐标全程用**源视频像素**（显示尺寸只是画面被 CSS 缩过），
+ * 换算只发生在拖动时取下容器矩形这一步；把显示尺寸当坐标存起来，
+ * 换个窗口大小就会「看着框住了、处理的是别处」。
+ */
+function RemovalBoxPicker({ src, natural, box, onChange, onCommit }: {
+  src: string;
+  natural: { w: number; h: number };
+  box: RemovalBox;
+  onChange: (b: RemovalBox) => void;
+  /** 松手时回调：可选项随框变，要在这时去问后端（拖动过程中不问，太密） */
+  onCommit?: () => void;
+}) {
+  const holder = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ mode: BoxMode; px: number; py: number; rect: DOMRect; orig: RemovalBox } | null>(null);
+
+  const begin = (mode: BoxMode) => (e: React.PointerEvent) => {
+    const rect = holder.current?.getBoundingClientRect();
+    if (!rect) return;
+    e.preventDefault();
+    e.stopPropagation();
+    drag.current = { mode, px: e.clientX, py: e.clientY, rect, orig: { ...box } };
+    // 捕获指针：拖到画面外再松手也能收到 pointerup（不捕获的话框会「粘」在鼠标上继续动）。
+    // try 一下是因为 pointerId 已经失效时它会抛 NotFoundError（快速点一下就可能发生），
+    // 那种情况下拖动状态已经设好了，不该因为这一句把整次拖动打断。
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    } catch {
+      /* 指针已经没了就算了：下面的 move/up 走的是容器上的监听 */
+    }
+  };
+
+  const move = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    // 屏幕位移 → 源视频像素
+    const dx = ((e.clientX - d.px) / d.rect.width) * natural.w;
+    const dy = ((e.clientY - d.py) / d.rect.height) * natural.h;
+    onChange(clampBox(d.mode, d.orig, dx, dy, natural.w, natural.h));
+  };
+
+  const end = () => {
+    if (!drag.current) return;
+    drag.current = null;
+    onCommit?.();
+  };
+
+  const pct = (v: number, total: number) => `${(v / total) * 100}%`;
+  const handles: { mode: BoxMode; cls: string }[] = [
+    { mode: "nw", cls: "nw" },
+    { mode: "ne", cls: "ne" },
+    { mode: "sw", cls: "sw" },
+    { mode: "se", cls: "se" },
+  ];
+
+  return (
+    <div
+      className="subrm-canvas"
+      ref={holder}
+      onPointerMove={move}
+      onPointerUp={end}
+      onPointerCancel={end}
+    >
+      <img src={src} alt="待处理的一帧" draggable={false} />
+      <div
+        className="subrm-box"
+        style={{
+          left: pct(box.x, natural.w),
+          top: pct(box.y, natural.h),
+          width: pct(box.w, natural.w),
+          height: pct(box.h, natural.h),
+        }}
+        onPointerDown={begin("move")}
+        title="拖动移动这一块（拖四个角改大小）"
+      >
+        {handles.map((h) => (
+          <span key={h.mode} className={`subrm-handle subrm-handle-${h.cls}`} onPointerDown={begin(h.mode)} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 「去字幕」弹窗：在真帧上框出字幕带，挑一种手法，先看真渲染的一帧，再处理整段。
+ *
+ * 三件事是这个弹窗存在的理由：
+ * 1. **框必须拖**（字幕在哪只能看）；
+ * 2. **预览是后端真渲一帧**，与成品同一套滤镜——「预览看着行、导出来不行」最伤信任；
+ * 3. **四种手法的代价写在旁边**。ffmpeg 去字幕做不到「无痕」：抹平是竖向拖痕、
+ *    遮住是拉出来的一道痕、模糊是一条糊痕、裁掉画面会变矮。用户是拿这些代价
+ *    去换「没有那行字」的。真无痕要 AI 补全，那是另一档（本机 VSR，需自己下载）。
+ */
+function RemoveSubtitlesDialog({ asset, onClose, onReplaced }: {
+  asset: Asset;
+  onClose: () => void;
+  onReplaced: (made: Asset) => void;
+}) {
+  const toast = useToast();
+  const [frame, setFrame] = useState<RemovalFrame | null>(null);
+  const [box, setBox] = useState<RemovalBox | null>(null);
+  const [method, setMethod] = useState("");
+  const [t, setT] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [preview, setPreview] = useState<RemovalPreview | null>(null);
+  const [stale, setStale] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [problem, setProblem] = useState("");
+
+  const loadFrame = async (at: number) => {
+    setLoading(true);
+    setProblem("");
+    try {
+      const data = await api.removalFrame({ assetId: asset.id, t: at });
+      setFrame(data);
+      // 框在源视频像素里，换帧不会让它失效——字幕在帧间不会跑；
+      // 第一次取帧才用推荐框（之后用户拖过就以他的为准）
+      if (!boxRef.current) putBox(data.box);
+      setMethod((prev) => prev || data.defaultMethod);
+      setStale(true);
+    } catch (e) {
+      setProblem(e instanceof Error ? e.message : "取帧失败");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadFrame(0);
+    // 只在打开时取第一帧；换帧由用户点
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asset.id]);
+
+  const runPreview = async (nextMethod?: string) => {
+    if (!box) return;
+    const use = nextMethod ?? method;
+    setPreviewing(true);
+    setProblem("");
+    try {
+      const data = await api.removalPreview({ assetId: asset.id, t, box, method: use });
+      setPreview(data);
+      setStale(false);
+    } catch (e) {
+      setProblem(e instanceof Error ? e.message : "预览失败");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const checkSeq = useRef(0);
+  /**
+   * 框的**同步**副本。
+   *
+   * 为什么不能直接读 state：拖动时 `onChange` 改的是 state，而 React 的更新是异步的
+   * （一轮事件处理完才重渲染）。用户**快速一甩**（按下、移动、松手都在同一帧里）时，
+   * 松手那一刻闭包里的 `box` 还是旧值——刷新可选项就会把**旧框**发给后端、
+   * 再把旧框设回来，表现成「我明明拖了，它自己弹回去了」。
+   * 这个 ref 在 onChange 里同步写，所以任何时刻读到的都是最新的框。
+   */
+  const boxRef = useRef<RemovalBox | null>(null);
+  const putBox = (b: RemovalBox) => {
+    boxRef.current = b;
+    setBox(b);
+  };
+
+  /**
+   * 框变了就重新问一次「四种手法各能不能用」。
+   *
+   * 不能只在打开弹窗时算一次：框挪到画面中间时「裁掉」就不能用了，界面若还显示能选，
+   * 用户点下去才报错——「界面说行、后端说不行」最伤信任。这个接口不碰 ffmpeg，
+   * 所以松手后随便调。拖动过程中不调（太密），只在松手 / 换预设时调。
+   */
+  const refreshMethods = async (next?: RemovalBox) => {
+    const use = next ?? boxRef.current;
+    if (!use) return;
+    const seq = ++checkSeq.current;
+    try {
+      const data = await api.removalCheck({ assetId: asset.id, box: use });
+      if (seq !== checkSeq.current) return; // 有更新的请求在跑，旧的丢掉
+      setFrame((prev) => (prev ? { ...prev, box: data.box, methods: data.methods } : prev));
+      putBox(data.box);
+      setMethod((prev) => {
+        const row = data.methods.find((m) => m.key === prev);
+        // 选中的手法变得不可用了就退回默认——留一个「选中但灰掉」的单选更让人困惑
+        return row && row.available ? prev : data.defaultMethod;
+      });
+    } catch {
+      /* 刷新失败不挡事：真正的拦截在后端，这里只是少一次同步 */
+    }
+  };
+
+  const apply = async () => {
+    if (!box || applying) return;
+    setApplying(true);
+    setProblem("");
+    try {
+      const made = await api.removeSubtitles({ assetId: asset.id, box, method });
+      toast.success("已用去字幕后的版本替换这一段（原片仍在资产库）");
+      onReplaced(made);
+    } catch (e) {
+      setProblem(e instanceof Error ? e.message : "去字幕失败");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const pickMethod = (key: string) => {
+    setMethod(key);
+    // 已经对比过的人换手法就是想比一比——直接给新的那一帧，不用再点一次
+    if (preview) void runPreview(key);
+    else setStale(true);
+  };
+
+  const presets: { label: string; make: (W: number, H: number) => RemovalBox }[] = [
+    { label: "底部一条", make: (W, H) => ({ x: 0, y: Math.round(H * 0.84), w: W, h: Math.round(H * 0.16) }) },
+    { label: "顶部一条", make: (W, H) => ({ x: 0, y: 0, w: W, h: Math.round(H * 0.16) }) },
+    { label: "铺满整幅", make: (W, H) => ({ x: 0, y: 0, w: W, h: H }) },
+  ];
+
+  const nat = { w: frame?.width ?? 0, h: frame?.height ?? 0 };
+
+  return (
+    <Dialog onClose={onClose} label="去字幕" maskClassName="canvas-dialog-mask"
+            className="canvas-dialog subrm-dialog">
+      <div className="canvas-dialog-head">
+        <span className="canvas-dialog-title">
+          <Eraser size={15} /> 去字幕 · {asset.original_name}
+        </span>
+        <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+          <X size={14} />
+        </button>
+      </div>
+
+      <div className="subrm-body">
+        <div className="canvas-float-hint">
+          在下面这一帧上拖出「字幕所在的那一条」，挑一种手法，先看效果再处理整段。
+          <b>去字幕是盖掉像素，做不到无痕</b>：四种手法各自会留下什么，写在手法旁边。
+        </div>
+
+        {loading && !frame && (
+          <div className="subrm-loading">
+            <Spinner /> 正在取一帧…
+          </div>
+        )}
+
+        {frame && box && (
+          <>
+            <RemovalBoxPicker
+              src={frame.image}
+              natural={nat}
+              box={box}
+              onChange={(b) => {
+                putBox(b);
+                setStale(true);
+              }}
+              onCommit={() => void refreshMethods()}
+            />
+
+            <div className="subrm-row">
+              <label className="field">
+                <span>看哪一帧</span>
+                <div className="subrm-time">
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, frame.duration)}
+                    step={0.1}
+                    value={t}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      setT(v);
+                      void loadFrame(v);
+                    }}
+                  />
+                  <span className="muted">
+                    {t.toFixed(1)}s / {frame.duration.toFixed(1)}s
+                  </span>
+                </div>
+              </label>
+              <div className="subrm-presets">
+                {presets.map((p) => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => {
+                      const nb = p.make(nat.w, nat.h);
+                      putBox(nb);
+                      setStale(true);
+                      void refreshMethods(nb);
+                    }}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <span className="muted subrm-geo">
+                {nat.w}×{nat.h} · 框 {box.x},{box.y} {box.w}×{box.h}
+              </span>
+            </div>
+
+            <div className="subrm-methods">
+              {frame.methods.map((m) => (
+                <label
+                  key={m.key}
+                  className={`subrm-method${m.key === method ? " on" : ""}${m.available ? "" : " off"}`}
+                  title={m.available ? m.hint : m.reason}
+                >
+                  <input
+                    type="radio"
+                    name="subrm-method"
+                    checked={m.key === method}
+                    disabled={!m.available}
+                    onChange={() => pickMethod(m.key)}
+                  />
+                  <span className="subrm-method-label">{m.label}</span>
+                  <span className="subrm-method-short">{m.available ? m.short : `用不了：${m.reason}`}</span>
+                </label>
+              ))}
+            </div>
+
+            <div className="subrm-compare">
+              <figure>
+                <img src={frame.image} alt="原帧" />
+                <figcaption>原帧（框住的就是要去掉的那一条）</figcaption>
+              </figure>
+              <figure>
+                {preview ? (
+                  <img src={preview.image} alt="处理后" />
+                ) : (
+                  <div className="subrm-placeholder">点「看效果」渲一帧</div>
+                )}
+                <figcaption>
+                  {preview
+                    ? `处理后（${preview.label}）${stale ? " · 框或帧改过了，这是旧预览" : ""}`
+                    : "处理后"}
+                </figcaption>
+              </figure>
+            </div>
+
+            {preview && <div className="subrm-note">{preview.note}</div>}
+
+            {problem && <div className="director-merge-warn">{problem}</div>}
+
+            <div className="subrm-foot">
+              <span className="muted">
+                处理整段要重编码一次，时长按片子长度走（这一段 {asset.duration ?? "?"}s）。
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                disabled={previewing || applying}
+                onClick={() => void runPreview()}
+              >
+                {previewing ? <Spinner /> : <Eye size={14} />} 看效果
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={applying || previewing}
+                onClick={() => void apply()}
+              >
+                {applying ? <Spinner /> : <Eraser size={14} />} 开始去字幕
+              </button>
+            </div>
+          </>
+        )}
+
+        {problem && !frame && <div className="director-merge-warn">{problem}</div>}
+      </div>
+    </Dialog>
+  );
+}
+
 /** 视频粗剪：导入 → 入出点 → 截片段 → 排序合并 → AI 改造 */
 function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   const toast = useToast();
@@ -62,6 +490,8 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   const [merged, setMerged] = useState<Asset | null>(null);
   // 正在截首帧的片段 id（AI 改造要先截一帧才能交给视频页）
   const [remaking, setRemaking] = useState<number | null>(null);
+  // 正在去字幕的那一段（弹窗里框选 + 选手法 + 看真帧效果）
+  const [removing, setRemoving] = useState<Asset | null>(null);
 
   // ---- 转场与转场音效 ----
   // 预设表从后端拿：`services/transitions.py` 是唯一一份，前端不另抄一张——
@@ -428,6 +858,13 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
                       </button>
                       <button
                         className="icon-btn"
+                        title="去字幕：框出画面里那一条字幕，用画面把它盖掉（原片不动，产物是新资产）"
+                        onClick={() => setRemoving(c)}
+                      >
+                        <Eraser size={14} />
+                      </button>
+                      <button
+                        className="icon-btn"
                         title="AI 改造：取这段的首帧，去视频页做图生视频"
                         disabled={remaking !== null}
                         onClick={() => aiRemake(c)}
@@ -565,6 +1002,18 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
           )}
         </div>
       </div>
+
+      {/* 去字幕：在时间线上就地替换这一段；原片仍在资产库 */}
+      {removing && (
+        <RemoveSubtitlesDialog
+          asset={removing}
+          onClose={() => setRemoving(null)}
+          onReplaced={(made) => {
+            setClips((prev) => prev.map((c) => (c.id === removing.id ? made : c)));
+            setRemoving(null);
+          }}
+        />
+      )}
     </>
   );
 }

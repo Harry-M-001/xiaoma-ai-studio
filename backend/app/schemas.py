@@ -223,6 +223,56 @@ class SubtitlePreviewIn(BaseModel):
     height: int = 720
 
 
+class RemovalBoxIn(BaseModel):
+    """要处理的那一块字幕区域。坐标是**源视频像素**（前端按显示尺寸缩放换算）。
+
+    四项都可省：服务端会把框夹进画面、并把宽高拉齐到偶数——用户拖到边界差一两像素
+    不该报错。
+    """
+
+    x: int = 0
+    y: int = 0
+    w: int = 0
+    h: int = 0
+
+
+class RemovalFrameIn(BaseModel):
+    """取一帧来框选（加 `t` 就是「换一帧看看」）。"""
+
+    asset_id: int
+    t: float = Field(default=0.0, ge=0)
+
+
+class RemovalPreviewIn(BaseModel):
+    """把去字幕真渲一帧出来看。"""
+
+    asset_id: int
+    t: float = Field(default=0.0, ge=0)
+    box: RemovalBoxIn = RemovalBoxIn()
+    # 空 = 没选过 → 用推荐手法（抹平）
+    method: str = ""
+
+
+class RemovalCheckIn(BaseModel):
+    """只问「这个框上四种手法各能不能用」。
+
+    单开一个接口是因为**拖动之后可选项会变**（框挪到画面中间时「裁掉」就不能用了），
+    而算这个只用到几何、不碰 ffmpeg，值得在每次松手后立刻问一次：
+    否则界面会显示「能选」，等用户点了才报错——「界面说行、后端说不行」最难解释。
+    """
+
+    asset_id: int
+    box: RemovalBoxIn = RemovalBoxIn()
+
+
+class RemovalApplyIn(BaseModel):
+    """按这个框与手法处理整段视频，产物落资产库。"""
+
+    asset_id: int
+    box: RemovalBoxIn = RemovalBoxIn()
+    method: str = ""
+
+
 class VideoGenerateIn(BaseModel):
     model_key: str
     prompt: str = Field(..., min_length=1)
