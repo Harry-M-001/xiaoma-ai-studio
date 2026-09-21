@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from . import camera_moves
 from .storyboard_sheet import Shot
 
 # ---------------------------------------------------------------- 常量
@@ -58,7 +59,10 @@ _RATIO_VALUE: dict[str, tuple[int, int]] = {
     "4:3": (4, 3),
 }
 
-# 运镜类型
+# 运镜类型。**判词在 `camera_moves`，这里只管「key → 缓动参数」**。
+# 以前这里有一份自己排过序的关键词表，而 `storyboard_lint` 另有等价的一份、
+# 提示词里又手写了第三份——四份表必然各自漂移。现在收敛：
+# 提示词给模型同一份词表、解析与体检认同一份、这里只做映射。
 PUSH = "push"
 PULL = "pull"
 PAN_RIGHT = "pan_right"
@@ -68,31 +72,8 @@ TILT_DOWN = "tilt_down"
 ORBIT = "orbit"
 STATIC = "static"
 
-# 运镜关键词 → 类型。表内**顺序只在「同一位置命中多个词」时当优先级**，
-# 真正的主判据是「谁先出现在这一栏里」——写分镜的人总是先说主要的那个运镜：
-# 「横移跟拍」是移动，「推进跟拍」是推近，两者都含「跟」，靠固定优先级必然错一个。
-#
-# 几条容易踩的：
-# - 「升降」与「升」「降」在同一位置命中，靠表内顺序取「升降」；
-# - 单字（升/降/移/跟/绕）容易误伤，但它们只出现在「运镜」这一栏里，
-#   那一栏的词汇量就这么大（`storyboard_sheet` 只把标题里 `|` 分隔的第 3 段当运镜）。
-_MOVE_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("环绕", "旋转", "绕", "orbit", "arc"), ORBIT),
-    (("升降", "航拍", "crane"), TILT_UP),
-    (("上摇", "向上", "仰摇", "仰", "升", "tilt up"), TILT_UP),
-    (("下摇", "向下", "俯摇", "俯冲", "tilt down"), TILT_DOWN),
-    (("左移", "左摇", "向左", "pan left"), PAN_LEFT),
-    (("右移", "右摇", "向右", "pan right"), PAN_RIGHT),
-    (("降", "落"), TILT_DOWN),
-    (("摇", "移", "跟", "平移", "横移", "dolly", "track", "pan"), PAN_RIGHT),
-    (("拉", "缩", "zoom out", "pull"), PULL),
-    (("推", "zoom in", "push"), PUSH),
-    (("固定", "静止", "不动", "定格", "static", "lock"), STATIC),
-)
-
-# 判定「固定镜头」用的词表。`storyboard_lint` 里有一份等价的实现——两处必须在
-# 「固定/静止/不动/static/lock」上给出同一个答案，否则会出现「体检说不是固定、
-# 样片却不动」这种自相矛盾。`test_animatic.py` 里有一条用例专门守这件事。
+# 判定「固定镜头」用的词表已经搬去 `camera_moves.is_static()`。
+# 保留这个名字只为兼容老调用点与测试，**不要在这里再加词**。
 STATIC_WORDS = ("固定", "静止", "不动", "定格", "static", "lock")
 
 
@@ -125,35 +106,30 @@ class MoveSpec:
 
 
 def is_static_move(move_text: str) -> bool:
-    """分镜表的「运镜」栏是不是固定机位（与 `storyboard_lint` 同一口径）。"""
-    text = (move_text or "").strip().lower()
-    return any(w in text for w in STATIC_WORDS)
+    """分镜表的「运镜」栏是不是固定机位。
+
+    **判据只有一处**（`camera_moves.is_static`）：以前这里与 `storyboard_lint`
+    各有一份等价实现，而两份必须在「固定/静止/不动/static/lock」上永远给出同一个答案
+    ——否则会出现「体检说不是固定、样片却不动」这种自相矛盾。
+    """
+    return camera_moves.is_static(move_text)
 
 
 def move_spec(move_text: str, *, default: str = PUSH) -> MoveSpec:
     """把分镜表的运镜文字翻译成缓动参数。
 
-    判据：**先在文字里出现的运镜说了算**（写分镜的人总是先说主要的那个）；
-    同一位置命中多个词时，按 `_MOVE_RULES` 的表内顺序取更具体的那个。
+    **认词在 `camera_moves.match()`**（先用多字别名、再用单字兜底），这里只把认到的
+    key 映射成缓动参数——两边各留一份关键词表必然漂移。
 
     一个都没认出来时返回 `default` 指定的运镜（默认轻微推近）：样片是给人看节奏的，
     一整条死画面比「动得不太对」更没用。节点上可以把默认改成「固定」
     （`sampleDefaultMove=static`），那样认不出来就真的不动。
+
+    注意：**「认不出来」这件事本身要由体检说，不是这里悄悄兜底**——
+    `storyboard_lint` 会把不在词表里的运镜列出来并给建议。
     """
-    text = (move_text or "").strip().lower()
-    if text:
-        best: tuple[int, int, str] | None = None
-        for order, (words, kind) in enumerate(_MOVE_RULES):
-            for word in words:
-                pos = text.find(word)
-                if pos < 0:
-                    continue
-                cand = (pos, order, kind)
-                if best is None or cand[:2] < best[:2]:
-                    best = cand
-        if best is not None:
-            return _SPECS[best[2]]
-    return _SPECS.get(default, _SPECS[PUSH])
+    kind = camera_moves.animatic_kind(move_text, default=default)
+    return _SPECS.get(kind, _SPECS[PUSH])
 
 
 # 每种运镜的具体参数。数值都是「看得出来的最小幅度」：

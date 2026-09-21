@@ -41,6 +41,7 @@ import type {
   CanvasNodeVersions,
   CanvasRunSummary,
   CanvasPreview,
+  CameraMoveTable,
   OllamaStatus,
   QuickSetupResult,
   SchemaRow,
@@ -408,6 +409,9 @@ export const api = {
     request<{ nodes: Record<string, CanvasNodeStatus> }>(`/api/canvas/${projectId}/status`),
   getAgentPrompts: () => request<AgentMeta[]>("/api/meta/agent-prompts"),
   listDirectorStyles: () => request<StyleOption[]>("/api/meta/director-styles"),
+  // 运镜词表：分镜表里那一栏的合法写法。体检报「不在词表里」时前端拿它显示可选值，
+  // 前端不写死这份清单（与其它 meta 接口同一个口径）。
+  listCameraMoves: () => request<CameraMoveTable>("/api/meta/camera-moves"),
 
   // ---- 在线更新 ----
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),

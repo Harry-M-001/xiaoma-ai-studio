@@ -12,13 +12,41 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import Any, Callable
+
+from . import camera_moves
 
 # 单条链最多分多少块（防止误填参数导致一次烧掉几十次调用）
 MAX_CHUNKS = 30
 
 _PLACEHOLDER = re.compile(r"\{(\w+)\}")
+
+# 有些规则**必须由代码附在系统提示词末尾**，而不是写在可编辑的提示词里。
+#
+# 判据是「它是不是与下游的契约」：这类规则改没了不会报错，只会静默降级
+# （模型自造说法 → 解析认不出 → 样片按默认动效走），而界面上看不出来。
+#
+# 现实原因同样重要：`config_center.ensure_seed` **从不覆盖已存在的行**，
+# 所以任何只写在提示词种子里的规则，对所有升级上来的用户都不存在——而他们正是多数。
+# 实测过这一条：升级后的库里那份分镜提示词仍是旧文本，没有运镜词表。
+HARD_RULES: dict[str, Callable[[], str]] = {
+    "storyboard": camera_moves.prompt_block,
+}
+
+
+def hard_rules_for(agent_key: str) -> str:
+    """这一岗由代码附加的硬规则（没有则空串）。"""
+    maker = HARD_RULES.get(str(agent_key or "").strip())
+    return maker() if maker else ""
+
+
+def apply_hard_rules(spec: "AgentSpec") -> "AgentSpec":
+    """把硬规则接在系统提示词末尾。**排在最后**，因此优先于用户改过的正文。"""
+    block = hard_rules_for(spec.key)
+    if not block:
+        return spec
+    return replace(spec, system_prompt=f"{spec.system_prompt.rstrip()}\n\n{block}")
 
 
 @dataclass

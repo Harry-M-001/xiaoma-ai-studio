@@ -719,6 +719,9 @@ class TaskRunner:
                     if block:
                         spec = replace(spec, system_prompt=f"{spec.system_prompt.rstrip()}\n\n{block}")
                         logger.info("文本任务 %s 注入风格：%s", task_id, card.name if card else "")
+                    # 硬规则（与下游解析的契约，如分镜的运镜词表）接在**最后**：
+                    # 它不能靠提示词种子数据下发，否则升级上来的老库永远拿不到（见 doc_service）。
+                    spec = doc_service.apply_hard_rules(spec)
                     # Agent 上指定了模型就用它，否则用节点上选的
                     resolved = await provider_store.resolve_model(
                         db, spec.model_key or task.model, "text"

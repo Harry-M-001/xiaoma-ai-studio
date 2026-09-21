@@ -22,7 +22,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import storyboard_sheet
+from . import camera_moves, storyboard_sheet
 from .storyboard_sheet import Shot
 
 # ---------------------------------------------------------------- 阈值
@@ -74,11 +74,9 @@ _SIZE_ALIAS = {
     "ecu": "大特写",
     "cu": "特写",
 }
-# 运镜总类（用于判断「种类够不够」）
-_MOVE_HINTS = (
-    "推", "拉", "摇", "移", "跟", "升降", "环绕", "旋转", "手持", "固定", "静",
-    "zoom", "pan", "tilt", "dolly", "track", "crane", "orbit", "static",
-)
+# 运镜的判词全部搬去 `services/camera_moves.py`（**一份表四处共用**：分镜提示词 /
+# 静图样片 / 这里的体检 / 体检的建议文案）。这里原来有一份 `_MOVE_HINTS`，
+# 而 `animatic` 另有排过序的一份、提示词里还手写了第三份——三份必然漂移。
 
 
 @dataclass(frozen=True)
@@ -126,8 +124,13 @@ def _shot_names(shots: list[Shot]) -> str:
 
 
 def _has_move_hint(raw: str) -> bool:
-    text = (raw or "").strip().lower()
-    return bool(text) and any(h in text for h in _MOVE_HINTS)
+    """写了运镜没有。
+
+    **判据只有一份**（`camera_moves.match`）：以前这里自己列了一份 `_MOVE_HINTS`，
+    而 `animatic` 另有一份排过序的表、提示词里还手写着第三份——三份表必然漂移，
+    表现就是「体检说写了运镜、样片却认不出所以套了个推近」。
+    """
+    return camera_moves.match(raw) is not None
 
 
 def _is_static_move(raw: str) -> bool:
@@ -136,8 +139,7 @@ def _is_static_move(raw: str) -> bool:
     单独拎出来是因为它**不是毛病**：一场对话戏连着三个固定镜头是完全正常的拍法，
     「连续三镜同一运镜」这条规则对固定镜头不成立，只对「一直在推/一直在摇」成立。
     """
-    text = (raw or "").strip().lower()
-    return any(k in text for k in ("固定", "静止", "不动", "static", "lock"))
+    return camera_moves.is_static(raw)
 
 
 # ---------------------------------------------------------------- 规则
@@ -165,14 +167,18 @@ def _rule_missing_fields(shots: list[Shot]) -> list[Finding]:
             )
         )
 
-    no_move = [s for s in shots if not _has_move_hint(s.move)]
+    no_move = [s for s in shots if not (s.move or "").strip()]
     if no_move:
         out.append(
             Finding(
                 code="missing_move",
                 level="warn",
                 message=f"{len(no_move)}/{len(shots)} 个镜头没写运镜（{_shot_names(no_move)}）。",
-                suggestion="补上运镜（推/拉/摇/移/跟/升降/环绕/固定），否则镜头不会动。",
+                # 建议从词表生成，**不再手写一份**——手写的那份必然与表脱节
+                suggestion=(
+                    "在这一栏补上运镜，可选：" + "、".join(camera_moves.labels())
+                    + "。不写的话镜头不会动。"
+                ),
                 shots=tuple(s.no for s in no_move),
             )
         )
@@ -251,18 +257,113 @@ def _rule_size_distribution(shots: list[Shot]) -> list[Finding]:
     return out
 
 
+def _rule_unknown_move(shots: list[Shot]) -> list[Finding]:
+    """写了运镜，但不在词表里。
+
+    这是**加了运镜词表之后才有的一条规则**，也是这一项对用户最直接的好处：
+
+    以前「运镜」这一栏随便写什么都行，而静图样片认不出时会**静默套一个推近**——
+    样片动了，但动的不是分镜表写的意思，而界面上完全看不出来。现在把认不出来的
+    挑出来说清，并给一个最接近的建议。
+
+    两种情形分开说，因为**用户要改的地方不一样**：
+
+    - 写的是「主观镜头」这类**机位/镜头类型**：那是镜头类型不是运动方式，
+      该挪到画面描述里，运镜栏另选一个运动方式。
+    - 写的是没见过的说法（「镜头缓缓飘过」）：从词表里挑一个最接近的。
+    """
+    out: list[Finding] = []
+    unknown: dict[str, list[str]] = {}
+    for s in shots:
+        raw = (s.move or "").strip()
+        if not raw or camera_moves.match(raw) is not None:
+            continue
+        unknown.setdefault(raw, []).append(s.no)
+
+    for raw, shot_nos in unknown.items():
+        not_a_move = camera_moves.looks_like_not_a_move(raw)
+        shot_list = "、".join(f"镜头{n}" for n in shot_nos if n) or "有镜头"
+        if not_a_move:
+            out.append(
+                Finding(
+                    code="move_not_a_move",
+                    level="warn",
+                    message=f"{shot_list} 的运镜写的是「{not_a_move}」——那是"
+                    "镜头类型 / 机位，不是运动方式。",
+                    suggestion=(
+                        "把「" + not_a_move + "」挪到画面描述里，运镜那一栏改成运动方式，例如："
+                        + "、".join(camera_moves.labels()[:8])
+                        + "。否则静图样片不知道该怎么动。"
+                    ),
+                    shots=tuple(shot_nos),
+                )
+            )
+            continue
+        near = camera_moves.closest(raw)
+        tip = f"最接近的是「{near}」；" if near else ""
+        out.append(
+            Finding(
+                code="move_unknown",
+                level="warn",
+                message=f"{shot_list} 的运镜「{raw}」不在运镜词表里（{len(camera_moves.CAMERA_MOVES)} 种）。",
+                suggestion=(
+                    tip
+                    + "从词表里选一个改掉。不在词表里的写法，静图样片认不出来会按默认动效处理，"
+                    "与分镜表写的意思对不上。"
+                ),
+                shots=tuple(shot_nos),
+            )
+        )
+    return out
+
+
+def _move_key_of(raw: str) -> str:
+    """比较「是不是同一个运镜」用的键：认得出就用词表 key，认不出就用原文。
+
+    用 key 而不是原文，是因为「推近」与「缓推」是同一个运镜——按原文比会把它们
+    当成两种，于是「一直在推」这条规则漏掉；按 key 比才看得出来。
+    """
+    key = camera_moves.move_key(raw)
+    return key or f"raw:{(raw or '').strip()}"
+
+
+def _move_label(raw: str) -> str:
+    """概览里显示的名字：认得出用词表的中文名，认不出用用户自己写的原文。
+
+    认不出来的不藏起来——`move_unknown` 那条提醒会点名它，两处要能对上。
+    """
+    hit = camera_moves.match(raw)
+    return str(hit["label"]) if hit else (raw or "").strip()
+
+
 def _rule_move_repeat(shots: list[Shot]) -> list[Finding]:
     """运镜重复：连续几镜同一个运镜，或某个运镜占了一半以上。"""
-    moves = [(s, (s.move or "").strip()) for s in shots]
-    moves = [(s, m) for s, m in moves if m]
+    moves = [(s, (s.move or "").strip(), _move_key_of(s.move)) for s in shots]
+    moves = [(s, m, k) for s, m, k in moves if m]
     out: list[Finding] = []
     if len(moves) < MOVE_RUN_LEN:
         return out
 
+    def _name(group: list[tuple[Shot, str, str]]) -> str:
+        """给人看的这一组叫什么。写法和词表名不同时把写法附在括号里——不然用户会奇怪
+        「我写的是缓推，怎么说我连着三个慢推」。
+
+        返回的是**括号里的内容**，引号由调用方加：这里自己带一段「」出来，
+        外面再套一层就会变成「慢推」（…）」（这种括号错位真出现过）。
+        """
+        keys = {k for _s, _m, k in group}
+        canon = camera_moves.by_key(next(iter(keys))) if len(keys) == 1 else None
+        raws = {m for _s, m, _k in group}
+        if canon is None:
+            return group[0][1]
+        if len(raws) > 1:
+            return f"{canon['label']}（你写的是 {'、'.join(sorted(raws))}）"
+        return str(canon["label"])
+
     # 连续段
     run_start = 0
     for i in range(1, len(moves) + 1):
-        same = i < len(moves) and moves[i][1] == moves[run_start][1]
+        same = i < len(moves) and moves[i][2] == moves[run_start][2]
         if same:
             continue
         run = moves[run_start:i]
@@ -272,39 +373,42 @@ def _rule_move_repeat(shots: list[Shot]) -> list[Finding]:
                 Finding(
                     code="move_run",
                     level="warn",
-                    message=f"连续 {len(run)} 个镜头都是「{run[0][1]}」（{_shot_names([s for s, _ in run])}），"
+                    message=f"连续 {len(run)} 个镜头都是「{_name(run)}」（{_shot_names([s for s, _m, _k in run])}），"
                     "连在一起看会像卡住了。",
                     suggestion="中间至少插一个不同的运镜，或者干脆改成固定镜头留一口气。",
-                    shots=tuple(s.no for s, _ in run),
+                    shots=tuple(s.no for s, _m, _k in run),
                 )
             )
         run_start = i
 
-    counter = Counter(m for _, m in moves)
+    counter = Counter(k for _s, _m, k in moves)
     if len(moves) >= MIN_SHOTS_FOR_DISTRIBUTION:
-        top_move, top_n = counter.most_common(1)[0]
+        top_key, top_n = counter.most_common(1)[0]
         if top_n / len(moves) >= MOVE_DOMINANT_RATIO and not any(
             f.code == "move_run" for f in out
         ):
-            hits = [s for s, m in moves if m == top_move]
+            hits = [(s, m, k) for s, m, k in moves if k == top_key]
+            name = _name(hits)
             # 固定镜头占多数的性质轻一档：可能是刻意的冷静风格，提醒一句就够
-            static = _is_static_move(top_move)
+            static = _is_static_move(hits[0][1])
             out.append(
                 Finding(
                     code="move_dominant",
                     level="info" if static else "warn",
-                    message=f"「{top_move}」占了 {top_n}/{len(moves)}"
-                    f"（{round(top_n / len(moves) * 100)}%）（{_shot_names(hits)}）。",
+                    message=f"「{name}」占了 {top_n}/{len(moves)}"
+                    f"（{round(top_n / len(moves) * 100)}%）（{_shot_names([s for s, _m, _k in hits])}）。",
                     suggestion="换掉一部分：固定镜头最省，跟拍/环绕留给动作戏。",
-                    shots=tuple(s.no for s in hits),
+                    shots=tuple(s.no for s, _m, _k in hits),
                 )
             )
         elif len(counter) <= 2 and len(moves) >= SINGLE_SCENE_MIN_SHOTS:
+            kinds = "、".join(dict.fromkeys(_name([(s, m, k) for s, m, k in moves if k == key])
+                                            for key in counter))
             out.append(
                 Finding(
                     code="move_kinds_few",
                     level="info",
-                    message=f"{len(moves)} 个镜头只用到 {len(counter)} 种运镜（{'、'.join(counter)}）。",
+                    message=f"{len(moves)} 个镜头只用到 {len(counter)} 种运镜（{kinds}）。",
                     suggestion="运镜种类多一点，剪辑时才有东西可用。",
                 )
             )
@@ -400,6 +504,7 @@ def _rule_single_scene(shots: list[Shot]) -> list[Finding]:
 _RULES = (
     _rule_missing_fields,
     _rule_size_distribution,
+    _rule_unknown_move,
     _rule_move_repeat,
     _rule_duplicate_scene_text,
     _rule_ai_slop,
@@ -423,9 +528,17 @@ def lint_shots(shots: list[Shot]) -> list[Finding]:
 
 
 def summarize(shots: list[Shot]) -> dict[str, Any]:
-    """给界面用的一行概览。键名用 camelCase，与其它接口返回保持一致。"""
+    """给界面用的一行概览。键名用 camelCase，与其它接口返回保持一致。
+
+    运镜这一栏按**词表的规范名**归类：「缓推」与「推近」是同一种运镜，
+    按原文分组会把它算成两种，于是「怎么一直在推」在概览里看不出来——
+    而概览正是用户第一眼看的那一行。认不出来的写法原样显示，那正是要给人看见的
+    （下面那条提醒会点名它）。
+    """
     sizes = Counter(normalize_size(s.size) for s in shots if normalize_size(s.size))
-    moves = Counter((s.move or "").strip() for s in shots if (s.move or "").strip())
+    moves = Counter(
+        _move_label((s.move or "").strip()) for s in shots if (s.move or "").strip()
+    )
     return {
         "shots": len(shots),
         "sizes": dict(sizes.most_common()),

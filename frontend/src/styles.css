@@ -645,6 +645,42 @@ input, textarea, select { font-family: inherit; }
 }
 .lint-dialog-foot { display: flex; justify-content: flex-end; margin-top: auto; padding-top: 4px; }
 
+/* 运镜词表参考（体检报「不在词表里」时的配套）：默认收起，被点名的人才展开 */
+.lint-vocab {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); overflow: hidden;
+  /* `flex: 0 0 auto` 不能省（浏览器走查抓到的）：
+     `.lint-dialog-body` 是 flex 列，而这个盒子写了 `overflow: hidden`——
+     两者一撞，`min-height: auto` 就不再生效，于是一份**内容长到需要滚动**的报告里
+     它会被压成 1px 高：标题看着还在（溢出没裁干净），却点不动（命中区已经被压没了）。
+     也就是说，越是有问题要改的用户越点不开词表。 */
+  flex: 0 0 auto;
+}
+.lint-vocab-head {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 8px 10px; border: 0; background: transparent; cursor: pointer;
+  font-size: 12.5px; font-weight: 600; color: var(--text); text-align: left;
+}
+.lint-vocab-head:hover { background: var(--surface-3); }
+.lint-vocab-head svg { flex-shrink: 0; color: var(--text-3); }
+.lint-vocab-tag { margin-left: auto; font-size: 11.5px; font-weight: 400; color: var(--text-3); }
+.lint-vocab-fail {
+  padding: 0 10px 10px; font-size: 11.5px; line-height: 1.7; color: var(--text-3);
+}
+.lint-vocab-body {
+  padding: 0 10px 10px; display: flex; flex-direction: column; gap: 4px;
+}
+.lint-vocab-row { display: flex; gap: 8px; align-items: baseline; }
+.lint-vocab-group {
+  flex-shrink: 0; width: 44px; font-size: 11.5px; color: var(--text-3); text-align: right;
+}
+.lint-vocab-words { font-size: 11.5px; line-height: 1.9; color: var(--text-2); }
+/* 每个词都可悬停看用途（title）——光标给一点暗示，不然没人会去悬停 */
+.lint-vocab-word { cursor: help; border-bottom: 1px dotted var(--border-strong); }
+/* 「不是运镜」那一行是**排除项**，和上面的可选词要一眼分开 */
+.lint-vocab-row-note .lint-vocab-words { color: var(--text-3); }
+.lint-vocab-hint { color: var(--text-3); }
+
 /* ============ 静图样片（分镜图节点里的零成本出片） ============ */
 
 /* 与上面的产物网格分开：它是「再做一件事」，不是产物的一部分 */

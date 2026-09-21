@@ -144,6 +144,27 @@ async def list_provider_kinds() -> list[dict[str, str]]:
     return adapters.list_kinds()
 
 
+@router.get("/camera-moves")
+async def list_camera_moves() -> dict:
+    """运镜词表：分镜表「运镜」那一栏的合法写法。
+
+    为什么前端需要它：分镜表虽然是模型写的，但**用户会手改**；而体检报
+    「不在词表里」时，用户得先能看到词表才知道该改成什么。这条以前不存在的原因很直接——
+    词表本身不存在，`animatic` 与体检各藏了一份对得上的词，界面无从展示。
+
+    与其它 meta 接口同一个口径：清单只在后端一处（`services/camera_moves.py`），
+    前端不写死。纯静态数据，不查库。
+    """
+    from app.services import camera_moves
+
+    return {
+        "groups": [{"key": k, "label": v} for k, v in camera_moves.GROUPS],
+        # 不下发 aliases：那是解析用的，摆到界面上只会让前端的判断跟着词表一起漂
+        "moves": camera_moves.as_dicts(),
+        "notMoves": list(camera_moves.NOT_MOVES),
+    }
+
+
 @router.get("/director-styles")
 async def list_director_styles(db: AsyncSession = Depends(get_db)) -> list[dict]:
     """导演风格卡（画布上每个节点的「风格」下拉用）。

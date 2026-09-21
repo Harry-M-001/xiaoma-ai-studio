@@ -30,6 +30,8 @@ import "@xyflow/react/dist/style.css";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   FileText,
   Film,
   ImageIcon,
@@ -64,6 +66,7 @@ import type {
   CanvasNodeStatus,
   CanvasNodeVersions,
   CanvasPreview,
+  CameraMoveTable,
   ComfyWorkflow,
   ModelOption,
   ShareExportResult,
@@ -1072,6 +1075,78 @@ function kindSummary(kinds: Record<string, number>): string {
 }
 
 /**
+ * 运镜词表参考（体检弹窗里那条「不在运镜词表里」的配套）。
+ *
+ * 为什么非要有它：体检只会说「这个说法不在词表里，最接近的是 X」。用户要改，得先知道
+ * **词表里到底有什么**——尤其「主观镜头」那类被点名的写法，光看一条建议是猜不出全貌的。
+ * 词表由后端下发（`services/camera_moves.py` 一处为真），前端不抄一份。
+ *
+ * 默认收起：找上门来的人（被点名的人）才展开，没被点名的人不必看一张 35 行的表。
+ */
+function CameraMoveReference() {
+  const [table, setTable] = useState<CameraMoveTable | null>(null);
+  const [open, setOpen] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!open || table || failed) return;
+    void api.listCameraMoves().then(setTable).catch(() => setFailed(true));
+  }, [open, table, failed]);
+
+  return (
+    <div className="lint-vocab">
+      <button type="button" className="lint-vocab-head" onClick={() => setOpen((v) => !v)}>
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        运镜词表
+        <span className="lint-vocab-tag">
+          分镜表「运镜」那一栏的合法写法{table ? `（${table.moves.length} 种）` : ""}
+        </span>
+      </button>
+
+      {open && failed && (
+        <div className="lint-vocab-fail">
+          词表没取到——刷新页面再试一次。体检本身的结果不受影响。
+        </div>
+      )}
+
+      {open && table && (
+        <div className="lint-vocab-body">
+          {table.groups.map((g) => {
+            const items = table.moves.filter((m) => m.group === g.key);
+            if (items.length === 0) return null;
+            return (
+              <div key={g.key} className="lint-vocab-row">
+                <span className="lint-vocab-group">{g.label}</span>
+                <span className="lint-vocab-words">
+                  {items.map((m, i) => (
+                    // 悬停看这一条是干什么用的：知道有哪些词，还得知道什么时候用哪个
+                    <span key={m.key}>
+                      {i > 0 ? "、" : ""}
+                      <span className="lint-vocab-word" title={m.hint}>
+                        {m.label}
+                      </span>
+                    </span>
+                  ))}
+                </span>
+              </div>
+            );
+          })}
+          <div className="lint-vocab-row lint-vocab-row-note">
+            <span className="lint-vocab-group">不是运镜</span>
+            <span className="lint-vocab-words">
+              {table.notMoves.join("、")}
+              <span className="lint-vocab-hint">
+                ——这些是机位 / 镜头类型，写在画面描述里；运镜那一栏另选一个运动方式。
+              </span>
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * 分镜静态体检的结果弹窗。
  *
  * 与「运行整图」那个确认弹窗的分工：那个回答**要花多少钱**，这个回答**拍出来会不会难看**。
@@ -1080,6 +1155,10 @@ function kindSummary(kinds: Record<string, number>): string {
  */
 function LintDialog({ report, onClose }: { report: CanvasLint; onClose: () => void }) {
   const warns = report.warnings.filter((w) => w.level === "warn").length;
+  // 有运镜相关的问题才显示词表参考：它正是给「被点名的人」看的
+  const moveTrouble = report.warnings.some(
+    (w) => w.code.startsWith("move") || w.code === "missing_move",
+  );
   // 注意：不能把「有提醒 / 没查出问题」两种情况都塞进 PreflightNotice 的 headline——
   // 它在 warnings 为空时直接返回 null，那句「没查出问题」会永远显示不出来。
   const head =
@@ -1109,6 +1188,9 @@ function LintDialog({ report, onClose }: { report: CanvasLint; onClose: () => vo
         </div>
 
         <PreflightNotice warnings={report.warnings} headline={head} />
+
+        {/* 报「不在运镜词表里」时，把词表摆出来——不然用户只知道错了，不知道改成什么 */}
+        {moveTrouble && <CameraMoveReference />}
 
         {report.warnings.length === 0 && report.nodes.length > 0 && (
           <div className="lint-dialog-ok">

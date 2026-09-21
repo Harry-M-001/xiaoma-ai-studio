@@ -276,6 +276,8 @@ def test_every_rule_is_exercised_by_this_file():
         "move_run",
         "move_dominant",
         "move_kinds_few",
+        "move_unknown",
+        "move_not_a_move",
         "scene_duplicate_adjacent",
         "ai_slop",
         "first_frame_too_short",
@@ -321,6 +323,14 @@ def test_every_rule_is_exercised_by_this_file():
         # 运镜：只用到两种、各占一半 → 种类偏少
         lint.lint_shots(
             [S(str(i), "中景", "固定" if i % 2 else "摇镜", "3s", f"画面{i}") for i in range(1, 9)]
+        ),
+        # 运镜：这一栏写的是镜头类型 / 机位（「主观镜头」不是运动方式）
+        lint.lint_shots(
+            [S(str(i), "中景", "主观镜头", "3s", f"画面{i}") for i in range(1, 7)]
+        ),
+        # 运镜：自造说法，词表里没有
+        lint.lint_shots(
+            [S(str(i), "中景", "镜头缓缓飘过", "3s", f"画面{i}") for i in range(1, 7)]
         ),
         # 画面复制粘贴（开头 ≥12 字相同）
         lint.lint_shots(

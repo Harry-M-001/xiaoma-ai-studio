@@ -121,6 +121,61 @@ def test_api_and_types_agree_with_backend():
     assert "CanvasLint" in types and "CanvasLintNode" in types and "CanvasLintFinding" in types
 
 
+def test_move_trouble_offers_the_vocabulary():
+    """报「不在运镜词表里」时把词表摆出来——用户得先看到合法写法才知道该改成什么。
+
+    这是 #37 落到界面上的那一半：提示词让模型写规范词、体检把不规范的挑出来，
+    但**用户手改分镜表**时仍然需要一份词表。词表从后端一处拿，前端不抄。
+    """
+    src = _text(CANVAS)
+    assert "function CameraMoveReference()" in src, "没有词表参考组件"
+    assert "{moveTrouble && <CameraMoveReference />}" in src, "词表参考没挂进弹窗"
+    assert 'w.code.startsWith("move") || w.code === "missing_move"' in src, (
+        "没有限定「只有运镜相关问题才显示词表」——没问题的人也看一张 35 行的表是噪音"
+    )
+
+    start = src.index("function CameraMoveReference()")
+    body = src[start : src.index("\n}\n", start)]
+    assert "api.listCameraMoves()" in body, "词表没从接口拿（前端抄一份必然与后端漂移）"
+    assert "const [open, setOpen] = useState(false)" in body, "词表默认该是收起的"
+    assert "if (!open || table || failed) return;" in body, (
+        "收起时不该发请求；取过一次或已经失败过也不该反复重试"
+    )
+    assert "词表没取到" in body, "取不到时要有话（不然是一个点不动的空白）"
+    assert "table.notMoves" in body, "「不是运镜」那些词也要列出来给用户对得上"
+    assert "体检本身的结果不受影响" in body, (
+        "取词表失败要说明体检结果不受影响，否则用户会以为整份报告作废了"
+    )
+    assert "title={m.hint}" in body, "每个词要能悬停看用途——只给词名还是不知道什么时候用哪个"
+
+    styles = _text(STYLES)
+    assert ".lint-vocab" in styles, "词表参考的样式没写"
+    for cls in ("lint-vocab-head", "lint-vocab-body", "lint-vocab-word", "lint-vocab-row-note"):
+        assert f".{cls}" in styles, f"缺样式 .{cls}"
+
+    # 这条是浏览器走查抓到的真 bug：`.lint-dialog-body` 是 flex 列，而这个词表盒子写了
+    # `overflow: hidden`，两者一撞 `min-height: auto` 失效 → 内容长到需要滚动时它被压成
+    # 1px：标题看着还在，命中区已经没了，**越是有问题要改的人越点不开词表**。
+    start = styles.index(".lint-vocab {")
+    block = styles[start : styles.index("}", start)]
+    assert "flex: 0 0 auto" in block, (
+        "缺 flex: 0 0 auto：它会在体检弹窗里被压扁成点不动的 1px"
+    )
+
+
+def test_camera_move_vocabulary_api_matches_the_backend():
+    """接口路径与字段名要和后端对上（后端返回 camelCase）。"""
+    assert '"/api/meta/camera-moves"' in _text(API), "api 里的路径不是 /api/meta/camera-moves"
+    assert "listCameraMoves:" in _text(API), "api 里没有 listCameraMoves"
+
+    types = _text(TYPES)
+    for field in ("CameraMove", "CameraMoveTable", "notMoves", "groupLabel", "hint", "animatic"):
+        assert field in types, f"前端类型里没有 {field}"
+    assert "aliases" not in types.split("interface CameraMoveTable")[1][:400], (
+        "别名是解析用的，不该出现在下发给前端的类型里"
+    )
+
+
 if __name__ == "__main__":
     import sys
 

@@ -727,6 +727,37 @@ export interface CanvasLint {
 }
 
 /**
+ * 运镜词表里的一条。
+ *
+ * `hint` 是这一条运镜**是干什么用的**（「固定：对话戏与情绪停顿的底子」）——用户看到
+ * 「不在词表里」时最缺的就是这个：知道有哪些词，还得知道什么时候用哪个。
+ */
+export interface CameraMove {
+  key: string;
+  label: string;
+  en: string;
+  group: string;
+  groupLabel: string;
+  hint: string;
+  /** 静图样片用哪一种缓动近似表现它 */
+  animatic: string;
+  /** 样片做不出这一条的效果时，这里写清近似成了什么（可能为空串） */
+  note: string;
+}
+
+/**
+ * 运镜词表（`GET /api/meta/camera-moves`）。
+ *
+ * `notMoves` 是**看着像运镜其实不是**的写法（「主观镜头」「过肩」之类）：那些是机位 /
+ * 镜头类型，该写在画面描述里。体检会把它们单独点名，这里列出来是为了让用户对得上。
+ */
+export interface CameraMoveTable {
+  groups: { key: string; label: string }[];
+  moves: CameraMove[];
+  notMoves: string[];
+}
+
+/**
  * 静图缓动样片的出片报告。
  *
  * `skipped` / `truncated` 必须显示出来：一条样片少了哪几镜、为什么少，
