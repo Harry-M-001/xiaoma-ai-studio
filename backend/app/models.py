@@ -63,7 +63,7 @@ class Task(Base):
     __tablename__ = "tasks"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # image|video|text|workflow
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # image|video|text|workflow|upscale
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     service_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     model: Mapped[str] = mapped_column(String(200), nullable=False, default="")

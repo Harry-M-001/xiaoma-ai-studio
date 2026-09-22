@@ -39,6 +39,7 @@ from app.routers import (
     subtitles,
     system,
     update,
+    upscale,
 )
 from app.services import (
     config_center_service,
@@ -111,6 +112,7 @@ app.include_router(audio.router)
 app.include_router(director.router)
 app.include_router(subtitles.router)
 app.include_router(engines.router)
+app.include_router(upscale.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(share.router)

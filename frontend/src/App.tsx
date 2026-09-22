@@ -250,7 +250,7 @@ function Shell() {
       case "speech":
         return <SpeechPage onGoSettings={() => setRoute("providers")} />;
       case "assets":
-        return <AssetsPage />;
+        return <AssetsPage onNavigate={setRoute} />;
       case "prompts":
         return <PromptsPage onNavigate={setRoute} />;
       case "tasks":

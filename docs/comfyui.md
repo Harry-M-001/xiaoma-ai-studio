@@ -292,7 +292,58 @@ ComfyUI 没有「参数映射」这一官方抽象，只有「改 JSON 字段」
 
 ---
 
-## 11. 未验证与待确认
+## 11. 放大（超分）模板：`comfyui-upscale-workflow.json`
+
+「放大」那个功能页面里，除了本机那两档 ncnn-vulkan，还有一条「走我的 ComfyUI」。
+按路线图的口径，**放大这件事能推给 ComfyUI 的就推**——放大节点在上游社区已经很成熟，
+我们**只下发模板**，不复刻那套节点。
+
+模板在同目录的 `comfyui-upscale-workflow.json`，链路是四步：
+
+```text
+LoadImage → UpscaleModelLoader → ImageUpscaleWithModel → SaveImage
+```
+
+用它之前**必须先装放大模型**（这一步只能你做，我们不分发权重）。
+下面这个文件名是**核对过的**——去上游 `xinntao/Real-ESRGAN` 的 `v0.2.5.0` 那个 release 下：
+
+| 要放大什么 | 下哪个文件 | 体积 |
+| --- | --- | --- |
+| 通用（真实照片、AI 生成图） | `realesr-general-x4v3.pth` | 4.9 MB |
+| 动漫 / 插画 | `realesr-animevideov3.pth` | 2.5 MB |
+
+下载页：<https://github.com/xinntao/Real-ESRGAN/releases/tag/v0.2.5.0>（就是本项目下载
+ncnn-vulkan 那两档的同一个 release）。
+
+**注意别去找 `RealESRGAN_x4plus.pth`**：那个文件**不在这个 release 里**（本次逐项核对过
+它的资产清单：只有 `realesr-animevideov3.pth`、`realesr-general-x4v3.pth`、
+`realesr-general-wdn-x4v3.pth` 三份权重 + 三个平台的 ncnn 包）。网上很多教程给的
+`x4plus` 属于更早的版本或网盘链接，跟着那些找会扑空。
+
+下载之后：
+
+1. 放进 `ComfyUI/models/upscale_models/`；
+2. 模板里的 `model_name` 写的是 `realesr-general-x4v3.pth`。**如果与你实际的文件名
+   不一样，改成你的**（写错它会报「模型不存在」，而且报错在 ComfyUI 那一侧）。
+
+导入方式与别的工作流一样：**画布 → 上传工作流**，选这个 json。
+传进来之后，「放大」弹窗里那条「走我的 ComfyUI」就会列出它，选中即可。
+
+三条口径：
+
+- **`LoadImage` 由应用自动填**：调用时源图作为参考图上传给 ComfyUI，
+  参数映射表里不需要你手填文件名；
+- **放大几倍由工作流决定**：界面不提供倍数选择，只显示「由工作流决定」。
+  想换倍数就换模型（`x4plus` 是 4 倍；要 2 倍就在工作流里接一个 `ImageScale`）；
+- **产物自动进资产库**：走的是既有的工作流链路，与画布上跑一个工作流没有区别，
+  所以任务中心里能看到进度、失败原因也能看到。
+
+**这一条只做图片**：视频要逐帧下发到 ComfyUI，那是另一件事，本机那两档已经能做，
+所以视频上这条路线会明确写「这一版没做」，而不是灰着不说原因。
+
+---
+
+## 12. 未验证与待确认
 
 以下内容本次未能取证或未做实测，属于已知的空白，不应作为实现依据：
 

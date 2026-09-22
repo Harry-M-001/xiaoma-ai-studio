@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { AudioLines, Download, FileText, Images, Library, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
+import { AudioLines, Download, FileText, Images, Library, Maximize2, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
 import { api } from "../api";
 import type { Asset } from "../types";
 import { Empty, formatSize, formatTime, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 import Lightbox from "../components/Lightbox";
+import { UpscaleDialog } from "../components/UpscaleDialog";
 import { downloadUrl } from "../components/TaskCard";
 
 const FILTERS = [
@@ -16,7 +17,12 @@ const FILTERS = [
 ];
 const PAGE = 60;
 
-export default function AssetsPage() {
+export default function AssetsPage({
+  onNavigate,
+}: {
+  /** 弹窗里「去本机引擎页下载」那个跳转要用它；不传就不显示那个按钮 */
+  onNavigate?: (route: string) => void;
+}) {
   const toast = useToast();
   const [filter, setFilter] = useState("");
   const [items, setItems] = useState<Asset[]>([]);
@@ -24,6 +30,8 @@ export default function AssetsPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [preview, setPreview] = useState<{ url: string; kind: string; dl?: string } | null>(null);
+  // 正在放大的那个素材（弹窗里挑路线/模型/倍数）
+  const [upscaling, setUpscaling] = useState<Asset | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const load = async (kind: string, append = false) => {
@@ -161,6 +169,17 @@ export default function AssetsPage() {
                   </div>
                 </div>
                 <div className="asset-actions">
+                  {/* 只有图片与视频能放大（音频 / 文稿没有「像素」这个概念） */}
+                  {(a.kind === "image" || a.kind === "video") && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      title="放大（超分）：把这张图 / 这段片子放大成新资产，原件不动"
+                      onClick={() => setUpscaling(a)}
+                    >
+                      <Maximize2 size={13} />
+                      放大
+                    </button>
+                  )}
                   <a className="btn btn-ghost btn-sm" href={downloadUrl(a.id)} title="下载">
                     <Download size={13} />
                     下载
@@ -185,6 +204,23 @@ export default function AssetsPage() {
 
       {preview && (
         <Lightbox url={preview.url} kind={preview.kind} downloadUrl={preview.dl} onClose={() => setPreview(null)} />
+      )}
+
+      {upscaling && (
+        <UpscaleDialog
+          asset={upscaling}
+          onClose={() => setUpscaling(null)}
+          onGoEngines={onNavigate ? () => onNavigate("engines") : undefined}
+          onDone={(made) => {
+            // 图片是同步出的：产物直接插到列表最前面（列表按新→旧排），不用整页重拉。
+            // 视频是后台任务，这里还拿不到东西（made 为 null），跑完在资产库里自己会出现。
+            if (made) {
+              setItems((prev) => [made, ...prev]);
+              setTotal((t) => t + 1);
+            }
+            setUpscaling(null);
+          }}
+        />
       )}
     </div>
   );

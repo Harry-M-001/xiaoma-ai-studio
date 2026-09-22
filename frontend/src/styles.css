@@ -1348,13 +1348,17 @@ input, textarea, select { font-family: inherit; }
 
 .director-clips-empty { font-size: 12.5px; line-height: 1.7; padding: 6px 0; }
 .director-clip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-.director-clip { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px 10px; }
+/* 这一行现在有 6 个操作按钮（上移 / 下移 / 去字幕 / 放大 / AI 改造 / 移除）：光按钮就 190px，
+   而窄窗口下（1280 及以下）右侧这一列只有 250–330px。所以**允许换行**——挤不下时让操作行
+   整块掉到第二行（右对齐），而不是把片段名压成一个字、或把按钮挤出这张卡片的底色之外。
+   名字也给一个下限：低于它就说明该换行了，不该继续缩。 */
+.director-clip { display: flex; align-items: center; gap: 10px; row-gap: 6px; flex-wrap: wrap; background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px 10px; }
 .director-clip-no { font-size: 11.5px; font-weight: 700; color: var(--primary); width: 16px; text-align: center; flex-shrink: 0; }
 .director-clip video { width: 72px; height: 44px; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; }
-.director-clip-info { flex: 1; min-width: 0; }
+.director-clip-info { flex: 1; min-width: 120px; }
 .director-clip-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .director-clip-info .muted { font-size: 11px; }
-.director-clip-ops { display: flex; gap: 2px; flex-shrink: 0; }
+.director-clip-ops { display: flex; gap: 2px; flex-shrink: 0; margin-left: auto; }
 
 /* 转场与转场音效：三个控件一行，下面一行「成片会变短」的对账 */
 .director-transition { display: flex; flex-direction: column; gap: 10px; }
@@ -1484,6 +1488,24 @@ input, textarea, select { font-family: inherit; }
 }
 .subrm-foot .muted { font-size: 11.5px; margin-right: auto; }
 
+/* ============ 超分（放大，v1.1.31） ============ */
+
+/* 弹窗骨架、路线/模型/显卡三排选择卡、底栏都复用去字幕那套 `subrm-*`：
+   形状需求完全一样，另起一套只会让两边日后各自漂移。下面只补三处没有现成等价物的——
+   素材信息行（名字 + 原尺寸，长文件名要能截断）、路线上的跳转提示、推荐小标的位置。 */
+.upscale-src { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.upscale-src-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.upscale-route-action {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 11.5px; line-height: 1.6; color: var(--text-2);
+}
+/* 推荐小标跟在设备名后面同一行，所以要自己留一点间距 */
+.upscale-mark { margin-left: 6px; }
+.upscale-notes { display: flex; flex-direction: column; gap: 6px; }
+
 .task-error { background: var(--danger-soft); color: var(--danger); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 10px; word-break: break-word; }
 .gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
 .gen-item { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); aspect-ratio: 1; cursor: pointer; }
@@ -1520,7 +1542,9 @@ input, textarea, select { font-family: inherit; }
 .asset-meta { padding: 9px 11px; }
 .asset-name { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .asset-time { font-size: 11px; color: var(--text-3); margin-top: 2px; }
-.asset-actions { display: flex; gap: 2px; padding: 0 6px 8px; }
+/* 操作行现在有三个按钮（放大 / 下载 / 删除），卡片最窄时一行放不下——
+   不许换行就会被 overflow: hidden 的卡片裁掉一个按钮，那等于少了一个功能 */
+.asset-actions { display: flex; gap: 2px; padding: 0 6px 8px; flex-wrap: wrap; }
 .asset-actions button { flex: 0 0 auto; }
 
 /* ============ 文档产物（自动链 Markdown 文稿） ============ */

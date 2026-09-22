@@ -1,0 +1,22 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "要放大的图（由本应用自动填入）" },
+    "inputs": { "image": "example.png", "upload": "image" }
+  },
+  "2": {
+    "class_type": "UpscaleModelLoader",
+    "_meta": { "title": "放大模型（要你在 ComfyUI 里装好）" },
+    "inputs": { "model_name": "realesr-general-x4v3.pth" }
+  },
+  "3": {
+    "class_type": "ImageUpscaleWithModel",
+    "_meta": { "title": "放大" },
+    "inputs": { "upscale_model": ["2", 0], "image": ["1", 0] }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "_meta": { "title": "保存（产物自动进资产库）" },
+    "inputs": { "filename_prefix": "xiaoma_upscaled", "images": ["3", 0] }
+  }
+}

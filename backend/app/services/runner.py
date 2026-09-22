@@ -77,6 +77,12 @@ def _queue_full_message() -> str:
 # 巡检为同一任务重连过的次数只在内存里记，条数上限只为防长跑泄漏
 _REATTACH_MEMORY = 500
 
+# 超分（本机放大）同一时间只允许一条。**不占生成并发名额**：它不调上游、不花钱，
+# 占名额会把别的任务堵住；但它吃本机 GPU，两条一起跑只会互相拖慢、把显存顶满，
+# 而且会同时往磁盘里写两套帧。所以给它自己一把锁，而不是用生成那套闸机。
+_UPSCALE_LOCK = asyncio.Lock()
+_upscale_current: dict[str, int] = {"task_id": 0}
+
 
 class _ConcurrencyGate:
     """按配置动态限流：每次进入时读取最新配置，设置里改完立即生效。"""
@@ -167,6 +173,13 @@ class TaskRunner:
     def start_text(self, task_id: int) -> bool:
         return self._spawn(task_id, lambda: self._run_text(task_id))
 
+    def start_upscale(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_upscale(task_id))
+
+    def upscale_busy(self) -> int:
+        """正在跑的那条超分任务 id（0 = 没有）。给接口层做「同一时间只允许一条」用。"""
+        return int(_upscale_current.get("task_id") or 0)
+
     def start(self, kind: str, task_id: int) -> bool:
         """按任务类型投递。两个 dispatch 助手共用这一份分支，免得两处各写一遍再慢慢漂移。"""
         if kind == "video":
@@ -175,6 +188,8 @@ class TaskRunner:
             return self.start_comfy(task_id)
         if kind == "text":
             return self.start_text(task_id)
+        if kind == "upscale":
+            return self.start_upscale(task_id)
         return self.start_image(task_id)
 
     async def start_or_fail(self, kind: str, task_id: int) -> bool:
@@ -941,6 +956,109 @@ class TaskRunner:
                     task.error = "服务已重启，该任务未完成，请重新发起"
                     task.completed_at = utcnow()
             await db.commit()
+
+    # ---------- 超分（本机放大） ----------
+
+    async def _run_upscale(self, task_id: int) -> None:
+        """本机放大一段视频。
+
+        图片那一路是**同步**做的（`routers/upscale.upscale_image`），不走这里：
+        一件事三秒就完，为它在任务中心留一条记录只会把任务列表弄脏。
+
+        自己一把锁、不进生成闸机：理由见 `_UPSCALE_LOCK` 上面那段。
+        """
+        async with _UPSCALE_LOCK:
+            _upscale_current["task_id"] = task_id
+            try:
+                await self._do_upscale(task_id)
+            finally:
+                _upscale_current["task_id"] = 0
+
+    async def _do_upscale(self, task_id: int) -> None:
+        from app.services import upscale as up
+        from app.services import upscale_run as urun
+
+        try:
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is None or task.status in ("cancelled", "failed"):
+                    return
+                params = json.loads(task.params_json or "{}")
+                asset = await db.get(Asset, int(params.get("asset_id") or 0))
+                if asset is None:
+                    raise RuntimeError("要放大的资产不存在了")
+                src = storage.abs_path(asset.filename)
+                if not src.exists():
+                    raise RuntimeError("要放大的文件不在磁盘上了")
+                task.status = "processing"
+                task.progress = 2
+                await db.commit()
+                name = asset.prompt or asset.original_name or f"资产 {asset.id}"
+
+            engine_key = up.engine_of(str(params.get("route") or ""))
+            if not engine_key:
+                raise RuntimeError("这条超分任务的路线认不出来，请重新发起")
+            model = str(params.get("model") or "")
+            scale = int(params.get("scale") or 2)
+            gpu = int(params.get("gpu", -1))
+
+            async def _beat(pct: int) -> bool:
+                """写进度 + 看用户还要不要，**合成一次数据库往返**。
+
+                进度不只是给用户看的：`updated_at` 跟着动，运行巡检才不会把一条
+                跑了二十分钟的任务误判成「已经没人在推进」。返回 False 表示取消。
+                """
+                async with SessionLocal() as db:
+                    row = await db.get(Task, task_id)
+                    if row is None or row.status != "processing":
+                        return False
+                    row.progress = int(pct)
+                    await db.commit()
+                    return True
+
+            made, width, height, frames, seconds = await urun.run_video(
+                engine_key, src=src, model=model, scale=scale, gpu=gpu,
+                on_progress=_beat,
+            )
+
+            rel = urun.saved_rel(made)
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is None:
+                    return
+                if task.status == "cancelled":
+                    # 刚落盘就被取消：产物不登记（登记了就成了「取消了还多一个文件」）
+                    storage.delete(rel)
+                    return
+                base = name.rsplit(".", 1)[0]
+                db.add(
+                    Asset(
+                        kind="video",
+                        filename=rel,
+                        original_name=f"{base}_放大{scale}倍.mp4",
+                        content_type="video/mp4",
+                        size=made.stat().st_size,
+                        source="clip",
+                        task_id=task_id,
+                        width=width,
+                        height=height,
+                        duration=seconds,
+                    )
+                )
+                task.status = "completed"
+                task.progress = 100
+                task.completed_at = utcnow()
+                task.error = None
+                await db.commit()
+                logger.info("超分完成：任务 %s（%s 帧 / %s 秒）", task_id, frames, seconds)
+        except asyncio.CancelledError:
+            # 用户中途取消（`_beat` 返回 False 走进来的）：状态已经由取消接口写成
+            # cancelled，**不要覆盖**，也不要让任务中心多出一条「失败」
+            logger.info("超分任务 %s 被用户取消", task_id)
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("upscale task %s failed", task_id)
+            await self._mark_failed(task_id, e)
 
     async def _mark_failed(self, task_id: int, exc: Exception) -> None:
         try:

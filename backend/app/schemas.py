@@ -273,6 +273,30 @@ class RemovalApplyIn(BaseModel):
     method: str = ""
 
 
+class UpscaleIn(BaseModel):
+    """放大一张图或一段视频。
+
+    `route` 是路线 key：`local:realesrgan` / `local:waifu2x` / `comfyui`
+    （可选项与各自能用的模型、倍数由 `GET /api/upscale/options` 给，界面不写死）。
+
+    `gpu` 是 `-1`（交给引擎自己挑）或具体设备号。**这个字段存在的理由**：
+    实测同一张图换块卡差好几倍（waifu2x 集显比独显慢 22 倍），
+    而「自动挑哪一块」是上游的行为、不是我们的——所以要把选择权交出来。
+
+    `tta` 是引擎的 `-x` 开关（更慢但略好），界面上没有暴露，留着给以后；
+    `workflow_id` / `param_values` 只有 `route=comfyui` 时用。
+    """
+
+    asset_id: int
+    route: str
+    model: str = ""
+    scale: int = Field(default=2, ge=1, le=4)
+    gpu: int = -1
+    tta: bool = False
+    workflow_id: int = 0
+    param_values: dict = {}
+
+
 class VideoGenerateIn(BaseModel):
     model_key: str
     prompt: str = Field(..., min_length=1)

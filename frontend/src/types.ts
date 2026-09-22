@@ -922,6 +922,121 @@ export interface RemovalPreview {
   methods: RemovalMethod[];
 }
 
+/* ---------------- 超分 / 放大（v1.1.31） ----------------
+ *
+ * 「能不能放大、有哪几条路、每条路有什么模型与倍数、用哪块显卡、上限是多少」全由后端
+ * 一次性算好（`GET /api/upscale/options`）——本机引擎装没装、卡能不能用只有后端知道。
+ * 前端只做两件事：显示，以及把宽高乘出目标尺寸（**不为这个再发请求**）。
+ */
+
+/** 待放大的素材。尺寸 / 帧数 / 时长都以这里的为准，前端不自己 probe */
+export interface UpscaleSource {
+  id: number;
+  name: string;
+  width: number;
+  height: number;
+  /** 视频才有，图片为 0 */
+  frames: number;
+  fps: number;
+  /** 秒（整数）；图片为 0 */
+  duration: number;
+  size: number;
+}
+
+export interface UpscaleModel {
+  key: string;
+  label: string;
+  /** 一句话说这一款适合什么（「真实照片、AI 生成图都行，最通用的一档」） */
+  note: string;
+  scales: number[];
+  /** 这一款支不支持视频 */
+  video: boolean;
+}
+
+/**
+ * 一条放大路线。
+ *
+ * `available=false` 的**照样要显示**：不能用就得把 `reason` 摆出来，
+ * 能跳的再按 `actionRoute` 给个入口。静默藏掉会让人以为这个软件不会放大
+ * ——与去字幕的 `RemovalMethod` 同一个口径。
+ */
+export interface UpscaleRoute {
+  key: string;
+  label: string;
+  engine: string;
+  engineLabel: string;
+  /** 短标签：这条是「本机跑」还是别的 */
+  kindLabel: string;
+  available: boolean;
+  /** available=false 时必有：一句用户能照做的话 */
+  reason: string;
+  action: string;
+  /** "engines" = 可跳本机引擎页；空串 = 没有可跳的 */
+  actionRoute: string;
+  /** 这条路线支不支持视频 */
+  videoOk: boolean;
+  models: UpscaleModel[];
+  defaultModel: string;
+  defaultScale: number;
+  note: string;
+  /**
+   * 走 ComfyUI 那条路线才有：这台机器上已经传上来的**出图**工作流。
+   *
+   * 我们不替用户造放大工作流（那需要他自己装 ESRGAN 模型），只把已有的列出来跑。
+   * 列表为空时 `available` 一定是 false，并给出「去传一份」的入口。
+   */
+  workflows: UpscaleWorkflow[];
+}
+
+/** ComfyUI 里已上传的工作流（放大那条路线用它） */
+export interface UpscaleWorkflow {
+  id: number;
+  name: string;
+  outputKind: string;
+  nodeCount: number;
+}
+
+export interface UpscaleDevice {
+  id: number;
+  name: string;
+  usable: boolean;
+  recommended: boolean;
+  note: string;
+}
+
+export interface UpscaleOptions {
+  kind: "image" | "video";
+  source: UpscaleSource;
+  routes: UpscaleRoute[];
+  devices: UpscaleDevice[];
+  /** 提不提供「自动」这一项；有就默认选中它 */
+  deviceAuto: boolean;
+  deviceNote: string;
+  limits: {
+    maxFrames: number;
+    maxOutputPixels: number;
+    maxScale: number;
+  };
+  /** 按「默认路线 + 默认模型 + 默认倍数」算出来的尺寸 */
+  preview: { width: number; height: number };
+  /** 0..n 条要在弹窗里逐条显示的提醒。**纯文本**，前端不渲染 markdown */
+  notes: string[];
+}
+
+/** 放大请求体（§2 图片与 §3 视频共用）。`gpu`：-1 = 自动，>=0 = 具体设备号 */
+export interface UpscaleRequest {
+  asset_id: number;
+  route: string;
+  model: string;
+  scale: number;
+  gpu: number;
+  /** 测试时增强：只对图片有意义（视频忽略） */
+  tta: boolean;
+  /** 只有 route=comfyui 时用 */
+  workflow_id?: number;
+  param_values?: Record<string, unknown>;
+}
+
 /**
  * 静图缓动样片的出片报告。
  *

@@ -62,6 +62,8 @@ import type {
   TaskRetryIn,
   UpdateRunResult,
   UpdateStatus,
+  UpscaleOptions,
+  UpscaleRequest,
 } from "./types";
 
 const TOKEN_KEY = "xm_token";
@@ -357,6 +359,30 @@ export const api = {
       method: "POST",
       body: json({ asset_id: args.assetId, box: args.box, method: args.method }),
     }),
+  // ---- 超分 / 放大（v1.1.31）----
+  /**
+   * 一次拿全：这个素材能不能放大、有哪几条路线、每条能用什么模型与倍数、
+   * 用哪块显卡、上限是多少。
+   *
+   * 不在前端拼这份清单：本机引擎装没装、显卡能不能用只有后端知道，
+   * 前端猜一次就是一次「界面说行、点下去报错」。
+   */
+  upscaleOptions: (assetId: number) =>
+    request<UpscaleOptions>(`/api/upscale/options?asset_id=${assetId}`),
+  /** 图片放大：**同步**（秒级），返回新建的资产（不动原图） */
+  upscaleImage: (body: UpscaleRequest) =>
+    request<Asset>("/api/upscale/image", { method: "POST", body: json(body) }),
+  /** 视频放大：**异步**（逐帧过一遍），返回任务；进度走既有的 getTask */
+  upscaleVideo: (body: UpscaleRequest) =>
+    request<Task>("/api/upscale/video", { method: "POST", body: json(body) }),
+  /**
+   * 图片放大走自己的 ComfyUI 工作流：**异步**，返回任务。
+   *
+   * 与 `upscaleImage` 分开是必须的：ComfyUI 出一张图要排队 + 加载模型，
+   * 快的时候也要十几秒，做成同步请求只会让前端一直挂着等。
+   */
+  upscaleComfy: (body: UpscaleRequest) =>
+    request<Task>("/api/upscale/comfy", { method: "POST", body: json(body) }),
   // ---- 项目 ----
   listProjects: () =>
     request<Project[]>("/api/projects").then((r) => (Array.isArray(r) ? r : [])),

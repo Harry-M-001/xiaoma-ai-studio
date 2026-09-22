@@ -74,6 +74,12 @@ COPY_TREES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # 进包的这一款是保证「烧中文字幕开箱就能用」，不然便携版里字体选择器是空的，
     # 而源码版却是好的——那种「同一功能两种安装方式表现不一样」的坑最难查。
     ("backend/assets", ()),
+    # 随包文档：`docs/comfyui.md` 与 `docs/comfyui-upscale-workflow.json` 是**功能的一部分**——
+    # 放大那条「走你的 ComfyUI」要用户拿这份模板去画布上导入，不进包的话便携版用户
+    # 就没法用这条路线（而源码版能用，又是「同一功能两种安装方式不一样」那类坑）。
+    # 全部加起来约 53 KB，与「大文件不进包」不相干。
+    # 排除调研笔记：那是给自己看的（另一个项目的架构调研），不是给用户的说明书。
+    ("docs", ("toonflow-research.md",)),
 )
 
 # 进包的单个文件
@@ -222,8 +228,17 @@ README_PORTABLE = r"""小马AI工坊 · Windows 便携版
     backend\data\logs\app.log     运行日志（出问题先看它）
 
 升级新版时：只替换程序目录（runtime\、backend\app\、backend\alembic\、
-backend\tools\、frontend\webroot\、start.bat 等），
+backend\tools\、frontend\webroot\、docs\、start.bat 等），
 **不要删除 backend\data\**，历史数据和密钥都会保留。
+
+随包的文档在 docs\ 里
+---------------------
+    docs\comfyui.md                         接 ComfyUI 的完整说明
+    docs\comfyui-upscale-workflow.json      「放大」那条走 ComfyUI 的模板（见下）
+
+想用「放大 → 走我的 ComfyUI」这条路，就拿上面那个 json 去应用的
+「画布 → 上传工作流」导入。**得先在 ComfyUI 里装一个放大模型**，
+装哪个、放哪里，docs\comfyui.md 里写清了（含文件名核对过的那一份说明）。
 
 端口 8787 被占用怎么办
 ----------------------

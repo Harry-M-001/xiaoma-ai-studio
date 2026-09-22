@@ -7,6 +7,7 @@ import {
   Eraser,
   Eye,
   Film,
+  Maximize2,
   Scissors,
   Sparkles,
   Upload,
@@ -27,7 +28,8 @@ import type {
 } from "../types";
 import { downloadUrl } from "../components/TaskCard";
 import { Dialog } from "../components/Dialog";
-import { Empty, Spinner } from "../components/common";
+import { UpscaleDialog } from "../components/UpscaleDialog";
+import { Empty, isDone, isRunning, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
 /**
@@ -492,6 +494,16 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   const [remaking, setRemaking] = useState<number | null>(null);
   // 正在去字幕的那一段（弹窗里框选 + 选手法 + 看真帧效果）
   const [removing, setRemoving] = useState<Asset | null>(null);
+  // 正在放大的那一段（弹窗里挑路线 / 模型 / 倍数 / 显卡）
+  const [upscaling, setUpscaling] = useState<Asset | null>(null);
+  /**
+   * 已派发、还没跑完的放大任务。
+   *
+   * 视频逐帧过一遍是后台跑的，产物要到跑完才出现；记下「哪个任务对应时间线上哪一段」，
+   * 等它落地再就地替换。不记的话，用户点完「放大」时间线上什么都没变，
+   * 只能自己去任务中心把产物捞回来手动补进时间线。
+   */
+  const [upscaleJobs, setUpscaleJobs] = useState<{ taskId: number; clipId: number }[]>([]);
 
   // ---- 转场与转场音效 ----
   // 预设表从后端拿：`services/transitions.py` 是唯一一份，前端不另抄一张——
@@ -584,6 +596,62 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
   }, [clipIds.join(","), transition, trSeconds, sfxPick]);
 
   const loadVideos = async () => setVideos(await api.listDirectorVideos());
+
+  /**
+   * 盯放大任务的进度，**跑完就地替换时间线上那一段**。
+   *
+   * 放大是后台任务（视频逐帧过一遍，几分钟起），产物要到跑完才出现。不盯的话，
+   * 用户点完「放大」时间线上什么都没变——他只能自己去任务中心把产物找回来、
+   * 手动再截/再排一次，而「跑完会自动换掉」这件事没有任何人告诉他。
+   * 轮询节奏与视频页保持一致（4 秒一次，只到有任务在飞的时候才转）。
+   */
+  const upscaleJobKey = upscaleJobs.map((j) => j.taskId).join(",");
+  useEffect(() => {
+    if (!upscaleJobKey) return;
+    let alive = true;
+    const timer = setInterval(async () => {
+      const checked = await Promise.all(
+        upscaleJobs.map(async (job) => ({
+          job,
+          // 查一次失败当作「还没结束」：一次网络抖动不该把这一段标成失败
+          task: await api.getTask(job.taskId).catch(() => null),
+        })),
+      );
+      if (!alive) return;
+      const settled = checked.flatMap((x) =>
+        x.task && !isRunning(x.task.status) ? [{ job: x.job, task: x.task }] : [],
+      );
+      if (settled.length === 0) return;
+      setUpscaleJobs((prev) => prev.filter((j) => !settled.some((s) => s.job.taskId === j.taskId)));
+
+      const done = settled.flatMap((s) =>
+        isDone(s.task.status) && s.task.assets[0]
+          ? [{ job: s.job, assetId: s.task.assets[0].id }]
+          : [],
+      );
+      if (done.length > 0) {
+        // 换上去的必须是**完整**的那条资产（时长、体积、宽高都要对），所以按 id 从视频
+        // 素材清单里捞回来，而不是拿任务里的 AssetBrief 拼一个「差不多」的对象塞进时间线
+        const fresh = await api.listDirectorVideos();
+        if (!alive) return;
+        setClips((prev) =>
+          prev.map((c) => {
+            const hit = done.find((d) => d.job.clipId === c.id);
+            const made = hit ? fresh.find((v) => v.id === hit.assetId) : undefined;
+            return made ?? c;
+          }),
+        );
+        void loadVideos();
+        toast.success("已用放大后的版本替换这一段（原片仍在资产库）");
+      }
+      if (settled.length > done.length) toast.error("有一段的放大没成，去任务中心能看到原因");
+    }, 4000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upscaleJobKey]);
 
   const pickVideo = async (a: Asset) => {
     setCurrent(a);
@@ -865,6 +933,13 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
                       </button>
                       <button
                         className="icon-btn"
+                        title="放大（超分）：把这一段放大成新资产，跑完自动换掉时间线上的这一段（原片不动）"
+                        onClick={() => setUpscaling(c)}
+                      >
+                        <Maximize2 size={14} />
+                      </button>
+                      <button
+                        className="icon-btn"
                         title="AI 改造：取这段的首帧，去视频页做图生视频"
                         disabled={remaking !== null}
                         onClick={() => aiRemake(c)}
@@ -1012,6 +1087,25 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
             setClips((prev) => prev.map((c) => (c.id === removing.id ? made : c)));
             setRemoving(null);
           }}
+        />
+      )}
+
+      {/* 放大：与去字幕同一个口径——产物是新资产、原片不动。
+          只是视频这条路是后台跑的，所以派发时先把任务记下来，等它跑完再就地替换这一段 */}
+      {upscaling && (
+        <UpscaleDialog
+          asset={upscaling}
+          onClose={() => setUpscaling(null)}
+          onQueued={(task) =>
+            setUpscaleJobs((prev) => [...prev, { taskId: task.id, clipId: upscaling.id }])
+          }
+          onDone={(made) => {
+            // 图片是同步出的，直接换掉这一段；视频这里拿不到东西（made 为 null），
+            // 由上面那个轮询等它跑完再换
+            if (made) setClips((prev) => prev.map((c) => (c.id === upscaling.id ? made : c)));
+            setUpscaling(null);
+          }}
+          onGoEngines={() => onNavigate("engines")}
         />
       )}
     </>
