@@ -52,6 +52,8 @@ async def _payload(db: AsyncSession, *, force_hw: bool = False) -> dict:
         "phaseLabels": ei.PHASE_LABELS,
         "installedCount": installed_count,
         "installedServices": await ei.installed_services(db),
+        # 本机配音那条线：引擎装好没有 / 接成模型服务没有 / 有哪些音色
+        "localTts": await ei.local_tts_status(db),
         "totalSizeText": le.human_size(le.total_size()),
     }
 
@@ -104,3 +106,27 @@ async def verify(key: str) -> dict:
         return await ei.verify(key)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ---- 本机配音：把装好的引擎接成一条模型服务 ----
+
+
+@router.get("/local-tts")
+async def local_tts(db: AsyncSession = Depends(get_db)) -> dict:
+    """本机配音这条线的状态（引擎装好没有、接入没有、有哪些音色）。"""
+    return await ei.local_tts_status(db)
+
+
+@router.post("/local-tts/connect")
+async def connect_local_tts(db: AsyncSession = Depends(get_db)) -> dict:
+    """一键接入：接完之后配音页、样片旁白、画布逐镜对白都能选「本机跑」。"""
+    try:
+        return await ei.connect_local_tts(db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/local-tts/disconnect")
+async def disconnect_local_tts(db: AsyncSession = Depends(get_db)) -> dict:
+    """停用（不删：已经生成过的配音资产还挂在它名下）。"""
+    return await ei.disconnect_local_tts(db)

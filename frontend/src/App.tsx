@@ -260,7 +260,7 @@ function Shell() {
       case "providers":
         return <ProvidersPage />;
       case "engines":
-        return <EnginesPage />;
+        return <EnginesPage onNavigate={setRoute} />;
       case "settings":
         return <SettingsPage onMetaChanged={loadMeta} />;
       default:

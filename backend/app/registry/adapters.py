@@ -14,6 +14,7 @@ from app.providers.ark import ArkAdapter
 from app.providers.base import AdapterError, BaseAdapter
 from app.providers.comfyui import ComfyUIAdapter
 from app.providers.dashscope import DashScopeAdapter
+from app.providers.local_tts import LocalTTSAdapter
 from app.providers.openai_compat import OpenAICompatAdapter
 
 AdapterFactory = Callable[[str, str], BaseAdapter]
@@ -78,4 +79,11 @@ register(
     lambda base_url, api_key: ComfyUIAdapter(base_url, api_key),
     "ComfyUI 本地服务",
     "本地 ComfyUI 地址（默认 http://127.0.0.1:8188），无需 API Key；画布中上传 workflow_api.json 工作流即可执行。",
+)
+register(
+    "local_tts",
+    lambda base_url, api_key: LocalTTSAdapter(base_url, api_key),
+    "本机配音（sherpa-onnx）",
+    "跑本机装好的 sherpa-onnx，不联网、不花钱。到「本机引擎」页下载引擎后一键接入；"
+    "音色用模型自带的那一套（可填音色名或音色号）。",
 )

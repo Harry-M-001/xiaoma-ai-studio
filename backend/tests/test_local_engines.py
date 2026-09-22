@@ -21,6 +21,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -578,6 +579,128 @@ def test_remove_deletes_both_the_install_and_the_archive():
                 assert not ei.archive_path(engine).exists()
                 assert not ei.installed(engine)
     finally:
+        server.shutdown()
+
+
+def test_an_empty_error_never_reaches_the_user():
+    """httpx 断线时抛的异常**可能是空消息**，而空错误比没有错误更糟。
+
+    这一条是这一版真踩到的：界面上「上次失败：」后面什么都没有，用户连搜都不知道搜什么。
+    要的不变量是「永远给出一句非空的话」——拿不出内容就报异常类型名。
+    """
+    for exc in (RuntimeError(""), RuntimeError("   "), OSError(13, ""), ValueError()):
+        text = ei._error_text(exc)
+        assert text.strip(), f"{exc!r} 给了一句空错误"
+    assert ei._error_text(RuntimeError("")) == "RuntimeError"
+    assert ei._error_text(ValueError()) == "ValueError"
+    # 有内容就原样用它（不额外加类型名，免得盖住真正的原因）
+    assert ei._error_text(RuntimeError("连接被重置")) == "连接被重置"
+    assert "13" in ei._error_text(OSError(13, ""))
+
+
+def test_network_failure_tells_the_user_three_ways_out():
+    """网络不通时要说清「还能怎么办」——这几百 MB 都在 GitHub 附件上，时通时断。"""
+    import httpx
+
+    text = ei._maybe_network_hint("ConnectTimeout", httpx.ConnectTimeout("x"))
+    for mark in ("①", "②", "③"):
+        assert mark in text, text
+    assert "接着下载" in text and "校验" in text and "代理" in text, text
+    # 非网络类的失败不该被塞进这些建议（否则真原因会被埋掉）
+    plain = ei._maybe_network_hint("校验和不一致", ValueError("校验和不一致"))
+    assert plain == "校验和不一致", plain
+
+
+def test_downloads_try_direct_and_the_system_proxy_in_turn():
+    """直连与走系统代理**轮流试**。
+
+    理由与 `update_service._probe` 里记的是同一件事：httpx 在 Windows 上读注册表里的
+    IE 代理，用户一开 VPN 请求就被静默导到共享出口；反过来国内直连 GitHub 附件也常不通。
+    这一版实测就是靠「再用系统代理试一次」把 Kokoro 那个 140MB 拉下来的。
+    """
+    calls: list[bool] = []
+    real = ei._download
+
+    async def fake_download(engine, job, *, use_env_proxy):  # noqa: ANN001
+        calls.append(use_env_proxy)
+        if len(calls) < 3:
+            raise __import__("httpx").ConnectTimeout("x")
+        return ei.archive_path(engine)
+
+    ei._download = fake_download  # type: ignore[assignment]
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = _engine(b"x", "https://example.invalid/f.zip")
+            with _sandbox(root, [engine]):
+                with contextlib.suppress(BaseException):
+                    asyncio.run(ei._download_with_retries(
+                        engine, {"key": "fake", "done": 0}))
+    finally:
+        ei._download = real  # type: ignore[assignment]
+    assert calls == [False, True, False], calls
+
+
+class _SlowHandler(BaseHTTPRequestHandler):
+    """慢速滴答的服务器：**有数据、但慢到来不及**（与实测里「代理只剩 1MB/分钟」同形）。
+
+    定义在模块级而不是函数里：函数里那种闭包写法在这条用例上踩过一次坑
+    （客户端的提前放弃与服务端的写失败搅在一起，报出来的是「peer closed connection」，
+    把真正要验的判据盖住了）。
+    """
+
+    chunk = 64 << 10
+    rounds = 20
+    delay = 0.25
+
+    def do_GET(self) -> None:  # noqa: N802
+        total = self.chunk * self.rounds
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        # 声明的长度就是真会发出去的长度
+        self.send_header("Content-Length", str(total))
+        self.end_headers()
+        for _ in range(self.rounds):
+            try:
+                self.wfile.write(b"x" * self.chunk)
+                self.wfile.flush()
+            except OSError:
+                return  # 客户端提前放弃正是这条用例期待的结果
+            time.sleep(self.delay)
+
+    def log_message(self, *_args) -> None:
+        return
+
+
+def test_a_slow_but_alive_route_is_abandoned():
+    """**「活着但在爬」也要换路。**
+
+    这一条是真跑出来的教训：同一个 140MB 的包，官方直连 8MB 用 4.2 秒，而走本机代理
+    8MB 要 40 秒以上、甚至掉到 1MB/分钟——**下载不会报错**，不换路的话用户就对着
+    一个慢慢爬的进度条干等（一百多分钟），而快的路只要一两分钟。
+
+    这测的是「有数据但很慢」；**完全没有数据**那种卡住由 httpx 的读超时兜着（60 秒）。
+    """
+    server = HTTPServer(("127.0.0.1", 0), _SlowHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/big.zip"
+
+    real = (ei._PROBE_BYTES, ei._PROBE_SECONDS, ei._PROBE_MIN_FILE)
+    ei._PROBE_BYTES, ei._PROBE_SECONDS, ei._PROBE_MIN_FILE = 4 << 20, 1.0, 0
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = _engine(b"y" * (2 << 20), url)
+            job = {"key": "fake", "done": 0}
+            with _sandbox(root, [engine]):
+                try:
+                    asyncio.run(ei._download(engine, job, use_env_proxy=False))
+                except ei._RouteTooSlow as e:
+                    assert "太慢" in str(e), str(e)
+                else:
+                    raise AssertionError("爬得那么慢却没换路")
+    finally:
+        ei._PROBE_BYTES, ei._PROBE_SECONDS, ei._PROBE_MIN_FILE = real
         server.shutdown()
 
 

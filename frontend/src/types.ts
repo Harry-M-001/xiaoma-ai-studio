@@ -282,6 +282,11 @@ export interface SpeechVoices {
   speedDefault: number;
   /** 把配音挂到一次视频生成上时那句提示（唯一副本在后端，两个入口共用） */
   videoRefHint: string;
+  /** 这一段是「本机跑」的模型吗（音色清单换成模型自带的那些） */
+  local: boolean;
+  /** 本机模型的音色提示（自带多少个、怎么填）；云端模型是空串 */
+  voiceHint: string;
+  voiceCount?: number;
 }
 
 export interface SpeechResult {
@@ -363,6 +368,28 @@ export interface EngineLocalService {
   route: string;
 }
 
+/** 本机配音这条线：引擎装好没有 / 接成模型服务没有 / 有哪些音色 */
+export interface EngineVoice {
+  id: string;
+  label: string;
+  sid: number;
+}
+
+export interface EngineLocalTts {
+  ready: boolean;
+  problem: string;
+  missingEngines: string[];
+  connected: boolean;
+  disabled: boolean;
+  serviceId: number | null;
+  serviceName: string;
+  modelKey: string;
+  voices: EngineVoice[];
+  voiceCount: number;
+  /** 音色有没有名字：没有时界面上只能按号选（示例文案要跟着变） */
+  named: boolean;
+}
+
 export interface EnginePageData {
   hardware: EngineHardware;
   headline: string;
@@ -371,6 +398,7 @@ export interface EnginePageData {
   phaseLabels: Record<string, string>;
   installedCount: number;
   installedServices: EngineLocalService[];
+  localTts: EngineLocalTts;
   totalSizeText: string;
 }
 

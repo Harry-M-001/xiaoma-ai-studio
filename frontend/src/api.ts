@@ -11,6 +11,7 @@ import type {
   ConfigScopesMeta,
   ConfigSnapshot,
   EngineJob,
+  EngineLocalTts,
   EnginePageData,
   LogExport,
   LogsStatus,
@@ -437,7 +438,10 @@ export const api = {
     ),
   // ---- 配音（语音合成）----
   /** 音色快捷选项与这一段的上限（音色不做白名单，允许手填别家的 id） */
-  speechVoices: () => request<SpeechVoices>("/api/audio/voices"),
+  speechVoices: (modelKey?: string) =>
+    request<SpeechVoices>(
+      modelKey ? `/api/audio/voices?model_key=${encodeURIComponent(modelKey)}` : "/api/audio/voices",
+    ),
   /** 合成一段语音：同步返回，产物已落成音频资产 */
   speech: (payload: { text: string; model_key: string; voice?: string; speed?: number }) =>
     request<SpeechResult>("/api/audio/speech", { method: "POST", body: json(payload) }),
@@ -469,6 +473,11 @@ export const api = {
       `/api/engines/${key}/verify`,
       { method: "POST" },
     ),
+  /** 本机配音：把装好的引擎接成一条音频模型服务（接完配音页就能选「本机跑」） */
+  connectLocalTts: () =>
+    request<EngineLocalTts>("/api/engines/local-tts/connect", { method: "POST" }),
+  disconnectLocalTts: () =>
+    request<EngineLocalTts>("/api/engines/local-tts/disconnect", { method: "POST" }),
 
   // ---- 在线更新 ----
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),

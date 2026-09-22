@@ -34,14 +34,11 @@ export default function SpeechPage({ onGoSettings }: { onGoSettings: () => void 
 
   useEffect(() => {
     (async () => {
-      const [ms, metaRes, config] = await Promise.all([
+      const [ms, config] = await Promise.all([
         api.listModels("audio"),
-        api.speechVoices().catch(() => null),
         api.getConfig().catch(() => ({})),
       ]);
       setModels(ms);
-      setMeta(metaRes);
-      if (metaRes) setSpeed(metaRes.speedDefault);
       // 模型优先用配置里的「默认语音模型」，其次用上次选的，最后退到第一个
       const keys = ms.map((m) => m.key);
       const configured = cfgString(config, "defaults.speech_model", "");
@@ -51,9 +48,32 @@ export default function SpeechPage({ onGoSettings }: { onGoSettings: () => void 
           keys[0] ||
           "",
       );
-      setVoice(prefs.voice.get());
     })();
   }, []);
+
+  // 音色清单**跟着选中的模型来**：云端那六个通用名字（alloy/nova…）与
+  // 本机模型自带的那一百多个（zf_xiaoxiao…）完全不是一回事。换模型时重新问一次，
+  // 并把「上一个模型才有的音色」清掉——留着它点生成只会报一句看不懂的错。
+  useEffect(() => {
+    if (!modelKey) return;
+    let alive = true;
+    (async () => {
+      const res = await api.speechVoices(modelKey).catch(() => null);
+      if (!alive || !res) return;
+      setMeta(res);
+      setSpeed((s) => (s === 1 || !s ? res.speedDefault : s));
+      setVoice((v) => {
+        // 第一次进来时把上次用过的音色捡回来；换模型时只留这个模型认识的
+        const saved = (v || prefs.voice.get()).trim();
+        if (!saved) return "";
+        if (/^\d+$/.test(saved)) return saved;
+        return res.presets.some((p) => p.id === saved) ? saved : "";
+      });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [modelKey]);
 
   useEffect(() => {
     prefs.modelKey.set("audio", modelKey);
@@ -140,14 +160,19 @@ export default function SpeechPage({ onGoSettings }: { onGoSettings: () => void 
           <div className="field">
             <label className="field-label">
               音色
-              <span className="field-hint-inline">（可留空，用服务默认音色；也可以直接手填别家的音色名）</span>
+              <span className="field-hint-inline">
+                {meta?.local
+                  ? "（本机模型的音色：填下面的名字或音色号，留空用第 0 号）"
+                  : "（可留空，用服务默认音色；也可以直接手填别家的音色名）"}
+              </span>
             </label>
             <input
               className="input"
               value={voice}
-              placeholder="留空 = 服务默认音色"
+              placeholder={meta?.local ? "留空 = 第 0 号音色" : "留空 = 服务默认音色"}
               onChange={(e) => setVoice(e.target.value)}
             />
+            {meta?.voiceHint && <div className="field-hint">{meta.voiceHint}</div>}
             {meta && meta.presets.length > 0 && (
               <div className="speech-voices">
                 {meta.presets.map((p) => (

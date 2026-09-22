@@ -90,12 +90,15 @@ def test_the_audio_modality_is_on_in_the_seed():
 
 def test_api_paths_match_the_backend_routes():
     api = _text(SRC / "api.ts")
-    assert 'request<SpeechVoices>("/api/audio/voices")' in api, "音色清单的路径不对"
+    assert "/api/audio/voices" in api, "音色清单的路径不对"
+    # 音色清单要**按模型问**：云端那六个通用名字与本机模型自带的那一百多个不是一套
+    assert "model_key=" in api, "拿音色时没把选中的模型带上"
     assert '"/api/audio/speech"' in api, "配音合成的路径不对"
     assert "speechVoices:" in api and "speech:" in api
 
     router = _text(BACKEND / "app" / "routers" / "audio.py")
     assert '@router.get("/voices")' in router and '@router.post("/speech")' in router
+    assert "model_key: str = \"\"" in router, "后端没接这个参数（前端传了也会被忽略）"
     assert 'prefix="/api/audio"' in router, "路由前缀与前端拼的路径不一致"
     main = _text(BACKEND / "app" / "main.py")
     assert "audio.router" in main, "配音路由没有挂到应用上（前端会拿到 404）"

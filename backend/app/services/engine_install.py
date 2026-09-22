@@ -40,7 +40,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models import ProviderService
+from app.schemas import ModelSpec
 from app.services import local_engines as le
+from app.services import local_tts as le_tts
 
 logger = logging.getLogger("xiaoma.engines")
 
@@ -52,6 +54,19 @@ _hw_cache: tuple[float, le.Hardware] | None = None
 # 下载块大小与进度刷新阈值
 _CHUNK = 1 << 20
 _TIMEOUT = httpx.Timeout(60.0, connect=15.0, read=60.0)
+# 重试之间歇一下。三条路（直连 / 系统代理 / 直连）之间只隔 2 秒：这几条路的差别
+# 是「出口不同」，不是「对方过载」，等久了没有意义。
+_RETRY_PAUSE = 2.0
+
+# **「活着但在爬」也要换路。** 这一版实测同一个文件在不同出口上能差十几倍：
+# 官方直连 8MB 用 4.2 秒（≈113MB/分钟），而走本机代理时 8MB 要 40 秒以上（≈12MB/分钟），
+# 甚至掉到 1MB/分钟——而**下载不会报错**，不换的话用户就对着一个慢慢爬的进度条干等
+# （140MB 要一百多分钟，而快的路只要一两分钟）。
+# 规则：大文件的前 `_PROBE_BYTES` 必须在 `_PROBE_SECONDS` 内下完，否则换下一条路
+# （已下到的部分留着，下一条路会续传，见 `_download` 里的 Range）。
+_PROBE_BYTES = 8 << 20
+_PROBE_SECONDS = 60.0
+_PROBE_MIN_FILE = 16 << 20
 
 # 当前这一条下载任务（同一时间只允许一条）
 _job: dict | None = None
@@ -452,9 +467,145 @@ async def _download(engine: le.Engine, job: dict) -> Path:
     return path
 
 
+class _RouteTooSlow(RuntimeError):
+    """这条路「活着但在爬」——换下一条，不是失败。"""
+
+
+def _error_text(exc: BaseException) -> str:
+    """把异常说成一句人话。
+
+    为什么专门写这个：httpx 在网络断掉时抛的异常**可能是空消息**
+    （这一版实测：Kokoro 那次下载失败，界面上「上次失败：」后面什么都没有），
+    而一句空错误比没有错误更糟——用户连搜都不知道搜什么。空的时候就报异常类型名。
+    """
+    text = str(exc).strip()
+    if text:
+        return text
+    errno = getattr(exc, "errno", None)
+    return f"{type(exc).__name__}{f'（errno {errno}）' if errno else ''}"
+
+
+# 网络类的失败要额外告诉用户「还能怎么办」。这几类异常都是「没连上/断了」，
+# 而不是「下游说不行」——前者换条路再试往往就好了。
+_NETWORK_ERRORS = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ReadError,
+    httpx.WriteError, httpx.RemoteProtocolError, httpx.NetworkError, httpx.ProxyError,
+)
+
+
+def _maybe_network_hint(text: str, exc: BaseException) -> str:
+    """网络不通时补一句**能照做**的话。
+
+    这几百 MB 的包都放在 GitHub 的 release 附件上，而它在国内时通时不通
+    （这一版实测：同一个网络里，`release-assets.githubusercontent.com` 时通时断）。
+    只报一句 ConnectTimeout 等于让用户干等，所以把三条出路写清楚。
+    """
+    if not isinstance(exc, _NETWORK_ERRORS):
+        return text
+    return (
+        f"{text}\n下载走不通时可以：① 过一会儿再点一次「接着下载」（已下到的部分会留着）；"
+        "② 自己在浏览器里把这个文件下好，放进 "
+        f"{archive_dir()}，再点「校验」——校验通过就能装；"
+        "③ 换网络或挂上代理（应用会同时尝试直连与系统代理）后重启，再点一次。"
+    )
+
+
+async def _download(engine: le.Engine, job: dict, *, use_env_proxy: bool) -> Path:
+    """下载到 `_downloads/<文件名>`，能续就续。返回完整文件的路径。
+
+    `use_env_proxy` 决定要不要读系统代理设置。**两条路都得试**，理由与
+    `update_service._probe` 里记的是同一件事：httpx 在 Windows 上会读注册表里的
+    IE/WinINET 代理，用户一开 VPN 请求就被静默导向代理出口（共享 IP 常被 GitHub 限流）；
+    反过来，国内直连 GitHub 附件也常常不通。所以不是「听天由命」，而是轮流试。
+    """
+    path = archive_path(engine)
+    have = path.stat().st_size if path.exists() else 0
+    if have > engine.size:
+        # 比清单大：上一版中途改过体积或上次写坏了，重来
+        path.unlink(missing_ok=True)
+        have = 0
+    if have == engine.size:
+        job["done"] = have
+        return path
+
+    job["phase"] = "downloading"
+    job["done"] = have
+    attempt_start = have
+    started = time.monotonic()
+    slow_reason = ""
+    headers = {"Range": f"bytes={have}-"} if have else {}
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True,
+                                 trust_env=use_env_proxy) as c:
+        async with c.stream("GET", engine.url, headers=headers) as r:
+            if r.status_code == 416:
+                # 「起点在末尾之后」= 本地这份已经完整（探针里正是这里搞错过）
+                job["done"] = path.stat().st_size
+                return path
+            r.raise_for_status()
+            if have and r.status_code != 206:
+                have = 0
+                job["done"] = 0
+                attempt_start = 0
+                started = time.monotonic()
+            mode = "ab" if have else "wb"
+            last_note = 0.0
+            with path.open(mode) as f:
+                async for chunk in r.aiter_bytes(_CHUNK):
+                    if job.get("cancelled"):
+                        raise asyncio.CancelledError()
+                    f.write(chunk)
+                    job["done"] = job.get("done", 0) + len(chunk)
+                    now = time.monotonic()
+                    # 「活着但在爬」：大文件的前几 MB 超时就换下一条路（见文件头的常量注释）。
+                    # **完全没有数据**那种卡住不在这里管——httpx 的读超时（60 秒）会兜住；
+                    # 这个判据只管「有数据、但慢到来不及」。
+                    if (engine.size >= _PROBE_MIN_FILE
+                            and job["done"] - attempt_start < _PROBE_BYTES
+                            and now - started > _PROBE_SECONDS):
+                        # **只记原因、不在这里抛**：响应还没读完就抛异常时，退出
+                        # `async with` 的收尾过程里 httpx 可能先报一句
+                        # 「peer closed connection…」，把真正的原因盖掉。
+                        # 先 break 让它把连接正常收掉，出了 with 再抛。
+                        slow_reason = (
+                            f"这条路太慢：{_PROBE_SECONDS:.0f} 秒才下了 "
+                            f"{(job['done'] - attempt_start) / 1048576:.1f}MB"
+                        )
+                        break
+                    if now - last_note > 5:
+                        last_note = now
+                        logger.info("%s 下载中：%.1f / %.1f MB",
+                                    engine.key, job["done"] / 1048576, engine.size / 1048576)
+    if slow_reason:
+        raise _RouteTooSlow(slow_reason)
+    return path
+
+
+async def _download_with_retries(engine: le.Engine, job: dict) -> Path:
+    """下载，断了或**太慢**就换下一条路，直连与走系统代理轮流来。"""
+    plan = (False, True, False)
+    last: BaseException | None = None
+    for attempt, use_env_proxy in enumerate(plan, start=1):
+        try:
+            return await _download(engine, job, use_env_proxy=use_env_proxy)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last = e
+            job["attempt"] = attempt
+            logger.info(
+                "%s 第 %d/%d 次中断（%s%s），已下 %.1f MB",
+                engine.key, attempt, len(plan), _error_text(e),
+                "，走系统代理" if use_env_proxy else "，直连",
+                (job.get("done") or 0) / 1048576,
+            )
+            if attempt < len(plan):
+                await asyncio.sleep(_RETRY_PAUSE)
+    raise last if last is not None else RuntimeError("下载失败（没有记录到原因）")
+
+
 async def _run(engine: le.Engine, job: dict) -> None:
     try:
-        path = await _download(engine, job)
+        path = await _download_with_retries(engine, job)
         got = path.stat().st_size
         if got != engine.size:
             raise ValueError(
@@ -476,11 +627,19 @@ async def _run(engine: le.Engine, job: dict) -> None:
         raise
     except Exception as e:  # noqa: BLE001
         job["phase"] = "error"
-        job["error"] = str(e)
+        # **不许出现空错误**（httpx 断线时真的会抛空消息，见 `_error_text`）；
+        # 网络类失败再补一句「还能怎么办」
+        text = _error_text(e)
+        if isinstance(e, _RouteTooSlow):
+            text = (
+                f"{text}（三条路都试过了：直连、系统代理、再直连。"
+                "已下到的部分留着，过一会儿再点一次「接着下载」会从断的地方继续）"
+            )
+        job["error"] = _maybe_network_hint(text, e)
         # 校验不过的文件留着只会让用户反复重试同一个坏文件
-        if "校验和不一致" in str(e):
+        if "校验和不一致" in job["error"]:
             archive_path(engine).unlink(missing_ok=True)
-        logger.warning("%s 安装失败：%s", engine.key, e)
+        logger.warning("%s 安装失败：%s", engine.key, _error_text(e))
     finally:
         job["finishedAt"] = time.time()
 
@@ -628,8 +787,95 @@ async def installed_services(db: AsyncSession) -> list[dict]:
     return out
 
 
+# ============================================================ 接成本机配音模型
+#
+# 「装好了」与「能用上」是两件事：引擎躺在磁盘上不会让配音页多出一个选项。
+# 这一节把「装好的 sherpa-onnx」**接成一条普通的模型服务**（kind=local_tts），
+# 于是配音页、样片旁白、画布逐镜对白全都自动多出一个「本机跑」的选项——
+# 那几条路都是从模型下拉里取音频模型的，一行都不用改。
+
+LOCAL_TTS_URL = "local://sherpa-onnx"
+LOCAL_TTS_MODEL = "kokoro"
+LOCAL_TTS_LABEL = "本机跑 · Kokoro 中文（不花调用费）"
+
+
+def _missing_engine_keys() -> list[str]:
+    """本机配音要的两个引擎里还没装上的那些（顺序就是用户该下载的顺序）。"""
+    gaps: list[str] = []
+    for key in (le_tts.RUNTIME_KEY, le_tts.MODEL_KEY):
+        engine = le.by_key(key)
+        if engine is not None and not installed(engine):
+            gaps.append(key)
+    return gaps
+
+
+async def local_tts_status(db: AsyncSession) -> dict:
+    """本机配音这条线的状态：引擎装好没有、接成模型服务没有、有哪些音色。
+
+    三件事分开说，因为用户能做的动作不同：**没装**要去下（这一页）、
+    **装了没接**点一下接入、**接好了**去配音页选模型。
+    """
+    ready, why = le_tts.check_ready()
+    row = (await db.execute(
+        select(ProviderService).where(ProviderService.kind == "local_tts")
+        .order_by(ProviderService.id)
+    )).scalars().first()
+    voices = le_tts.voice_list() if ready else []
+    return {
+        "ready": ready,
+        "problem": why,
+        "missingEngines": _missing_engine_keys(),
+        "connected": bool(row and row.enabled),
+        "disabled": bool(row and not row.enabled),
+        "serviceId": row.id if row else None,
+        "serviceName": row.name if row else "",
+        "modelKey": f"{row.id}:{LOCAL_TTS_MODEL}" if row else "",
+        "voices": [{"id": v.id, "label": v.label, "sid": v.sid} for v in voices],
+        "voiceCount": len(voices),
+        # 音色**有没有名字**要单独说：实测 Kokoro 的 int8 包里没有那张表（只按号选），
+        # 而界面上的示例（「小焰=zf_xiaoxiao」）在那种包里是不成立的写法。
+        "named": any(v.name for v in voices),
+    }
+
+
+async def connect_local_tts(db: AsyncSession) -> dict:
+    """把装好的 sherpa-onnx 接成一个音频模型服务（重复点不会加出第二份）。"""
+    from app.services import provider_store
+
+    info = await local_tts_status(db)
+    if not info["ready"]:
+        raise ValueError(info["problem"] or "本机配音引擎还没装好")
+
+    models = [ModelSpec(name=LOCAL_TTS_MODEL, modality="audio", label=LOCAL_TTS_LABEL)]
+    await provider_store.upsert_by_base_url(
+        db,
+        name="本机配音（sherpa-onnx）",
+        kind="local_tts",
+        base_url=LOCAL_TTS_URL,
+        # 本机服务没有凭据：适配器也不看这个字段（云服务少填 Key 才是配置错误）
+        api_key="",
+        models=models,
+        sort_order=9,
+    )
+    return await local_tts_status(db)
+
+
+async def disconnect_local_tts(db: AsyncSession) -> dict:
+    """把这条服务停用（**不删**：已有的配音资产还挂在它名下，而用户可能只是想换一个）。
+
+    停用而不是删除：删掉之后资产库里那些「配音 · xxx」的来源服务就没了，
+    而用户点「停用」时的本意通常只是「先别用它」。
+    """
+    row = (await db.execute(
+        select(ProviderService).where(ProviderService.kind == "local_tts")
+    )).scalars().first()
+    if row is not None:
+        row.enabled = False
+        await db.commit()
+    return await local_tts_status(db)
+
+
 async def shutdown() -> None:
-    """应用关闭时把在下的那条停下来（不要留一个孤儿任务）。"""
     global _task
     if _task is not None and not _task.done():
         if _job:

@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Cpu, Download, ExternalLink, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
+import {
+  Cpu,
+  Download,
+  ExternalLink,
+  Mic,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+  Trash2,
+  X,
+} from "lucide-react";
 import { api } from "../api";
-import type { EngineItem, EnginePageData } from "../types";
+import type { EngineItem, EngineLocalTts, EnginePageData } from "../types";
 import { Empty, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
@@ -18,7 +28,7 @@ import { useToast } from "../components/Toast";
  * 3. **下载是长活儿**：几百 MB，所以要能看见进度、能停、能删（磁盘是用户自己的）。
  *    停在断点上的部分会留着，下次接着下。
  */
-export default function EnginesPage() {
+export default function EnginesPage({ onNavigate }: { onNavigate?: (route: string) => void }) {
   const toast = useToast();
   const [data, setData] = useState<EnginePageData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -141,6 +151,18 @@ export default function EnginesPage() {
         </div>
       </div>
 
+      <LocalTtsCard
+        info={data.localTts}
+        busy={busyKey === "local-tts"}
+        onConnect={() =>
+          void act("local-tts", () => api.connectLocalTts(), "已接入：去配音页选「本机跑」试试")
+        }
+        onDisconnect={() =>
+          void act("local-tts", () => api.disconnectLocalTts(), "已停用本机配音模型")
+        }
+        onNavigate={onNavigate}
+      />
+
       <div className="eng-list">
         {data.engines.map((e) => (
           <EngineCard
@@ -165,6 +187,105 @@ export default function EnginesPage() {
             }
           />
         ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 本机配音那张卡：装好了要「接一下」才能用上。
+ *
+ * 三件事分开说，因为用户能做的动作不同：**没装齐**说还差哪个（就在下面那一列）、
+ * **装齐没接**给一个按钮、**接好了**给入口去试 + 完整音色清单。
+ * 「接入」这一步不能省：引擎躺在磁盘上不会让配音页多出一个选项。
+ */
+function LocalTtsCard({
+  info,
+  busy,
+  onConnect,
+  onDisconnect,
+  onNavigate,
+}: {
+  info: EngineLocalTts;
+  busy: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onNavigate?: (route: string) => void;
+}) {
+  return (
+    <div className={"card eng-card eng-tts" + (info.connected && info.ready ? " on" : "")}>
+      <div className="eng-row">
+        <div className="eng-row-main">
+          <div className="eng-name">
+            <b>
+              <Mic size={15} /> 本机配音
+            </b>
+            <span className="eng-chip tiny">sherpa-onnx + Kokoro 82M</span>
+            {info.ready ? (
+              <span className="eng-chip tiny ok">引擎已就绪</span>
+            ) : (
+              <span className="eng-chip tiny warn">还不能用</span>
+            )}
+            {info.connected && <span className="eng-chip tiny ok">已接入</span>}
+            {info.disabled && <span className="eng-chip tiny">已停用</span>}
+          </div>
+          <div className="eng-why">
+            一段话在本机念出来，不联网、不花调用费；中文英文都能念，自带
+            {info.voiceCount || "若干"}个音色。接上之后配音页、样片旁白、画布逐镜对白
+            都能选它。
+          </div>
+          {!info.ready && (
+            <div className="eng-note eng-note-warn">
+              {info.problem || "还差引擎没装好"}——就在下面那一列里，装完再回来接。
+            </div>
+          )}
+          {info.ready && !info.connected && (
+            <div className="eng-note">
+              引擎已经装好了，点右边「接成本机配音模型」，配音页就会多出一个「本机跑」的模型。
+            </div>
+          )}
+          {info.connected && (
+            <div className="eng-note eng-note-ok">
+              已接入为「{info.serviceName}」，在「模型服务」页也能看到它。
+              整镜一个人的台词只合成一次，一镜多人的台词按句换音色。
+            </div>
+          )}
+          {info.ready && info.voices.length > 0 && (
+            <details className="eng-voices">
+              <summary>看看全部 {info.voiceCount} 个音色</summary>
+              <div className="eng-voice-list">
+                {info.voices.map((v) => (
+                  <span className="eng-chip tiny" key={v.sid} title={`填「${v.id}」就能用`}>
+                    {v.label}
+                  </span>
+                ))}
+              </div>
+              <div className="eng-note">
+                {info.named
+                  ? "配音页的「音色」一栏填这里的名字就能指定；分镜表的角色音色表也写名字，"
+                    + "例如「小焰=zf_xiaoxiao」。留空用第 0 号。"
+                  : `配音页的「音色」一栏填这里的号码就能指定；分镜表的角色音色表也写号码，`
+                    + `例如「小焰=47」。留空用第 0 号。`}
+              </div>
+            </details>
+          )}
+        </div>
+        <div className="eng-actions">
+          {info.connected ? (
+            <>
+              <button className="btn btn-primary" onClick={() => onNavigate?.("speech")}>
+                <Play size={14} /> 去配音页试试
+              </button>
+              <button className="btn btn-ghost" disabled={busy} onClick={onDisconnect}>
+                停用
+              </button>
+            </>
+          ) : (
+            <button className="btn btn-primary" disabled={busy || !info.ready} onClick={onConnect}>
+              <Mic size={14} /> 接成本机配音模型
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
