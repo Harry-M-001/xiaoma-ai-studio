@@ -176,6 +176,46 @@ def test_method_availability_refreshes_when_the_box_moves():
     assert "/api/director/subtitle-removal/check" in api, "api 里没有 check 接口"
 
 
+def test_the_high_quality_tier_is_stated_in_the_dialog():
+    """「要真无痕还有一档」必须在**弹窗自己**里说清（这一段是 `#44`）。
+
+    为什么不能只写在文档里：用户对着四种手法留下的痕，一定会问「就没有干净的吗」。
+    答不上来他就会以为「这个功能只能做到这样」。所以这条属于弹窗，不属于 README；
+    而且要说清它不是第五种手法——那四种是盖像素、这一档是 AI 补全，
+    并且**我们不代装也不代跑**（不说清，用户会等下完 731MB 才发现还得自己装）。
+    """
+    src = _text(DIRECTOR)
+    assert "要真无痕的还有一档" in src, "弹窗里没说清还有一档能真无痕"
+    assert "盖掉像素" in src and "按周围画面重新画" in src, "没说清这一档与那四种的区别"
+    assert "我们不代装" in src, "没说清这一档我们不代装"
+    assert "它自己的界面" in src, "没说清装完是在它自己的界面里用"
+    styles = _text(STYLES)
+    for cls in ("subrm-hq", "subrm-hq-head", "subrm-hq-state"):
+        assert f".{cls}" in styles, f"缺样式 .{cls}"
+
+
+def test_the_tier_block_reports_the_installers_real_state():
+    """安装包的状态由后端给（跟帧一起回来），界面照实说三种情况。
+
+    一句「还没装好」盖住「没下 / 下了一半 / 下好了」三种状态，用户不知道该做什么。
+    """
+    src = _text(DIRECTOR)
+    assert "frame?.localTier" in src, "没用后端跟帧一起回来的高质量档状态"
+    assert "tier?.key &&" in src, "清单里没有这一项时没兜住（会画出一堆 undefined）"
+    assert "tier.downloaded" in src and "tier.downloading" in src, (
+        "没区分「下好了 / 正在下 / 还没下」"
+    )
+    assert "tier.installerPath" in src, "下好了没把安装包的路径写出来（用户会找不到那份 731MB）"
+    assert "tier.partialText" in src, "下了一半没说已经下了多少"
+    # 跳转按钮与放大/补帧那两个弹窗同一条：调用方给了导航能力才出现
+    assert "onGoEngines &&" in src, "跳转按钮没有按「有没有导航能力」判断"
+    assert 'onGoEngines={() => onNavigate("engines")}' in src, "去字幕弹窗没接上跳转"
+    types = _text(TYPES)
+    assert "localTier?" in types, "类型里没有 localTier"
+    for field in ("installerPath", "downloaded", "partialBytes", "partialText", "downloading"):
+        assert field in types, f"类型里没有 {field}"
+
+
 if __name__ == "__main__":
     import sys
 

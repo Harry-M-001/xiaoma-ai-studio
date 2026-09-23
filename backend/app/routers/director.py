@@ -28,6 +28,7 @@ from app.schemas import (
     RemovalPreviewIn,
 )
 from app.services import (
+    engine_install,
     ffmpeg_service,
     image_size,
     storage,
@@ -251,6 +252,10 @@ async def removal_frame(payload: RemovalFrameIn, db: AsyncSession = Depends(get_
 
     尺寸回的是**源视频**的像素（框坐标系），显示用的图另缩到 1280 以内——
     前端按显示尺寸换算去画框。
+
+    `localTier` 是「高质量档」（本机 VSR）此刻的状态：这一档我们不代装也不代跑，
+    所以要跟帧一起回，界面才能当场说清「要真无痕的另一档在哪儿、下了没有」，
+    而不是等用户对着四种手法的痕自己去找。
     """
     a = await _get_video_asset(db, payload.asset_id)
     path = storage.abs_path(a.filename)
@@ -277,6 +282,7 @@ async def removal_frame(payload: RemovalFrameIn, db: AsyncSession = Depends(get_
         "box": box,
         "methods": subtitle_removal.method_rows(box, width, height),
         "defaultMethod": subtitle_removal.default_method(box, width, height),
+        "localTier": engine_install.external_tier(subtitle_removal.LOCAL_TIER_KEY),
     }
 
 

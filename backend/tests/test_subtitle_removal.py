@@ -13,11 +13,17 @@
 
 另外把「四种手法在什么情况下不能用、为什么」也钉住：`available=False` 时必须带 `reason`，
 因为不可用的手法仍然会列在界面上，静默消失会让人以为程序坏了。
+
+最后一段是这一版（`#44`）补的：**要真无痕的那一档**。它不是第五种手法——那四种都是拿
+画面盖掉像素，而这一档是 AI 补全，靠的是我们**不代装、也不代跑**的一个独立安装程序。
+所以与它有关的不是什么算法，而是口径：只回安装包的事实（下没下、在哪儿），
+**不许编一个「装好了」的结论**（它的目录不归我们管，没有判据）。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import sys
 import tempfile
@@ -26,7 +32,13 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
-from app.services import ffmpeg_service, image_size, subtitle_removal as sr  # noqa: E402
+from app.services import (  # noqa: E402
+    engine_install,
+    ffmpeg_service,
+    image_size,
+    local_engines,
+    subtitle_removal as sr,
+)
 
 W, H = 1280, 720
 
@@ -308,6 +320,92 @@ def test_removal_frame_reports_source_size_not_the_scaled_one():
             shutil.rmtree(work, ignore_errors=True)
 
     assert _run(case()) in ("ok", "skip")
+
+
+# ------------------------------------------------- 高质量档（#44：只给地址、不代装）
+
+
+@contextlib.contextmanager
+def _data_dir(root: Path):
+    """把数据目录指到临时目录（安装包就落在它下面的 `engines/_downloads` 里）。"""
+    real = engine_install.settings
+
+    class _S:
+        data_dir = root
+
+    engine_install.settings = _S  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        engine_install.settings = real
+
+
+def test_the_high_quality_tier_is_an_engine_we_do_not_install():
+    """这一档指向的必须是清单里**我们不代装**那一项，而且不许混进四种手法。
+
+    它是 AI 补全（字幕那一带按周围画面重画出来），与上面四种「盖像素」不是一回事：
+    自带一整套运行环境、装完是它自己的界面。口径一旦被改成「我们代装」，
+    用户就会在下完 731MB 之后发现还要自己装一遍——这条把口径钉在清单的形状上。
+    """
+    engine = local_engines.by_key(sr.LOCAL_TIER_KEY)
+    assert engine is not None, f"清单里没有 {sr.LOCAL_TIER_KEY} 这一项"
+    assert engine.archive == "installer", engine.archive
+    assert engine.marker == "", "安装程序那一档的目录不归我们管，不该有判据"
+    assert sr.LOCAL_TIER_KEY not in sr._BY_KEY, "高质量档不是我们能执行的手法，不该混进 METHODS"
+
+
+def test_the_tier_reports_the_installer_never_a_verdict_of_its_own():
+    """只回安装包的事实：下没下、在哪儿。**不许编一个「装好了」的结论。**"""
+    with tempfile.TemporaryDirectory() as tmp:
+        with _data_dir(Path(tmp)):
+            fresh = engine_install.external_tier(sr.LOCAL_TIER_KEY)
+            assert fresh["key"] == sr.LOCAL_TIER_KEY
+            assert fresh["downloaded"] is False
+            assert fresh["partialBytes"] == 0 and fresh["partialText"] == ""
+            assert fresh["downloading"] is False
+            # 路径也照样回：界面能照实说「它会下到这儿」，比留一句「还没下」有用
+            assert "engines" in fresh["installerPath"], fresh["installerPath"]
+            assert "installed" not in fresh, "不许回「装没装」这种我们判不出来的结论"
+            assert fresh["sizeText"] and fresh["url"].startswith("https://")
+
+            # 下了一半：照实说是半个，并且能接着下
+            half = Path(fresh["installerPath"])
+            half.parent.mkdir(parents=True, exist_ok=True)
+            half.write_bytes(b"x" * 1024)
+            part = engine_install.external_tier(sr.LOCAL_TIER_KEY)
+            assert part["downloaded"] is False
+            assert part["partialBytes"] == 1024 and part["partialText"] == "1 KB", part["partialText"]
+
+            # 下完整了：改成说它在磁盘上的哪条路径
+            engine = local_engines.by_key(sr.LOCAL_TIER_KEY)
+            assert engine is not None
+            half.write_bytes(b"x" * engine.size)
+            done = engine_install.external_tier(sr.LOCAL_TIER_KEY)
+            assert done["downloaded"] is True
+            assert done["partialBytes"] == 0 and done["partialText"] == ""
+            assert done["installerPath"] == str(half)
+
+
+def test_an_unknown_tier_key_is_empty_not_an_empty_shell():
+    """清单里没有这一项时回空字典：界面据此不显示那一块，而不是显示一堆 undefined。"""
+    assert engine_install.external_tier("清单里没有这一项") == {}
+
+
+def test_the_frame_response_carries_the_tier_state():
+    """高质量档的状态要跟「帧 + 尺寸 + 推荐框 + 四种手法」**同一批**回来。
+
+    为什么另开一个接口不行：这个弹窗本来就是一次请求把那一批拿齐的（分几次会出现
+    「框按旧尺寸画、手法按新尺寸判」这种对不上的中间状态），高质量档的状态与它们同级——
+    界面要能当场答上「要真无痕的另一档在哪儿、下了没有」。
+    """
+    src = (BACKEND / "app" / "routers" / "director.py").read_text(encoding="utf-8")
+    start = src.index('@router.post("/subtitle-removal/frame")')
+    end = src.index('@router.post("/subtitle-removal/check")', start)
+    body = src[start:end]
+    assert '"localTier"' in body, "取帧那一份响应里没带高质量档的状态"
+    assert "subtitle_removal.LOCAL_TIER_KEY" in body, (
+        "路由里把高质量档的 key 写死了：这个 key 属于去字幕这一块的口径"
+    )
 
 
 if __name__ == "__main__":

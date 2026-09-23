@@ -350,6 +350,44 @@ def job_snapshot() -> dict | None:
     return dict(_job) if _job else None
 
 
+def external_tier(key: str) -> dict:
+    """「只给地址、不代装」那一档此刻的状态：下没下、下好了在哪儿。
+
+    为什么只回安装包的状态、不回「装没装」：这一档（去字幕高质量档 VSR）是个**自带
+    整套运行环境的独立安装程序**，装完是它自己的界面，它的目录不归我们管，所以**没有
+    判据**——`marker` 是空的（见 `Engine.marker`）。与其猜一个「装好了」的结论，不如把
+    事实（安装包在不在、路径是什么）原样交给界面，让界面照实说。
+
+    未知的 key 回空字典：界面据此不显示这一块，而不是显示一个字段全是 undefined 的空壳。
+    """
+    engine = le.by_key(key)
+    if engine is None:
+        return {}
+    arch = _archive_state(engine)
+    job = dict(_job) if (_job or {}).get("key") == engine.key else None
+    # 「下了一半」才有人话体积：没下（0 字节）与下完整了都是空——「已经下了 0 B」
+    # 这种话写进界面只会让人以为哪里错了
+    partial = 0 if arch["archiveComplete"] else int(arch["archiveBytes"])
+    return {
+        "key": engine.key,
+        "label": engine.label,
+        "size": engine.size,
+        "sizeText": engine.size_text,
+        "license": engine.license,
+        "homepage": engine.homepage,
+        "url": engine.url,
+        "filename": engine.filename,
+        "why": engine.why,
+        "note": engine.note,
+        # 没下也回路径：界面照实说「它会下到这儿」，比留一句「还没下」有用
+        "installerPath": arch["archivePath"],
+        "downloaded": bool(arch["archiveComplete"]),
+        "partialBytes": partial,
+        "partialText": le.human_size(partial) if partial else "",
+        "downloading": bool(job and job.get("phase") in ("downloading", "verifying", "unpacking")),
+    }
+
+
 # ============================================================ 下载 + 解压
 
 

@@ -79,18 +79,19 @@ export default function EnginesPage({ onNavigate }: { onNavigate?: (route: strin
 
   if (loading && !data) {
     return (
-      <div className="page">
-        <div className="card">
+      <div className="page eng-page">
+        {/* 读的时候先占上「这台机器」那张卡的形状，读到了内容就不跳一下 */}
+        <div className="card eng-machine">
           <Spinner />
-          <div className="eng-status">正在读本机引擎状态…</div>
+          <div className="muted">正在读本机引擎状态…</div>
         </div>
       </div>
     );
   }
   if (!data) {
     return (
-      <div className="page">
-        <div className="card">
+      <div className="page eng-page">
+        <div className="card eng-machine">
           <Empty icon={<Cpu />} title="读不到本机引擎状态" desc="刷新一下试试" />
         </div>
       </div>
@@ -99,31 +100,29 @@ export default function EnginesPage({ onNavigate }: { onNavigate?: (route: strin
 
   const hw = data.hardware;
   return (
-    <div className="page">
-      <div className="card eng-head">
-        <div className="eng-head-top">
-          <div>
-            <h2 className="eng-title">
-              <Cpu size={18} /> 本机引擎
-            </h2>
-            <div className="eng-sub">
-              下载到本机之后，这些能力就不再走 API、也就没有按次计费；
-              模型不进仓库也不进便携包，装在你自己的数据目录里（清单合计 {data.totalSizeText}）。
-            </div>
+    <div className="page eng-page">
+      <div className="page-header">
+        <div>
+          <div className="page-title">本机引擎</div>
+          <div className="page-desc">
+            下载到本机之后，这些能力就不再走 API、也就没有按次计费；
+            模型不进仓库也不进便携包，装在你自己的数据目录里（清单合计 {data.totalSizeText}）。
           </div>
-          <button
-            className="btn btn-ghost"
-            disabled={refreshing}
-            onClick={() => {
-              setRefreshing(true);
-              void act("", () => api.refreshEngineHardware(), "已重新检测这台机器");
-              setRefreshing(false);
-            }}
-          >
-            <RefreshCw size={14} /> 重新检测
-          </button>
         </div>
+        <button
+          className="btn btn-ghost"
+          disabled={refreshing}
+          onClick={() => {
+            setRefreshing(true);
+            void act("", () => api.refreshEngineHardware(), "已重新检测这台机器");
+            setRefreshing(false);
+          }}
+        >
+          <RefreshCw size={14} /> 重新检测
+        </button>
+      </div>
 
+      <div className="card eng-machine">
         <div className="eng-hw">
           <span className={"eng-chip" + (hw.hasGpu ? " ok" : "")}>显卡：{hw.gpuText}</span>
           <span className={"eng-chip" + (hw.vulkan ? " ok" : " warn")}>
@@ -335,6 +334,14 @@ function EngineCard({
         ? 100
         : 0;
   const partial = !item.installed && item.archiveBytes > 0 && !item.archiveComplete;
+  // 按钮上写清这一步会做什么：安装程序那一档只把安装包下下来，装与跑都不归我们
+  const downloadLabel = partial
+    ? "接着下载"
+    : item.archive === "installer"
+      ? item.archiveComplete
+        ? "重新下载安装包"
+        : "下载安装包"
+      : "下载并安装";
 
   return (
     <div className={"card eng-card" + (item.installed ? " on" : "")}>
@@ -353,6 +360,15 @@ function EngineCard({
           <div className="eng-note">{item.reason}</div>
           {/* 代价与限制必须露在外面：藏起来的表现是用户装完才发现跑不动 */}
           <div className="eng-note eng-note-dim">{item.note}</div>
+          {/* 安装程序那一档（就是去字幕高质量档）：我们只负责把它下下来，装与跑都在它
+              自己的界面里——所以下完之后必须把「文件在哪」写出来，不然用户下完 731MB
+              会找不到它（这一条是 #44 走查时发现少了的）。 */}
+          {item.archive === "installer" && item.archiveComplete && (
+            <div className="eng-note eng-note-ok">
+              安装包已下好：<code className="eng-path">{item.archivePath}</code>
+              ——双击装完，用它自己的界面处理，成品再拖回导演台接着剪。
+            </div>
+          )}
           <div className="eng-meta">
             <span>授权：{item.license}</span>
             <span>包：{item.archiveLabel}</span>
@@ -386,7 +402,7 @@ function EngineCard({
           ) : (
             <>
               <button className="btn btn-primary" disabled={busy || blocked} onClick={onDownload}>
-                <Download size={14} /> {partial ? "接着下载" : item.archive === "installer" ? "只下载安装包" : "下载并安装"}
+                <Download size={14} /> {downloadLabel}
               </button>
               {item.archiveComplete && (
                 <button className="btn btn-ghost" disabled={busy} onClick={onVerify}>

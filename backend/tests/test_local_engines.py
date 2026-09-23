@@ -91,6 +91,20 @@ def test_the_installer_entry_has_no_marker_and_is_never_installed():
     assert "不代装" in reason, reason
 
 
+def test_the_installer_note_points_at_the_director_flow():
+    """这一档的说明要指向**真正有那个功能的地方**（导演台），不是含糊的「浏览器里」。
+
+    文案与界面是同一件事的两半：写错地方，用户就会去别处找。原来这里写的是
+    「浏览器里『去字幕』那一版」——而那个弹窗在导演台，不在浏览器里（`#44` 走查逮到）。
+    """
+    vsr = le.by_key("vsr")
+    assert vsr is not None
+    assert "导演台" in vsr.note, vsr.note
+    assert "拖回导演台" in vsr.note, "没说清装完之后怎么接回流程"
+    assert "浏览器里" not in vsr.note, vsr.note
+    assert "只盖像素" in vsr.note, "没说清它与零成本档（四种 ffmpeg 手法）的区别"
+
+
 def test_human_size_never_shows_raw_bytes():
     assert le.human_size(249216829) == "237.7 MB"
     assert le.human_size(35497352) == "33.9 MB"

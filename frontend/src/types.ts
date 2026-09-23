@@ -895,6 +895,35 @@ export interface RemovalMethod {
   reason: string;
 }
 
+/**
+ * 「高质量档」：要真无痕时该走的那一档（本机 VSR）。
+ *
+ * 它**不是**我们的一条去字幕手法——上面四种是拿画面盖掉像素，这一档是 AI 补全。
+ * 它是个自带一整套运行环境的独立安装程序，装完是它自己的界面，**我们只给下载地址、
+ * 不代装也不代跑**，所以这里回的全是「手上这个安装包」的事实（下没下、在哪儿），
+ * 没有任何「装好了」的结论——那个我们判不出来。
+ */
+export interface RemovalLocalTier {
+  key: string;
+  label: string;
+  size: number;
+  sizeText: string;
+  license: string;
+  homepage: string;
+  url: string;
+  filename: string;
+  why: string;
+  note: string;
+  /** 安装包会落在哪（还没下也回，界面照实说） */
+  installerPath: string;
+  /** 安装包下完整了 */
+  downloaded: boolean;
+  /** 下了一半的字节数与数值（下完整了就是 0 / 空） */
+  partialBytes: number;
+  partialText: string;
+  downloading: boolean;
+}
+
 export interface RemovalFrame {
   /** 真帧（JPEG data URI），框就画在这上面 */
   image: string;
@@ -908,6 +937,8 @@ export interface RemovalFrame {
   box: RemovalBox;
   methods: RemovalMethod[];
   defaultMethod: string;
+  /** 高质量档此刻的状态（清单里没有这一项时是 undefined，界面就不显示那块） */
+  localTier?: RemovalLocalTier;
 }
 
 export interface RemovalPreview {

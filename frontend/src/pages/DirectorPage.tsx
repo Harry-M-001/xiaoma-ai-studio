@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
+  CheckCircle2,
   Clapperboard,
   Download,
   Eraser,
@@ -191,11 +192,19 @@ function RemovalBoxPicker({ src, natural, box, onChange, onCommit }: {
  * 3. **四种手法的代价写在旁边**。ffmpeg 去字幕做不到「无痕」：抹平是竖向拖痕、
  *    遮住是拉出来的一道痕、模糊是一条糊痕、裁掉画面会变矮。用户是拿这些代价
  *    去换「没有那行字」的。真无痕要 AI 补全，那是另一档（本机 VSR，需自己下载）。
+ *
+ * 第四件事是这一版（#44）补上的：**那一档必须当场说清**。用户对着这四种的痕，
+ * 一定会问「就没有干净的吗」——答不上来他就会以为这个功能只能做到这样。
+ * 答案是「有，但那是个要自己下的独立程序，我们不代跑」。所以它不是第五种手法
+ * （那会让人以为选了它我们就会代跑），而是一条排在帧前面的信息条，
+ * 并且**照实说安装包的状态**：没下就说在哪儿下，下好了就说它在磁盘上的哪条路径。
  */
-function RemoveSubtitlesDialog({ asset, onClose, onReplaced }: {
+function RemoveSubtitlesDialog({ asset, onClose, onReplaced, onGoEngines }: {
   asset: Asset;
   onClose: () => void;
   onReplaced: (made: Asset) => void;
+  /** 高质量档要下载时用它跳去本机引擎页；不传就不显示跳转按钮 */
+  onGoEngines?: () => void;
 }) {
   const toast = useToast();
   const [frame, setFrame] = useState<RemovalFrame | null>(null);
@@ -320,6 +329,8 @@ function RemoveSubtitlesDialog({ asset, onClose, onReplaced }: {
   ];
 
   const nat = { w: frame?.width ?? 0, h: frame?.height ?? 0 };
+  /** 高质量档（本机 VSR）：跟帧一起回来的，所以我们不另发一次请求 */
+  const tier = frame?.localTier;
 
   return (
     <Dialog onClose={onClose} label="去字幕" maskClassName="canvas-dialog-mask"
@@ -347,6 +358,49 @@ function RemoveSubtitlesDialog({ asset, onClose, onReplaced }: {
 
         {frame && box && (
           <>
+            {/* 要真无痕的那一档在这里说。它的状态跟帧一起回来（后端一次给齐），
+                所以下面这几句都是照实说的：没下就说在哪儿下，下好了就说它在哪条路径。 */}
+            {tier?.key && (
+              <div className="subrm-hq">
+                <div className="subrm-hq-head">
+                  <Sparkles size={13} />
+                  <b>要真无痕的还有一档：本机 VSR（AI 补全）</b>
+                  <span className="subrm-hq-meta">{tier.sizeText} · 独立安装程序，我们不代装</span>
+                </div>
+                <div>
+                  上面四种都是<b>盖掉像素</b>，留下的痕迹只是样子不同；这一档是把字幕那一带
+                  <b>按周围画面重新画出来</b>，所以不留痕。它自带一整套 Python + Paddle/Torch
+                  运行环境，装完是<b>它自己的界面</b>——用它把这一段处理好，再把成品拖回导演台接着剪。
+                </div>
+                {tier.downloaded ? (
+                  <div className="subrm-hq-state ok">
+                    <CheckCircle2 size={12} />
+                    安装包已经下好了：<code>{tier.installerPath}</code>，双击装完就能用。
+                  </div>
+                ) : tier.downloading ? (
+                  <div className="subrm-hq-state">安装包正在下……下完这里会告诉你它在哪儿。</div>
+                ) : (
+                  <div className="subrm-hq-state">
+                    {tier.partialBytes > 0
+                      ? `安装包下了一半（${tier.partialText}），可以接着下。`
+                      : "安装包还没下（下到数据目录的 engines/_downloads 里）。"}
+                    {onGoEngines && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-xs"
+                        onClick={() => {
+                          onClose();
+                          onGoEngines();
+                        }}
+                      >
+                        <Download size={12} /> 去本机引擎页下
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <RemovalBoxPicker
               src={frame.image}
               natural={nat}
@@ -1122,6 +1176,7 @@ function ClipEditor({ onNavigate }: { onNavigate: (route: string) => void }) {
             setClips((prev) => prev.map((c) => (c.id === removing.id ? made : c)));
             setRemoving(null);
           }}
+          onGoEngines={() => onNavigate("engines")}
         />
       )}
 

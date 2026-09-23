@@ -759,75 +759,119 @@ input, textarea, select { font-family: inherit; }
 
 /* ============ 本机引擎（批次 9） ============ */
 
-.eng-head { display: flex; flex-direction: column; gap: 12px; }
-.eng-head-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-.eng-title { display: flex; align-items: center; gap: 8px; font-size: 16px; margin: 0 0 6px; }
-.eng-sub { font-size: 12px; line-height: 1.7; color: var(--text-3); max-width: 720px; }
-.eng-hw { display: flex; flex-wrap: wrap; gap: 6px; }
-.eng-headline {
-  font-size: 12.5px; line-height: 1.75; color: var(--text-2);
-  padding: 10px 12px; border-radius: var(--radius-sm);
-  border: 1px solid var(--border); background: var(--surface-2);
+/* 这一页是一列卡片，卡片之间由 .eng-page 的 gap 分开。
+   卡片一律不带 margin：margin 会和卡片内部的 gap 叠起来，间距就说不清是哪来的。
+   顺带修掉「卡片没有内边距、文字贴着边框」——原来这几张卡连 padding 都没有。 */
+.eng-page { display: flex; flex-direction: column; gap: var(--space-4); }
+/* 副标题限宽：不限的话在宽屏上会排到 800px 以外，一行太长反而不易读 */
+.eng-page .page-desc { max-width: 720px; }
+
+/* 「这台机器」那张卡：硬件体检 + 一句结论 */
+.eng-machine {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
 }
-.eng-section { font-size: 12px; font-weight: 600; color: var(--text-2); }
-.eng-services { display: flex; flex-direction: column; gap: 8px; }
-.eng-service { display: flex; align-items: center; gap: 8px; font-size: 12.5px; }
-.eng-service-detail { color: var(--text-3); font-size: 12px; }
+.eng-hw { display: flex; flex-wrap: wrap; gap: var(--space-1-5); }
+/* 结论不做成「卡中卡」：一条左侧色条 + 浅底，读起来是引用块而不是又一个盒子 */
+.eng-headline {
+  font-size: var(--font-size-sm); line-height: var(--leading-normal); color: var(--text);
+  padding: var(--space-2-5) var(--space-3-5);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+/* 分组标题要比卡片名小一档、也更灰，否则会被当成卡片标题来读 */
+.eng-section { font-size: var(--font-size-2xs); font-weight: 700; color: var(--text-3); }
+.eng-services {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+}
+.eng-service { display: flex; align-items: baseline; gap: var(--space-2); font-size: var(--font-size-sm); }
+.eng-service-detail { color: var(--text-3); font-size: var(--font-size-xs); }
 .eng-dot {
-  width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto;
+  width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; align-self: center;
   background: var(--text-3); opacity: 0.5;
 }
 .eng-dot.on { background: #22c55e; opacity: 1; }
+/* 列表末尾那条提示与列表不是一类信息，用一条细线隔开，而不是再套一张卡 */
+.eng-services .eng-note { border-top: 1px solid var(--border); padding-top: var(--space-2-5); }
 
-.eng-list { display: flex; flex-direction: column; gap: 12px; }
-.eng-card { display: flex; flex-direction: column; gap: 10px; }
+.eng-list { display: flex; flex-direction: column; gap: var(--space-3); }
+.eng-card {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+}
 .eng-card.on { border-color: rgba(34, 197, 94, 0.35); }
-.eng-row { display: flex; gap: 16px; align-items: flex-start; }
-.eng-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-.eng-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13.5px; }
-.eng-why { font-size: 12.5px; line-height: 1.75; color: var(--text-2); }
-.eng-note { font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
-.eng-note-dim { color: var(--text-3); opacity: 0.9; }
-.eng-note-warn { color: var(--danger); white-space: pre-line; }
-.eng-note-ok { color: #16a34a; }
+.eng-row { display: flex; gap: var(--space-4); align-items: flex-start; }
+.eng-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1-5); }
+.eng-name {
+  display: flex; align-items: center; gap: var(--space-1-5); flex-wrap: wrap;
+  font-size: var(--font-size-md); line-height: var(--leading-tight);
+}
+/* 正文三级：为什么值得装（正常色）→ 装不装得了的原因（灰）→ 更细的来龙去脉（更灰） */
+.eng-why { font-size: var(--font-size-sm); line-height: var(--leading-normal); color: var(--text-2); }
+.eng-note { font-size: var(--font-size-xs); line-height: var(--leading-normal); color: var(--text-3); }
+.eng-note-dim { opacity: 0.78; }
+.eng-note-warn { color: var(--danger); white-space: pre-line; opacity: 1; }
+.eng-note-ok { color: #16a34a; opacity: 1; }
+/* 安装包的路径是一长串（带用户名时更长），要能断行，不能把这一条撑开 */
+.eng-path { font-family: var(--font-mono); font-size: var(--font-size-2xs); overflow-wrap: anywhere; }
 .eng-meta {
-  display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px;
-  color: var(--text-3); align-items: center;
+  display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3);
+  font-size: var(--font-size-2xs); color: var(--text-3); align-items: center;
+  margin-top: var(--space-1);
 }
 .eng-meta a { color: var(--primary); display: inline-flex; align-items: center; gap: 3px; }
 
 .eng-actions {
-  flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px;
-  align-items: flex-end; min-width: 150px;
+  flex: 0 0 auto; display: flex; flex-direction: column; gap: var(--space-1-5);
+  align-items: flex-end; min-width: 160px;
 }
-.eng-status { font-size: 11px; color: var(--text-3); }
+/* 装好之后这里写的是可执行文件路径，不限宽会顶开右边这一列 */
+.eng-status {
+  font-size: var(--font-size-2xs); line-height: var(--leading-tight); color: var(--text-3);
+  max-width: 172px; text-align: right; overflow-wrap: anywhere;
+}
 .eng-ok { color: #16a34a; }
 .eng-bar {
-  height: 5px; border-radius: 3px; background: var(--surface-2);
+  height: 4px; border-radius: 999px; background: var(--surface-2);
   overflow: hidden; flex: 0 0 auto;
 }
 .eng-bar-fill { height: 100%; background: var(--primary-grad); transition: width 0.4s ease; }
 .eng-chip {
-  font-size: 11px; padding: 2px 7px; border-radius: 999px;
+  font-size: var(--font-size-2xs); line-height: var(--leading-tight);
+  padding: var(--space-hair) var(--space-2); border-radius: 999px;
   border: 1px solid var(--border); color: var(--text-2); background: var(--surface-2);
   white-space: nowrap;
 }
-.eng-chip.tiny { font-size: 10.5px; padding: 1px 6px; }
+/* 卡片名那一行常挤着三五个标签，标签一胖就喧宾夺主，所以只收内边距、字号同档 */
+.eng-chip.tiny { padding: var(--space-hair) var(--space-1-5); }
 .eng-chip.ok { color: #16a34a; border-color: rgba(34, 197, 94, 0.35); }
 .eng-chip.warn { color: var(--danger); border-color: rgba(239, 68, 68, 0.35); }
 
 /* 本机配音那张卡：音色清单可以折起来 */
 .eng-tts { border-color: rgba(124, 58, 237, 0.35); }
-.eng-tts .eng-name b { display: inline-flex; align-items: center; gap: 5px; }
-.eng-voices { margin-top: 2px; }
+.eng-tts .eng-name b { display: inline-flex; align-items: center; gap: var(--space-1); }
+.eng-voices { margin-top: var(--space-hair); }
 .eng-voices summary {
-  cursor: pointer; font-size: 12px; color: var(--primary);
-  padding: 2px 0;
+  cursor: pointer; font-size: var(--font-size-xs); color: var(--primary);
+  padding: var(--space-1-5) 0;
 }
-/* 一百多个音色铺开是一大片，所以限高可滚，别把整页撑长 */
+/* 一百多个音色铺开是一大片，所以限高可滚，别把整页撑长（150px 约合九行标签） */
 .eng-voice-list {
-  display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0;
-  max-height: 148px; overflow-y: auto;
+  display: flex; flex-wrap: wrap; gap: var(--space-1); margin: var(--space-2) 0;
+  max-height: 150px; overflow-y: auto;
+}
+
+/* 窄屏（侧边栏一收就到 700px 上下）：动作不再挤在右边一列，落到正文下面整行排开 */
+@media (max-width: 860px) {
+  .eng-row { flex-direction: column; gap: var(--space-3); }
+  .eng-actions {
+    flex-direction: row; flex-wrap: wrap; align-items: center;
+    justify-content: flex-start; min-width: 0; width: 100%;
+  }
+  .eng-status { max-width: none; text-align: left; }
 }
 
 /* ============ 社区分享 ============ */
@@ -1537,6 +1581,30 @@ input, textarea, select { font-family: inherit; }
   margin-top: auto; padding-top: 4px;
 }
 .subrm-foot .muted { font-size: 11.5px; margin-right: auto; }
+
+/* 「要真无痕的那一档」（#44）。这条信息属于**整个弹窗**——四种手法都做不到无痕——
+   所以它不是第五张手法卡，而是一条排在帧前面的信息条：安静、不跟四种手法抢位置，
+   但一定看得见（答不上「就没有干净的吗」，用户就会以为这个功能只能做到这样）。 */
+.subrm-hq {
+  display: flex; flex-direction: column; gap: var(--space-1-5);
+  padding: var(--space-2-5) var(--space-3);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--font-size-xs); line-height: var(--leading-normal); color: var(--text-2);
+}
+.subrm-hq-head { display: flex; align-items: center; gap: var(--space-1-5); flex-wrap: wrap; }
+.subrm-hq-head svg { color: var(--primary); flex: 0 0 auto; }
+.subrm-hq-head b { font-size: var(--font-size-sm); color: var(--text); }
+.subrm-hq-meta { font-size: var(--font-size-2xs); color: var(--text-3); }
+.subrm-hq-state {
+  display: flex; align-items: center; gap: var(--space-1-5); flex-wrap: wrap;
+  font-size: var(--font-size-2xs); color: var(--text-3);
+}
+.subrm-hq-state.ok { color: #16a34a; }
+/* 安装包路径是一长串（带用户名时更长），要能断行，不能把这一条撑开 */
+.subrm-hq-state code {
+  font-family: var(--font-mono); font-size: var(--font-size-2xs); overflow-wrap: anywhere;
+}
 
 /* ============ 超分（放大，v1.1.31） ============ */
 
