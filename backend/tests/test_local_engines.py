@@ -46,27 +46,44 @@ def test_the_manifest_is_self_consistent():
 
 
 def test_every_entry_carries_a_usable_hash_and_size():
-    """体积与 sha256 是校验用户下载的**唯一依据**，一个都不许含糊。"""
-    for e in le.engines():
+    """体积与 sha256 是校验用户下载的**唯一依据**，一个都不许含糊。
+
+    只对**我们发得出包的那些**成立。`archive == "external"` 是「不给下载」那一档：
+    没有包就没有摘要，写了反而是骗人（见 `assert_consistent` 里那一段，那边同时
+    断言了「不许有 sha256 / proof」）。
+    """
+    shipped = [e for e in le.engines() if e.archive != "external"]
+    assert shipped, "清单里一个可下载的包都没有？"
+    for e in shipped:
         assert e.size > 0, f"{e.key} 没写体积"
         assert len(e.sha256) == 64, f"{e.key} 的 sha256 不是 64 位：{e.sha256!r}"
         int(e.sha256, 16)  # 非十六进制会在这里炸
         assert e.proof in ("upstream-digest", "local-download"), e.proof
         assert e.license, f"{e.key} 没写授权"
         assert e.url.startswith("https://") and e.filename in e.url, e.url
+    # 不给下载的那一档仍然要写体积与授权：用户要知道它多大、能不能商用
+    for e in le.engines():
+        if e.archive == "external":
+            assert e.size > 0 and e.license, e.key
+            assert not e.sha256 and not e.proof, f"{e.key} 不给下载却写了摘要"
 
 
 def test_the_hash_provenance_is_recorded_per_entry():
     """每个数都要能说清是怎么来的（上游摘要 / 本地下载核对）——这是复现的依据。"""
-    proofs = {e.key: e.proof for e in le.engines()}
+    proofs = {e.key: e.proof for e in le.engines() if e.archive != "external"}
     assert proofs, proofs
     assert set(proofs.values()) <= {"upstream-digest", "local-download"}, proofs
 
 
 def test_both_tts_models_share_one_runtime():
-    """两个配音模型都挂在同一个运行时上：别让用户把 249MB 的运行时下两遍。"""
+    """走 sherpa 那条路的配音模型都挂在同一个运行时上：别让用户把 249MB 的运行时下两遍。
+
+    「不给下载」那一档不在内：VoxCPM 是另一套技术栈（Python + PyTorch + CUDA），
+    与 sherpa-onnx 无关——把它也算进这条的话，这条规则就没法表达「谁靠谁跑」了。
+    """
     runtime = "sherpa_tts_runtime"
-    models = [e for e in le.engines() if e.kind in ("tts_model", "clone_model")]
+    models = [e for e in le.engines()
+              if e.kind in ("tts_model", "clone_model") and e.archive != "external"]
     assert len(models) >= 2, [e.key for e in models]
     assert all(e.needs == (runtime,) for e in models), [(e.key, e.needs) for e in models]
     assert le.by_key(runtime) is not None
@@ -103,6 +120,157 @@ def test_the_installer_note_points_at_the_director_flow():
     assert "拖回导演台" in vsr.note, "没说清装完之后怎么接回流程"
     assert "浏览器里" not in vsr.note, vsr.note
     assert "只盖像素" in vsr.note, "没说清它与零成本档（四种 ffmpeg 手法）的区别"
+
+
+# ================================================================ 1b. 解锁门槛（#45）
+
+
+def test_vram_is_read_the_way_the_driver_reports_it():
+    """显存的两条读法都要钉住：`nvidia-smi` 的 MiB 文本、注册表的字节数。
+
+    **WMI 的 `AdapterRAM` 不能用**：那个字段是 32 位，超过 4GB 就溢出——8GB 的卡会读成
+    4095MB。而这一档的门槛正好在往上的那一侧，判错的方向刚好是「不给你用」。
+    """
+    assert le.vram_gb_from_smi("8151\n") == 7.96
+    assert le.vram_gb_from_smi("8151 MiB\n") == 7.96          # 带单位的也认
+    assert le.vram_gb_from_smi("6144\n4096\n") == 6.0          # 多卡取最大那一块
+    assert le.vram_gb_from_smi("24000\n") == 23.44
+    assert le.vram_gb_from_smi("") == 0.0
+    assert le.vram_gb_from_smi("N/A\n") == 0.0
+    assert le.vram_gb_from_smi(None) == 0.0                    # type: ignore[arg-type]
+    assert le.vram_gb_from_bytes(8546091008) == 7.96
+    assert le.vram_gb_from_bytes(0) == 0.0
+    assert le.vram_gb_from_bytes(-1) == 0.0
+    assert le.vram_gb_from_bytes(None) == 0.0
+    assert le.vram_gb_from_bytes("不是数") == 0.0
+
+
+def test_the_tier_unlocks_only_on_a_big_enough_nvidia_card():
+    """解锁门槛的真值表：没 N 卡、读不到显存、不够大——三种都要挡住。
+
+    这条同时也把「不猜」钉住了：**读不到显存就不放行**（`vram_gb == 0`）。
+    按型号猜（「RTX xxxx 肯定是 8GB」）会在这里变成假绿，而在真机器上变成
+    「放出来一档用户装完才发现跑不动」。
+    """
+    vox = le.by_key("voxcpm")
+    assert vox is not None
+    assert vox.archive == "external" and vox.min_vram_gb == 6.0, (vox.archive, vox.min_vram_gb)
+    cases = (
+        (le.Hardware(), False),
+        (le.Hardware(nvidia=True), False),
+        (le.Hardware(gpu_names=("Intel(R) UHD Graphics",)), False),
+        (le.Hardware(nvidia=True, vram_gb=4.0), False),
+        (le.Hardware(nvidia=True, vram_gb=5.99), False),
+        (le.Hardware(nvidia=True, vram_gb=6.0), True),
+        (le.Hardware(nvidia=True, vram_gb=7.96), True),
+        (le.Hardware(nvidia=True, vram_gb=24.0), True),
+    )
+    for hw, want in cases:
+        assert le.unlocked(vox, hw) is want, (hw, want)
+    # 没有门槛的档在哪儿都解锁（门槛是例外，不是新常态）
+    for e in le.engines():
+        if e.min_vram_gb <= 0:
+            assert le.unlocked(e, le.Hardware()) is True, e.key
+
+
+def test_why_a_tier_is_hidden_is_said_out_loud():
+    """「没显示」这件事本身也要有交代——三种原因各有各的说法，而且都带上门槛数字。
+
+    沉默会变成「别人的界面里有一档、我这台没有」，那是最难解释的一种。
+    """
+    vox = le.by_key("voxcpm")
+    assert vox is not None
+    no_card = le.lock_reason(vox, le.Hardware())
+    assert "N 卡" in no_card and "6GB" in no_card, no_card
+    unknown = le.lock_reason(vox, le.Hardware(nvidia=True))
+    assert "读不到" in unknown and "6GB" in unknown, unknown
+    small = le.lock_reason(vox, le.Hardware(nvidia=True, vram_gb=4.0))
+    assert "4GB" in small and "6GB" in small, small
+
+
+def test_which_versions_fit_is_computed_not_copied():
+    """「够跑哪几档」要算出来：5GB 只够 0.5B、6GB 加上 1.5、8GB 三档都够。
+
+    数取自上游 README 的模型对照表（0.5B/1.5/2 分别约 5/6/8GB），所以门槛是 6GB 时
+    6GB 的卡刚好解锁、但只能跑前两档——这种「解锁了但只够一部分」的情形要说得出来。
+    """
+    assert le.fits_vram(le.Hardware(vram_gb=4.0)) == []
+    assert le.fits_vram(le.Hardware(vram_gb=5.0)) == ["0.5B"]
+    assert le.fits_vram(le.Hardware(vram_gb=6.0)) == ["0.5B", "1.5"]
+    assert le.fits_vram(le.Hardware(vram_gb=7.96)) == ["0.5B", "1.5"]
+    assert le.fits_vram(le.Hardware(vram_gb=8.0)) == ["0.5B", "1.5", "2"]
+
+    vox = le.by_key("voxcpm")
+    assert vox is not None
+    level, reason = le.verdict(vox, le.Hardware(nvidia=True, vram_gb=7.96))
+    assert level == le.LEVEL_MANUAL, level
+    assert "7.96GB" in reason and "0.5B" in reason and "不代装" in reason, reason
+
+    # 门槛那一栏本身也要按行下发（界面要能说「这档要 ≥6GB」）
+    row = le.row(vox, le.Hardware(nvidia=True, vram_gb=8.0), {})
+    assert row["minVramGb"] == 6.0 and row["archiveLabel"] == "要自己装（不给下载）", row
+
+
+def test_the_page_hides_that_tier_but_says_that_it_hid_it():
+    """不够门槛的档**整行不下发**，但要在 `lockedTiers` 里交代一句。
+
+    两半都要验：不够时不出现（别让用户点进去发现装不动）、够时出现且理由里带上
+    「这台机器显存多少、够跑哪几档」。
+    """
+    vox = le.by_key("voxcpm")
+    assert vox is not None
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        with _sandbox(root, [vox], hw=le.Hardware(nvidia=True, vram_gb=4.0)):
+            assert ei.rows() == [], "不够门槛的档不该出现在列表里"
+            locked = ei.locked_rows()
+            assert [r["key"] for r in locked] == ["voxcpm"], locked
+            assert locked[0]["minVramGb"] == 6.0 and "4GB" in locked[0]["reason"], locked
+        with _sandbox(root, [vox], hw=le.Hardware(nvidia=True, vram_gb=7.96)):
+            rows = ei.rows()
+            assert [r["key"] for r in rows] == ["voxcpm"], rows
+            assert ei.locked_rows() == [], "已经解锁了还说「藏了一档」"
+            row = rows[0]
+            assert row["archivePath"] == "" and row["archiveBytes"] == 0, row
+            assert row["archiveComplete"] is False and row["installed"] is False, row
+            assert "7.96GB" in row["reason"], row["reason"]
+
+
+def test_the_undownloadable_tier_has_no_package_and_deleting_it_spares_the_downloads_dir():
+    """「不给下载」那一档：服务端也要拦，而且删它**不许碰 `_downloads` 目录**。
+
+    这条不是洁癖。它的 `filename` 是空的，而空文件名拼出来的路径**正是 `_downloads`
+    目录本身**——`exists()` 为真、`st_size` 是 0，于是「体积对不对」会拿一个目录去比；
+    更糟的是删引擎时会把整个下载目录端掉，别的引擎下好的那几个包一起没。
+    """
+    vox = le.by_key("voxcpm")
+    assert vox is not None
+    with tempfile.TemporaryDirectory() as tmp:
+        with _sandbox(Path(tmp), [vox]):
+            assert ei._archive_state(vox) == {
+                "archiveBytes": 0, "archiveComplete": False, "archivePath": "",
+            }, ei._archive_state(vox)
+            assert ei.state(vox)["archivePath"] == ""
+
+            # 别的引擎下好的包：删 voxcpm 之后它必须还在
+            keep = ei.archive_dir() / "别人的包.zip"
+            keep.write_bytes(b"x" * 32)
+
+            try:
+                asyncio.run(ei.start("voxcpm"))
+                raise AssertionError("「不给下载」那一档居然能起下载")
+            except ValueError as e:
+                assert "不提供下载" in str(e), e
+            try:
+                asyncio.run(ei.verify("voxcpm"))
+                raise AssertionError("没有包却让人校验")
+            except ValueError as e:
+                assert "没有可校验" in str(e), e
+
+            out = asyncio.run(ei.remove("voxcpm"))
+            assert out["freed"] == 0, out
+            assert keep.exists(), "删这一档把整个下载目录端掉了——别人的包一起没了"
+            assert ei.archive_dir().exists(), "下载目录不该被删掉"
 
 
 def test_human_size_never_shows_raw_bytes():
@@ -861,11 +1029,11 @@ def test_the_page_and_the_api_agree_on_the_shape():
         encoding="utf-8")
     types = (BACKEND.parent / "frontend" / "src" / "types.ts").read_text(encoding="utf-8")
     for field in ("gpuText", "vulkan", "vulkanDevice", "headline", "installedServices",
-                  "installedCount", "totalSizeText", "phaseLabels"):
+                  "installedCount", "totalSizeText", "phaseLabels", "lockedTiers", "vramText"):
         assert field in types, f"前端类型里没有 {field}"
         assert field in page, f"页面上没用 {field}"
     for field in ("sizeText", "kindLabel", "levelLabel", "reason", "installed",
-                  "archiveBytes", "archiveComplete", "missingNeeds", "proof"):
+                  "archiveBytes", "archiveComplete", "missingNeeds", "proof", "minVramGb"):
         assert field in types, f"EngineItem 里没有 {field}"
         assert field in page, f"页面上没用 {field}"
 

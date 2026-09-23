@@ -37,6 +37,9 @@ def _hw_dict(hw: le.Hardware) -> dict:
         "vulkanDevice": hw.vulkan_device,
         "cores": hw.cores,
         "ramGb": hw.ram_gb,
+        # 显存是这一版的解锁门槛，所以也摆到界面上：用户看得见「为什么这档有 / 没有」
+        "vramGb": hw.vram_gb,
+        "vramText": hw.vram_text,
     }
 
 
@@ -48,13 +51,17 @@ async def _payload(db: AsyncSession, *, force_hw: bool = False) -> dict:
         "hardware": _hw_dict(hw),
         "headline": le.headline(hw, installed_count, len(rows)),
         "engines": rows,
+        # 门槛没过、这一版没显示的那几档：页面末尾要拿它说一句「还有一档」
+        "lockedTiers": ei.locked_rows(),
         "job": ei.job_snapshot(),
         "phaseLabels": ei.PHASE_LABELS,
         "installedCount": installed_count,
         "installedServices": await ei.installed_services(db),
         # 本机配音那条线：引擎装好没有 / 接成模型服务没有 / 有哪些音色
         "localTts": await ei.local_tts_status(db),
-        "totalSizeText": le.human_size(le.total_size()),
+        # 「清单合计」按**真显示出来的**那几行算：门槛没过的档既不给下载，
+        # 也不该把它那份体积记进「装在本机要占多少」里
+        "totalSizeText": le.human_size(sum(r["size"] for r in rows)),
     }
 
 

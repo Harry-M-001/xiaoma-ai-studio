@@ -315,6 +315,10 @@ export interface EngineHardware {
   vulkanDevice: string;
   cores: number;
   ramGb: number;
+  /** 独显显存（GB）。0 = 读不到（不猜，见后端 `unlocked`）——它也是解锁门槛的依据 */
+  vramGb: number;
+  /** 显存说成人话（读不到就是空串） */
+  vramText: string;
 }
 
 export interface EngineJob {
@@ -343,8 +347,10 @@ export interface EngineItem {
   archive: string;
   archiveLabel: string;
   marker: string;
-  /** 清单里的数是怎么来的：upstream-digest / local-download */
+  /** 清单里的数是怎么来的：upstream-digest / local-download（「不给下载」那一档是空串） */
   proof: string;
+  /** 解锁门槛（GB）：>0 的档只在够门槛的机器上下发 */
+  minVramGb: number;
   needs: string[];
   missingNeeds: string[];
   needsLabel: string;
@@ -390,10 +396,28 @@ export interface EngineLocalTts {
   named: boolean;
 }
 
+/**
+ * 门槛没过、这一版**没显示**的一档（`#45`）。
+ *
+ * 为什么要回给界面：不够门槛的档是整行不下发的，于是用户会看到「别人的界面里有一档、
+ * 我这台没有」。页面末尾拿这条说一句「还有一档：要 ≥6GB 的 N 卡，这台机器显存 4GB」——
+ * 隐藏这件事本身也得有交代。
+ */
+export interface EngineLockedTier {
+  key: string;
+  label: string;
+  why: string;
+  minVramGb: number;
+  /** 为什么没显示（带上门槛与这台机器的实数） */
+  reason: string;
+}
+
 export interface EnginePageData {
   hardware: EngineHardware;
   headline: string;
   engines: EngineItem[];
+  /** 被硬件门槛拦下的那几档（够门槛时是空数组） */
+  lockedTiers: EngineLockedTier[];
   job: EngineJob | null;
   phaseLabels: Record<string, string>;
   installedCount: number;

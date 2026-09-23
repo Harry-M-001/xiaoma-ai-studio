@@ -817,6 +817,17 @@ input, textarea, select { font-family: inherit; }
 .eng-note-ok { color: #16a34a; opacity: 1; }
 /* 安装包的路径是一长串（带用户名时更长），要能断行，不能把这一条撑开 */
 .eng-path { font-family: var(--font-mono); font-size: var(--font-size-2xs); overflow-wrap: anywhere; }
+/* 「这一档没显示」的交代（#45）：不够门槛的档整行不下发，但要说一句它存在——
+   否则就成了「别人的界面里有、我这台没有」。虚线边是故意的：它不是一个能装的格子，
+   而是一个「这里本来有位置、但这台机器不够」的说明。 */
+.eng-locked {
+  display: flex; align-items: flex-start; gap: var(--space-1-5);
+  padding: var(--space-2-5) var(--space-3);
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs); line-height: var(--leading-normal); color: var(--text-3);
+}
+.eng-locked svg { flex: 0 0 auto; margin-top: 2px; }
+.eng-locked b { font-weight: 600; color: var(--text-2); }
 .eng-meta {
   display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-3);
   font-size: var(--font-size-2xs); color: var(--text-3); align-items: center;

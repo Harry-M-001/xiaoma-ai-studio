@@ -3,6 +3,7 @@ import {
   Cpu,
   Download,
   ExternalLink,
+  Lock,
   Mic,
   Play,
   RefreshCw,
@@ -130,6 +131,8 @@ export default function EnginesPage({ onNavigate }: { onNavigate?: (route: strin
           </span>
           <span className="eng-chip">CPU：{hw.cores || "?"} 线程</span>
           <span className="eng-chip">内存：{hw.ramGb ? `${hw.ramGb} GB` : "?"}</span>
+          {/* 显存是「解锁门槛」的依据，所以读到了就摆出来——用户看得见「为什么这档有 / 没有」 */}
+          {hw.vramText && <span className="eng-chip">显存：{hw.vramText}</span>}
           <span className="eng-chip">已装 {data.installedCount} / {data.engines.length}</span>
         </div>
         <div className="eng-headline">{data.headline}</div>
@@ -187,6 +190,18 @@ export default function EnginesPage({ onNavigate }: { onNavigate?: (route: strin
           />
         ))}
       </div>
+
+      {/* 门槛没过、这一版**没显示**的那几档。为什么还要说一句：不说就是
+          「别人的界面里有一档、我这台没有」——**隐藏本身也得有交代**，沉默最难解释 */}
+      {data.lockedTiers.map((t) => (
+        <div className="eng-locked" key={t.key}>
+          <Lock size={13} />
+          <span>
+            还有一档按硬件门槛显示：<b>{t.label}</b>——{t.reason}。
+            这一档我们不提供下载（要自己装一整套运行环境），所以不够门槛时它连位置都不占。
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -351,6 +366,9 @@ function EngineCard({
             <b>{item.label}</b>
             <span className="eng-chip tiny">{item.kindLabel}</span>
             <span className="eng-chip tiny">{item.sizeText}</span>
+            {item.minVramGb > 0 && (
+              <span className="eng-chip tiny">要 ≥{item.minVramGb} GB 显存</span>
+            )}
             <span className={"eng-chip tiny " + (item.level === "ok" ? "ok" : item.level === "no" ? "warn" : "")}>
               {item.levelLabel}
             </span>
@@ -372,9 +390,13 @@ function EngineCard({
           <div className="eng-meta">
             <span>授权：{item.license}</span>
             <span>包：{item.archiveLabel}</span>
-            <span className="eng-proof">
-              {item.proof === "local-download" ? "sha256：本地下载核对" : "sha256：上游摘要"}
-            </span>
+            {/* 「不给下载」那一档没有包、也就没有摘要：这时写「sha256：上游摘要」是句假话。
+                界面宁可少一项，也不许把没有的东西说成有 */}
+            {item.proof && (
+              <span className="eng-proof">
+                {item.proof === "local-download" ? "sha256：本地下载核对" : "sha256：上游摘要"}
+              </span>
+            )}
             <a href={item.homepage} target="_blank" rel="noreferrer">
               项目主页 <ExternalLink size={11} />
             </a>
@@ -385,7 +407,13 @@ function EngineCard({
         </div>
 
         <div className="eng-actions">
-          {item.downloading ? (
+          {item.archive === "external" ? (
+            /* 「要自己装」那一档没有下载可点：它的装法在它自己的文档里，
+               我们只负责把地址给对（`homepage`）并说清要自备什么 */
+            <a className="btn btn-ghost" href={item.homepage} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} /> 官方安装说明
+            </a>
+          ) : item.downloading ? (
             <>
               <button className="btn btn-ghost" disabled={busy} onClick={onCancel}>
                 <X size={14} /> 停止

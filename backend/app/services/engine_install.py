@@ -164,7 +164,7 @@ def _is_virtual_adapter(name: str) -> bool:
 
 def _nvidia_gpus() -> tuple[str, ...]:
     """兜底：`nvidia-smi -L`。没装驱动或没这个命令时返回空。"""
-    exe = shutil.which("nvidia-smi")
+    exe = _smi_binary()
     if not exe:
         return ()
     try:
@@ -180,6 +180,92 @@ def _nvidia_gpus() -> tuple[str, ...]:
         if name:
             out.append(name)
     return tuple(out)
+
+
+def _looks_nvidia(name: str) -> bool:
+    """名字看着像 N 卡就算（注册表里的 `DriverDesc` 与 `nvidia-smi -L` 的名字格式不同）。"""
+    low = str(name or "").lower()
+    return "nvidia" in low or "geforce" in low or "rtx" in low
+
+
+def _smi_binary() -> str:
+    """`nvidia-smi` 在哪。
+
+    **不能只靠 PATH**：实测这台机器的 PATH 里没有 System32（某些环境就是这样），
+    而驱动确实把 nvidia-smi 装在 `C:\\Windows\\System32\\` 下了。只查 PATH 的表现是
+    「明明有 N 卡，却读不到显存」——而显存正是这一版的解锁门槛。
+    """
+    found = shutil.which("nvidia-smi")
+    if found:
+        return found
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    program_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+    for path in (
+        Path(root) / "System32" / "nvidia-smi.exe",
+        Path(program_files) / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe",
+    ):
+        if path.exists():
+            return str(path)
+    return ""
+
+
+def _registry_vram_bytes() -> int:
+    """注册表里的显存字节数：**只认 N 卡**那几个适配器的最大值。
+
+    键值是 `HardwareInformation.qwMemorySize`（QWORD）。**不能用 WMI 的 `AdapterRAM`**：
+    那个字段是 32 位，超过 4GB 就溢出——8GB 的卡会读成 4095MB，正好卡在这类门槛上，
+    而且判错的方向刚好是「不给你用」。
+    """
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except ImportError:  # 非 Windows
+        return 0
+    base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    best = 0
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as root:
+            i = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(root, i)
+                except OSError:
+                    break
+                i += 1
+                if not sub.isdigit():
+                    continue
+                try:
+                    with winreg.OpenKey(root, sub) as k:
+                        desc = str(winreg.QueryValueEx(k, "DriverDesc")[0] or "")
+                        size = int(winreg.QueryValueEx(k, "HardwareInformation.qwMemorySize")[0])
+                except (OSError, ValueError, TypeError):
+                    continue
+                if _looks_nvidia(desc):
+                    best = max(best, size)
+    except OSError:
+        return 0
+    return best
+
+
+def _vram_gb() -> float:
+    """独显显存（GB）。**读不到就是 0，不按型号猜**。
+
+    两条路都要：`nvidia-smi` 是驱动自己报的（0.07 秒，最准），注册表那条不需要任何工具、
+    但要求驱动把 `qwMemorySize` 写进去（某些驱动版本不写）。先问 smi，读不到再看注册表。
+    """
+    exe = _smi_binary()
+    if exe:
+        try:
+            r = subprocess.run(
+                [exe, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=8,
+            )
+            if r.returncode == 0:
+                got = le.vram_gb_from_smi(r.stdout)
+                if got:
+                    return got
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return le.vram_gb_from_bytes(_registry_vram_bytes())
 
 
 def _vulkaninfo_device() -> str:
@@ -287,12 +373,12 @@ def hardware(force: bool = False) -> le.Hardware:
     device = _vulkaninfo_device()
     hw = le.Hardware(
         gpu_names=gpus,
-        nvidia=any("nvidia" in g.lower() or "geforce" in g.lower() or "rtx" in g.lower()
-                   for g in gpus) or bool(_nvidia_gpus()),
+        nvidia=any(_looks_nvidia(g) for g in gpus) or bool(_nvidia_gpus()),
         vulkan=_vulkan_available(),
         vulkan_device=device,
         cores=os.cpu_count() or 0,
         ram_gb=_ram_gb(),
+        vram_gb=_vram_gb(),
     )
     _hw_cache = (time.monotonic(), hw)
     return hw
@@ -307,6 +393,12 @@ def installed(engine: le.Engine) -> bool:
 
 
 def _archive_state(engine: le.Engine) -> dict:
+    # 「不给下载」那一档没有包可谈：它的 `filename` 是空的，而空文件名会拼出
+    # **`_downloads` 这个目录本身**——`exists()` 为真、`st_size` 是 0，
+    # 于是「体积对不对」会拿一个目录去比 size，删引擎时更会把整个下载目录端掉。
+    # 所以先短路：没有包名的档，就当它没有包。
+    if not engine.filename:
+        return {"archiveBytes": 0, "archiveComplete": False, "archivePath": ""}
     path = archive_path(engine)
     if not path.exists():
         return {"archiveBytes": 0, "archiveComplete": False, "archivePath": str(path)}
@@ -333,10 +425,13 @@ def state(engine: le.Engine) -> dict:
 
 
 def rows() -> list[dict]:
+    """界面上要显示的这几行。**不够门槛的档整行不下发**（理由见 `le.unlocked`）。"""
     hw = hardware()
     keys = {e.key for e in le.engines() if installed(e)}
     out = []
     for e in le.engines():
+        if not le.unlocked(e, hw):
+            continue
         item = le.row(e, hw, state(e))
         item["missingNeeds"] = le.missing_needs(e, keys)
         item["needsLabel"] = "、".join(
@@ -344,6 +439,27 @@ def rows() -> list[dict]:
         )
         out.append(item)
     return out
+
+
+def locked_rows() -> list[dict]:
+    """这一版**没显示**的档（被硬件门槛拦下的）。
+
+    为什么要回报、而不是默默滤掉：用户会看到「别人的界面上有一档、我这台没有」。
+    页面末尾拿这几行说一句「还有一档：要 ≥6GB 的 N 卡，这台机器显存 X」——
+    **隐藏本身也要有交代**，沉默才是最难解释的那种。
+    """
+    hw = hardware()
+    return [
+        {
+            "key": e.key,
+            "label": e.label,
+            "why": e.why,
+            "minVramGb": e.min_vram_gb,
+            "reason": le.lock_reason(e, hw),
+        }
+        for e in le.engines()
+        if not le.unlocked(e, hw)
+    ]
 
 
 def job_snapshot() -> dict | None:
@@ -664,6 +780,13 @@ async def start(key: str) -> dict:
     engine = le.by_key(key)
     if engine is None:
         raise ValueError(f"没有这个引擎：{key}")
+    if engine.archive == "external":
+        # 界面不给按钮只是「顺手」，**判据必须在服务端**：放过去的话，一个空的
+        # `filename` 会让下载链把 `_downloads` 目录当成目标文件。
+        raise ValueError(
+            f"「{engine.label}」我们不提供下载：它要自己装 Python + PyTorch + CUDA，"
+            "装法与用法看它项目主页上的说明"
+        )
     if _job and _job.get("phase") in ("downloading", "verifying", "unpacking"):
         raise ValueError(f"已经有「{_job.get('label')}」在下载了，等它跑完或先停掉它")
     if installed(engine):
@@ -739,7 +862,10 @@ async def remove(key: str) -> dict:
             "downloading", "verifying", "unpacking"):
         raise ValueError("它正在下载，先停掉再删")
     freed = 0
-    for path in (install_dir(key), archive_path(engine)):
+    # 没有包名的档（「不给下载」那一路）不碰 `_downloads`——那个空文件名拼出来的
+    # 是**下载目录本身**，删它会顺手把别的引擎下好的包一起端掉
+    targets = [install_dir(key)] + ([archive_path(engine)] if engine.filename else [])
+    for path in targets:
         if not path.exists():
             continue
         freed += await asyncio.to_thread(_size_of, path)
@@ -752,6 +878,8 @@ async def verify(key: str) -> dict:
     engine = le.by_key(key)
     if engine is None:
         raise ValueError(f"没有这个引擎：{key}")
+    if not engine.filename:
+        raise ValueError(f"「{engine.label}」我们不提供包，没有可校验的东西")
     path = archive_path(engine)
     if not path.exists():
         raise ValueError("还没有下载过这个引擎")

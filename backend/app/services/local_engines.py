@@ -64,6 +64,10 @@ ARCHIVE_LABELS = {
     "tar.bz2": "tar.bz2",
     "zip": "zip",
     "installer": "安装程序（不代装）",
+    # 我们不发这个包：只在门槛够的机器上给个官方地址 + 说清要自己装什么。
+    # 与 installer 的区别是**连下载都不给**——权重单独下下来也跑不起来，
+    # 它要的是一整套 Python + PyTorch + CUDA 环境，装法在它自己的文档里。
+    "external": "要自己装（不给下载）",
 }
 
 
@@ -96,6 +100,8 @@ class Engine:
     gpu: str = "any"
     # 依赖的其它引擎（先装运行时再装模型）
     needs: tuple[str, ...] = field(default_factory=tuple)
+    # 解锁门槛：显存（GB）。>0 表示「这台机器够门槛才显示这一档」（见 `unlocked`）
+    min_vram_gb: float = 0.0
 
     @property
     def size_text(self) -> str:
@@ -296,7 +302,37 @@ ENGINES: tuple[Engine, ...] = (
         proof="upstream-digest",
         gpu="cpu",
     ),
+    Engine(
+        key="voxcpm",
+        label="VoxCPM 音色档（要自己装环境）",
+        kind="tts_model",
+        # **不给下载**（`archive="external"`）：我们不提供包，所以没有文件名与摘要——
+        # 单独下一份权重也没用，它要的是一整套 Python + PyTorch + CUDA 环境。
+        filename="",
+        url="https://github.com/OpenBMB/VoxCPM",
+        # 最小那一版的两个权重文件合计（pytorch_model.bin 1304698606 + audiovae.pth 301494192，
+        # 取自 HuggingFace 仓库的文件清单）；1.5 与 2 都比它大。
+        size=1606192798,
+        sha256="",
+        license="Apache-2.0",
+        homepage="https://github.com/OpenBMB/VoxCPM",
+        archive="external",
+        marker="",
+        why="本机配音的最高一档：语气与音质明显比 Kokoro 那一档自然，3 秒参考音频就能"
+        "克隆一个音色，中英都能念。",
+        # 界面是纯文本（React 不渲染 markdown），所以这里一个星号、反引号都不能写
+        note="要自己装环境（官方给的是 pip install voxcpm）：Python 3.10–3.12 + "
+        "PyTorch 2.5 以上 + CUDA 12 以上。三档按显存挑：0.5B 约 5GB、1.5 约 6GB、"
+        "2 约 8GB（分别是 16k / 44.1k / 48kHz）。权重在 HuggingFace 与 ModelScope，"
+        "我们不代下也不代跑。装好之后用 vLLM-Omni 起一个 OpenAI 兼容的服务"
+        "（vllm serve openbmb/VoxCPM2 --omni --port 8000），再到「模型服务」页按 "
+        "OpenAI 兼容加一条、地址填 http://127.0.0.1:8000/v1，配音页就能选它。",
+        proof="",
+        gpu="cpu",
+        min_vram_gb=6.0,
+    ),
 )
+
 
 _INDEX = {e.key: e for e in ENGINES}
 
@@ -339,6 +375,8 @@ class Hardware:
     vulkan_device: str = ""
     cores: int = 0
     ram_gb: float = 0.0
+    #: 独显显存（GB）。0 = 读不到——**读不到就当没有**，不按型号猜（见 `unlocked`）
+    vram_gb: float = 0.0
 
     @property
     def has_gpu(self) -> bool:
@@ -347,6 +385,81 @@ class Hardware:
     @property
     def gpu_text(self) -> str:
         return " + ".join(self.gpu_names) if self.gpu_names else "没检测到独立显卡"
+
+    @property
+    def vram_text(self) -> str:
+        return f"{self.vram_gb:g} GB" if self.vram_gb > 0 else ""
+
+
+def vram_gb_from_bytes(num: object) -> float:
+    """字节 → GB（两位小数）。读不到、或者数明显不对（0 / 负数）就回 0。
+
+    注册表里那个 `HardwareInformation.qwMemorySize` 是 **QWORD**，所以 8GB 的卡能读到
+    真实的 8546091008，而 WMI 的 `AdapterRAM` 是 32 位、超过 4GB 就溢出成 4095MB 那种假数——
+    那条路不能用（会把 8GB 的卡判成 4GB，正好卡在门槛上）。
+    """
+    try:
+        value = float(num or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if value <= 0:
+        return 0.0
+    return round(value / (1024 ** 3), 2)
+
+
+def vram_gb_from_smi(text: str) -> float:
+    """`nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits` 的输出 → GB。
+
+    多卡时取**最大**那一块：门槛问的是「这台机器上有没有一块够用的卡」。
+    单位按 MiB 算（smi 报的就是 MiB）；`nounits` 时输出只有数字，但也容忍带单位。
+    """
+    best = 0.0
+    for line in str(text or "").splitlines():
+        raw = line.split(",")[0].strip().split()[0] if line.strip() else ""
+        try:
+            mib = float(raw)
+        except ValueError:
+            continue
+        if mib > best:
+            best = mib
+    if best <= 0:
+        return 0.0
+    return round(best / 1024, 2)
+
+
+def unlocked(engine: Engine, hw: Hardware) -> bool:
+    """这一档在这台机器上**该不该出现**（`min_vram_gb` 是解锁门槛）。
+
+    为什么不够门槛的是「整行不显示」而不是「灰掉」：灰掉会让人以为「差一点就能用」，
+    而这一档差的不是一点——它要用户自己装 Python + PyTorch + CUDA，显存不够的机器上
+    连位置都不该占。**但「没显示」这件事本身要在页面上说一句**（见 `lock_reason`），
+    否则就成了「别人的界面里有、我这台没有」，那种沉默比灰掉更难解释。
+    """
+    if engine.min_vram_gb <= 0:
+        return True
+    if not hw.nvidia or hw.vram_gb <= 0:
+        return False
+    return hw.vram_gb + 1e-9 >= engine.min_vram_gb
+
+
+def lock_reason(engine: Engine, hw: Hardware) -> str:
+    """为什么这一档没显示——一句能直接放在界面上的话。"""
+    need = f"{engine.min_vram_gb:g}GB"
+    if not hw.nvidia:
+        return f"要 N 卡（它只走 CUDA），这台机器上没检测到；门槛是 ≥{need} 显存"
+    if hw.vram_gb <= 0:
+        return f"读不到这台机器的显存（门槛是 ≥{need}），所以先不显示"
+    return f"这台机器显存 {hw.vram_gb:g}GB，够不上它的门槛 ≥{need}"
+
+
+# VoxCPM 三个版本各自要多少显存（取自上游 README 的模型对照表，2026-09 核对）。
+# 写在这里是为了让「这台机器够跑哪几档」是个**算出来的**结论，而不是让界面抄一份表。
+VOXCPM_VERSIONS: tuple[tuple[str, float], ...] = (("0.5B", 5.0), ("1.5", 6.0), ("2", 8.0))
+
+
+def fits_vram(hw: Hardware) -> list[str]:
+    """这台机器够跑上面哪几档（不够一个都不回）。"""
+    return [name for name, need in VOXCPM_VERSIONS if hw.vram_gb + 1e-9 >= need]
 
 
 def verdict(engine: Engine, hw: Hardware) -> tuple[str, str]:
@@ -360,6 +473,19 @@ def verdict(engine: Engine, hw: Hardware) -> tuple[str, str]:
             LEVEL_MANUAL,
             "它是个独立安装程序（自带一整套运行环境），我们不代装、也不代跑；"
             "真要无痕去字幕时再下它。",
+        )
+
+    if engine.archive == "external":
+        # 能被问到这里，说明门槛已经过了（不够的整行被 `unlocked` 拦掉了）。
+        # 这一档的关键从来不是「跑不跑得动」，而是「要你自己做三件事」：
+        # 装环境、起服务、接回「模型服务」页——所以结论里直接把「够跑哪几档」算给它。
+        which = "、".join(fits_vram(hw))
+        head = f"这台机器显存 {hw.vram_gb:g}GB" if hw.vram_gb > 0 else "这台机器够它的门槛"
+        fit = f"，够跑它的 {which} 那一档" if which else ""
+        return (
+            LEVEL_MANUAL,
+            f"{head}{fit}——但它要你自己装 Python + PyTorch + CUDA，我们不代装、也不代跑；"
+            "装好之后按下面的办法接到「模型服务」页，配音页就能选它。",
         )
 
     if engine.gpu == "vulkan":
@@ -411,6 +537,8 @@ def row(engine: Engine, hw: Hardware, state: dict) -> dict:
         "archiveLabel": engine.archive_label,
         "marker": engine.marker,
         "proof": engine.proof,
+        # 解锁门槛（GB）：>0 的档只在够门槛的机器上下发，界面据此也能把门槛说给用户听
+        "minVramGb": engine.min_vram_gb,
         "needs": list(engine.needs),
         "level": level,
         "levelLabel": LEVEL_LABELS.get(level, level),
@@ -464,31 +592,50 @@ def assert_consistent() -> None:
     for e in ENGINES:
         assert e.key and e.key not in seen_key, f"引擎 key 重复：{e.key}"
         seen_key.add(e.key)
-        assert e.filename and e.filename not in seen_file, f"文件名重复：{e.filename}"
-        seen_file.add(e.filename)
         assert e.label and e.why and e.note, f"{e.key} 少了给人看的说明"
         assert e.kind in KIND_LABELS, f"{e.key} 的类别不认识：{e.kind}"
         assert e.size > 0, f"{e.key} 的体积没写"
-        assert len(e.sha256) == 64 and all(c in "0123456789abcdef" for c in e.sha256), (
-            f"{e.key} 的 sha256 不是 64 位十六进制（现在是 {e.sha256!r}）——"
-            "这个数是我们校验用户下载的唯一依据，不许含糊"
-        )
-        assert e.proof in ("upstream-digest", "local-download"), (
-            f"{e.key} 的 proof 要写清这个数是怎么来的"
-        )
-        assert e.url.startswith("https://") and e.filename in e.url, (
-            f"{e.key} 的下载地址与文件名对不上：{e.url}"
-        )
         assert e.archive in ARCHIVE_LABELS, f"{e.key} 的包类型不认识：{e.archive}"
         assert e.gpu in ("any", "cpu", "vulkan"), f"{e.key} 的 gpu 档不认识：{e.gpu}"
         assert e.license, f"{e.key} 没写授权"
+        assert e.min_vram_gb >= 0, f"{e.key} 的显存门槛不该是负数"
+
+        if e.archive == "external":
+            # 「不给下载」那一档：我们不提供包，所以「文件名 / 下载地址 / 挂载摘要」这三条
+            # 都不适用。**该守的换成另一组**——地址仍在、主页仍在、而且必须写清门槛：
+            # 它是解锁式的档，没有门槛就变成人人可见却人人装不动的广告。
+            assert not e.filename, f"{e.key} 不给下载，就不该有包名"
+            assert not e.sha256, f"{e.key} 不给下载，就不该有 sha256——写了会让人以为我们会校验"
+            assert not e.proof, f"{e.key} 不给下载，就没有「这个数怎么来的」可写"
+            assert e.marker == "", f"{e.key} 我们不看它的目录，不该有判据"
+            assert e.min_vram_gb > 0, f"{e.key} 是解锁式的档，必须写出门槛"
+            assert e.url.startswith("https://") and e.homepage.startswith("https://"), (
+                f"{e.key} 要给出官方地址"
+            )
+            assert "自己装" in e.note or "自装" in e.note, (
+                f"{e.key} 的说明里要写清「要自己装」——用户会以为下了就能跑"
+            )
+        else:
+            assert e.filename and e.filename not in seen_file, f"文件名重复：{e.filename}"
+            seen_file.add(e.filename)
+            assert len(e.sha256) == 64 and all(c in "0123456789abcdef" for c in e.sha256), (
+                f"{e.key} 的 sha256 不是 64 位十六进制（现在是 {e.sha256!r}）——"
+                "这个数是我们校验用户下载的唯一依据，不许含糊"
+            )
+            assert e.proof in ("upstream-digest", "local-download"), (
+                f"{e.key} 的 proof 要写清这个数是怎么来的"
+            )
+            assert e.url.startswith("https://") and e.filename in e.url, (
+                f"{e.key} 的下载地址与文件名对不上：{e.url}"
+            )
+            if e.archive == "installer":
+                assert e.marker == "", f"{e.key} 是安装程序，不该有 marker（我们不看它的目录）"
+            else:
+                assert e.marker, f"{e.key} 没写装好之后的标志文件"
+
         for need in e.needs:
             assert need in _INDEX, f"{e.key} 依赖了一个不存在的引擎：{need}"
             assert need != e.key, f"{e.key} 依赖自己"
-        if e.archive == "installer":
-            assert e.marker == "", f"{e.key} 是安装程序，不该有 marker（我们不看它的目录）"
-        else:
-            assert e.marker, f"{e.key} 没写装好之后的标志文件"
 
 
 # --------------------------------------------------------------------------

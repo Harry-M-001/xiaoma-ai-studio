@@ -74,6 +74,59 @@ def test_the_engine_row_type_matches_the_backend():
         assert field in types, f"类型里没有 {field}"
 
 
+# ------------------------------------------------- 解锁门槛（#45）
+
+
+def test_the_undownloadable_tier_gets_a_link_instead_of_a_download_button():
+    """「不给下载」那一档（`archive === "external"`）不能出现下载按钮。
+
+    后端也会拦（`start()` 直接拒绝），但界面是第一道：给一个点不出东西的按钮，
+    用户只会以为程序坏了。这里换成官方安装说明的外链——那一档的用法在它自己的文档里。
+    """
+    src = _text(PAGE)
+    assert 'item.archive === "external" ?' in src, "没有按「不给下载」分支出不同的动作"
+    assert "官方安装说明" in src, "没给出官方安装说明的入口"
+    assert "item.homepage" in src, "外链没指向项目主页"
+    # 下载按钮必须在这个分支**之外**：
+    start = src.index('item.archive === "external" ?')
+    link_branch = src[start : src.index(") : item.downloading ?", start)]
+    assert "onDownload" not in link_branch, "「不给下载」那一档还挂着下载动作"
+
+
+def test_the_page_never_claims_a_hash_we_do_not_have():
+    """没有包就没有摘要：这时不许写「sha256：上游摘要」。
+
+    那一档 `proof` 是空串，而原来的写法是「不是 local-download 就写上游摘要」——
+    等于给一个不存在的摘要编了个来源。
+    """
+    src = _text(PAGE)
+    assert "{item.proof && (" in src, "没按「有没有摘要」判断（空 proof 会渲染成上游摘要）"
+
+
+def test_the_hardware_row_shows_the_vram_and_the_gate():
+    """显存要摆出来：它既是硬件事实，也是这一档解锁门槛的依据。"""
+    src = _text(PAGE)
+    assert "hw.vramText" in src, "硬件那一行没有显存"
+    assert "item.minVramGb" in src, "卡片上没有把门槛写出来"
+
+
+def test_a_hidden_tier_is_still_accounted_for():
+    """没显示的档要在页尾交代一句。
+
+    不够门槛的档是整行不下发的（后端 `locked_rows` 与 `rows` 互补）。不说的话，
+    用户会看到「别人的界面里有一档、我这台没有」——**沉默最难解释**。
+    """
+    src = _text(PAGE)
+    assert "data.lockedTiers.map(" in src, "没渲染「被门槛拦下的那几档」"
+    assert "还有一档按硬件门槛显示" in src, "没说清「这档没显示」是怎么回事"
+    assert "t.reason" in src, "没带上「为什么没显示」"
+    types = _text(TYPES)
+    assert "EngineLockedTier" in types and "lockedTiers" in types, "类型里没有 lockedTiers"
+    for field in ("minVramGb", "vramText", "vramGb"):
+        assert field in types, f"类型里没有 {field}"
+    assert ".eng-locked" in _text(STYLES), "缺「没显示」那一条的样式"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0
