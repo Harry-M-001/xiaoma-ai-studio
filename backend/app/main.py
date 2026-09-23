@@ -30,6 +30,7 @@ from app.routers import (
     comfy,
     director,
     engines,
+    interpolate,
     generation,
     logs,
     meta,
@@ -113,6 +114,7 @@ app.include_router(director.router)
 app.include_router(subtitles.router)
 app.include_router(engines.router)
 app.include_router(upscale.router)
+app.include_router(interpolate.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(share.router)

@@ -426,47 +426,6 @@ def _unpack(engine: le.Engine, archive: Path, job: dict) -> None:
         raise
 
 
-async def _download(engine: le.Engine, job: dict) -> Path:
-    """下载到 `_downloads/<文件名>`，能续就续。返回完整文件的路径。"""
-    path = archive_path(engine)
-    have = path.stat().st_size if path.exists() else 0
-    if have > engine.size:
-        # 比清单大：上一版中途改过体积或上次写坏了，重来
-        path.unlink(missing_ok=True)
-        have = 0
-    if have == engine.size:
-        job["done"] = have
-        return path
-
-    job["phase"] = "downloading"
-    job["done"] = have
-    headers = {"Range": f"bytes={have}-"} if have else {}
-    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, trust_env=False) as c:
-        async with c.stream("GET", engine.url, headers=headers) as r:
-            if r.status_code == 416:
-                # 「起点在末尾之后」= 本地这份已经完整（探针里正是这里搞错过）
-                job["done"] = path.stat().st_size
-                return path
-            r.raise_for_status()
-            if have and r.status_code != 206:
-                have = 0
-                job["done"] = 0
-            mode = "ab" if have else "wb"
-            last_note = 0.0
-            with path.open(mode) as f:
-                async for chunk in r.aiter_bytes(_CHUNK):
-                    if job.get("cancelled"):
-                        raise asyncio.CancelledError()
-                    f.write(chunk)
-                    job["done"] = job.get("done", 0) + len(chunk)
-                    now = time.monotonic()
-                    if now - last_note > 5:
-                        last_note = now
-                        logger.info("%s 下载中：%.1f / %.1f MB",
-                                    engine.key, job["done"] / 1048576, engine.size / 1048576)
-    return path
-
-
 class _RouteTooSlow(RuntimeError):
     """这条路「活着但在爬」——换下一条，不是失败。"""
 
@@ -533,6 +492,9 @@ async def _download(engine: le.Engine, job: dict, *, use_env_proxy: bool) -> Pat
     attempt_start = have
     started = time.monotonic()
     slow_reason = ""
+    # 服务端**没按 Range** 返回时置位：有些代理会把整包塞给一个带 Range 的请求，
+    # 于是本地那份成了「前缀 + 另一个整包」，永远过不了校验
+    overflowed = False
     headers = {"Range": f"bytes={have}-"} if have else {}
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True,
                                  trust_env=use_env_proxy) as c:
@@ -555,6 +517,13 @@ async def _download(engine: le.Engine, job: dict, *, use_env_proxy: bool) -> Pat
                         raise asyncio.CancelledError()
                     f.write(chunk)
                     job["done"] = job.get("done", 0) + len(chunk)
+                    if job["done"] > engine.size:
+                        # 比清单还大：说明服务端没有只给缺的那一段，而是又塞了一个整包
+                        # （实测：走代理续传 rife 那个 411MB 的包时，本地文件变成了 556MB）。
+                        # 本地这份已经废了。**当场作废**远好过让用户对着「校验和不一致」
+                        # 反复重试——那种情况下每点一次都要重下一整包，而且看不出为什么。
+                        overflowed = True
+                        break
                     now = time.monotonic()
                     # 「活着但在爬」：大文件的前几 MB 超时就换下一条路（见文件头的常量注释）。
                     # **完全没有数据**那种卡住不在这里管——httpx 的读超时（60 秒）会兜住；
@@ -575,6 +544,13 @@ async def _download(engine: le.Engine, job: dict, *, use_env_proxy: bool) -> Pat
                         last_note = now
                         logger.info("%s 下载中：%.1f / %.1f MB",
                                     engine.key, job["done"] / 1048576, engine.size / 1048576)
+    if overflowed:
+        path.unlink(missing_ok=True)
+        job["done"] = 0
+        raise ValueError(
+            "这个下载源没有按「从断点续传」给数据，把整包又塞了一遍，"
+            "本地那份已经作废并删掉了。换一条路重新下"
+        )
     if slow_reason:
         raise _RouteTooSlow(slow_reason)
     return path

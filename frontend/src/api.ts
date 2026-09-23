@@ -13,6 +13,8 @@ import type {
   EngineJob,
   EngineLocalTts,
   EnginePageData,
+  InterpolateOptions,
+  InterpolateRequest,
   LogExport,
   LogsStatus,
   ModalityMeta,
@@ -383,6 +385,19 @@ export const api = {
    */
   upscaleComfy: (body: UpscaleRequest) =>
     request<Task>("/api/upscale/comfy", { method: "POST", body: json(body) }),
+  // ---- 补帧（v1.1.32）----
+  /**
+   * 一次拿全：这段视频能不能补、有哪些模型、每款能补到哪些帧率、用哪块显卡。
+   *
+   * **能补到多少帧跟着模型走**（只有 v4 系能自定义帧数），所以这份清单必须由后端给：
+   * 前端自己列一列「常见帧率」，选到只做 2 倍的模型就会是一个必然被拒的组合。
+   * 只对视频有意义（图片会 400——图片该用「放大」）。
+   */
+  interpolateOptions: (assetId: number) =>
+    request<InterpolateOptions>(`/api/interpolate/options?asset_id=${assetId}`),
+  /** 补帧：**异步**（逐帧过一遍，几分钟起），返回任务；进度走既有的 getTask */
+  interpolateVideo: (body: InterpolateRequest) =>
+    request<Task>("/api/interpolate/video", { method: "POST", body: json(body) }),
   // ---- 项目 ----
   listProjects: () =>
     request<Project[]>("/api/projects").then((r) => (Array.isArray(r) ? r : [])),

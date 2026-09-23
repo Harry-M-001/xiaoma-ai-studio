@@ -176,8 +176,15 @@ class TaskRunner:
     def start_upscale(self, task_id: int) -> bool:
         return self._spawn(task_id, lambda: self._run_upscale(task_id))
 
+    def start_interpolate(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_interpolate(task_id))
+
     def upscale_busy(self) -> int:
-        """正在跑的那条超分任务 id（0 = 没有）。给接口层做「同一时间只允许一条」用。"""
+        """正在跑的那条本机重活（超分或补帧）的任务 id（0 = 没有）。
+
+        给接口层做「同一时间只允许一条」用。**两者共用这一个槽**：
+        它们都吃本机 GPU，一起跑只会互相拖慢。
+        """
         return int(_upscale_current.get("task_id") or 0)
 
     def start(self, kind: str, task_id: int) -> bool:
@@ -190,6 +197,8 @@ class TaskRunner:
             return self.start_text(task_id)
         if kind == "upscale":
             return self.start_upscale(task_id)
+        if kind == "interpolate":
+            return self.start_interpolate(task_id)
         return self.start_image(task_id)
 
     async def start_or_fail(self, kind: str, task_id: int) -> bool:
@@ -974,6 +983,101 @@ class TaskRunner:
             finally:
                 _upscale_current["task_id"] = 0
 
+    async def _run_interpolate(self, task_id: int) -> None:
+        """本机补帧一段视频。与超分共用同一把锁（都吃本机 GPU）。"""
+        async with _UPSCALE_LOCK:
+            _upscale_current["task_id"] = task_id
+            try:
+                await self._do_interpolate(task_id)
+            finally:
+                _upscale_current["task_id"] = 0
+
+    @staticmethod
+    def _progress_beat(task_id: int):
+        """写进度 + 看用户还要不要，**合成一次数据库往返**。
+
+        进度不只是给用户看的：`updated_at` 跟着动，运行巡检才不会把一条跑了
+        二十分钟的任务误判成「已经没人在推进」。返回 False 表示取消。
+        超分与补帧共用这一段（两边都要碰数据库，分成两个回调就是两次）。
+        """
+
+        async def _beat(pct: int) -> bool:
+            async with SessionLocal() as db:
+                row = await db.get(Task, task_id)
+                if row is None or row.status != "processing":
+                    return False
+                row.progress = int(pct)
+                await db.commit()
+                return True
+
+        return _beat
+
+    async def _do_interpolate(self, task_id: int) -> None:
+        from app.services import interpolate_run as irun
+
+        try:
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is None or task.status in ("cancelled", "failed"):
+                    return
+                params = json.loads(task.params_json or "{}")
+                asset = await db.get(Asset, int(params.get("asset_id") or 0))
+                if asset is None:
+                    raise RuntimeError("要补帧的资产不存在了")
+                src = storage.abs_path(asset.filename)
+                if not src.exists():
+                    raise RuntimeError("要补帧的文件不在磁盘上了")
+                task.status = "processing"
+                task.progress = 2
+                await db.commit()
+                name = asset.prompt or asset.original_name or f"资产 {asset.id}"
+
+            model = str(params.get("model") or "")
+            target = int(params.get("target") or 0)
+            src_fps = float(params.get("srcFps") or 0)
+            gpu = int(params.get("gpu", -1))
+
+            made, width, height, frames, seconds = await irun.run_video(
+                src=src, model=model, src_fps=src_fps, target=target, gpu=gpu,
+                on_progress=self._progress_beat(task_id),
+            )
+
+            rel = irun.urun.saved_rel(made)
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is None:
+                    return
+                if task.status == "cancelled":
+                    storage.delete(rel)
+                    return
+                base = name.rsplit(".", 1)[0]
+                db.add(
+                    Asset(
+                        kind="video",
+                        filename=rel,
+                        original_name=f"{base}_补帧到{target}.mp4",
+                        content_type="video/mp4",
+                        size=made.stat().st_size,
+                        source="clip",
+                        task_id=task_id,
+                        width=width,
+                        height=height,
+                        duration=seconds,
+                    )
+                )
+                task.status = "completed"
+                task.progress = 100
+                task.completed_at = utcnow()
+                task.error = None
+                await db.commit()
+                logger.info("补帧完成：任务 %s（%s 帧）", task_id, frames)
+        except asyncio.CancelledError:
+            logger.info("补帧任务 %s 被用户取消", task_id)
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("interpolate task %s failed", task_id)
+            await self._mark_failed(task_id, e)
+
     async def _do_upscale(self, task_id: int) -> None:
         from app.services import upscale as up
         from app.services import upscale_run as urun
@@ -1002,23 +1106,9 @@ class TaskRunner:
             scale = int(params.get("scale") or 2)
             gpu = int(params.get("gpu", -1))
 
-            async def _beat(pct: int) -> bool:
-                """写进度 + 看用户还要不要，**合成一次数据库往返**。
-
-                进度不只是给用户看的：`updated_at` 跟着动，运行巡检才不会把一条
-                跑了二十分钟的任务误判成「已经没人在推进」。返回 False 表示取消。
-                """
-                async with SessionLocal() as db:
-                    row = await db.get(Task, task_id)
-                    if row is None or row.status != "processing":
-                        return False
-                    row.progress = int(pct)
-                    await db.commit()
-                    return True
-
             made, width, height, frames, seconds = await urun.run_video(
                 engine_key, src=src, model=model, scale=scale, gpu=gpu,
-                on_progress=_beat,
+                on_progress=self._progress_beat(task_id),
             )
 
             rel = urun.saved_rel(made)

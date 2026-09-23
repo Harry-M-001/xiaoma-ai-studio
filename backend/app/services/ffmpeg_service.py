@@ -985,6 +985,39 @@ async def _run_in(cmd: list[str], timeout: int, *, cwd: Path) -> tuple[bool, str
 _TIMEOUT_MUX = 600
 
 
+async def probe_video_frames(path: Path) -> int | None:
+    """视频流里到底有多少帧。读不出来返回 None。
+
+    **为什么专门补这一个函数**：v1.1.31 的超分有个隐蔽的错——合帧时没告诉 ffmpeg
+    那串 PNG 是几帧每秒，image2 默认按 **25fps** 读，于是产物帧数与时长都跟着错。
+    当时的用例没抓到，因为断言的是「容器时长」（被音轨撑住了）与「流上的帧率」
+    （那是写进去的 `-r`，本来就对），而**没有断言视频流的帧数**。
+    帧数是唯一能证明「帧真的都在」的那个维度，所以它得有个能读的地方。
+    """
+    _, ffprobe = await _resolve_binaries()
+    if not ffprobe:
+        return None
+    cmd = [
+        ffprobe, "-v", "error", "-select_streams", "v:0",
+        "-print_format", "json", "-show_entries", "stream=nb_frames",
+        str(path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_PROBE)
+        data = json.loads(out.decode("utf-8", "replace"))
+    except (FileNotFoundError, asyncio.TimeoutError, json.JSONDecodeError, OSError):
+        return None
+    for stream in data.get("streams", []):
+        try:
+            return int(stream.get("nb_frames"))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 async def probe_audio_seconds(path: Path) -> float | None:
     """音频时长（秒）。读不出来返回 None。
 

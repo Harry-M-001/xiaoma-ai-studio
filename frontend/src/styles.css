@@ -40,6 +40,47 @@
   --radius: 12px;
   --radius-lg: 16px;
 
+  /* ------------------------------------------------------------
+     间距级差：**只从这里取值**，不要在规则里现编数字。
+     为什么要有这一条：这一版之前，这份文件里同时存在 2/3/4/6/7/8/10/12/14/16/18/20
+     十二种间距值，同一类元素在不同页面上用的还不是同一个——单看每一处都说得过去，
+     合起来就是「哪里都不太对」。级差定下来之后，「该用哪一档」是个能一眼回答的问题。
+     步长用的是 4px 那一套（Tailwind 的 scale，认得的人最多），只有两档例外：
+     -space-hair 只给图标按钮之间的缝用（再大图标就散了）；
+     -space-1-5 是 6px，因为中文小字与图标对齐时 4px 太挤、8px 太散。
+     ------------------------------------------------------------ */
+  --space-hair: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-2-5: 10px;
+  --space-3: 12px;
+  --space-3-5: 14px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-7: 28px;
+
+  /* 字号级差：同样是**只从这里取值**。
+     之前这份文件用了 10/10.5/11/11.5/12/12.5/13/13.5/14/14.5/15/16 十二种字号，
+     其中 11.5 与 12、12.5 与 13 之间差半像素——单看一处看不出来，
+     并排放在一起就是「字号好像到处都不太一样」。这里只留六档，各有用处。
+
+     **叫 `--font-size-*` 而不是 `--text-*`**：这个文件里 `--text` / `--text-2` /
+     `--text-3` 早就是**文字颜色**了，再叫 `--text-xs` 就是同一个前缀两个意思
+     （`--text-2` 与 `--text-2xs` 只差一个字符，扫一眼分不出来）。这条是被
+     `test_frontend_tokens` 逼出来的：那要按前缀给「与主题无关的令牌」开白名单，
+     而前缀撞车的族根本写不清楚。与既有的 `--font-sans` / `--font-mono` 同族。 */
+  --font-size-2xs: 11px;   /* 脚注、单位、次要说明 */
+  --font-size-xs: 12px;    /* 卡片名、标签、按钮 */
+  --font-size-sm: 13px;    /* 正文（默认） */
+  --font-size-md: 14px;    /* 强调正文、弹窗里的小标题 */
+  --font-size-lg: 16px;    /* 小节标题 */
+  --font-size-xl: 20px;    /* 区块标题 */
+
+  /* 行高：中文正文要比西文松一点，11~12px 的小字反而不能太松（会散） */
+  --leading-tight: 1.35;
+  --leading-normal: 1.6;
+
   --sidebar-w: 232px;
   color-scheme: light;
 }
@@ -1347,18 +1388,27 @@ input, textarea, select { font-family: inherit; }
 .director-video-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .director-clips-empty { font-size: 12.5px; line-height: 1.7; padding: 6px 0; }
-.director-clip-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-/* 这一行现在有 6 个操作按钮（上移 / 下移 / 去字幕 / 放大 / AI 改造 / 移除）：光按钮就 190px，
-   而窄窗口下（1280 及以下）右侧这一列只有 250–330px。所以**允许换行**——挤不下时让操作行
-   整块掉到第二行（右对齐），而不是把片段名压成一个字、或把按钮挤出这张卡片的底色之外。
-   名字也给一个下限：低于它就说明该换行了，不该继续缩。 */
-.director-clip { display: flex; align-items: center; gap: 10px; row-gap: 6px; flex-wrap: wrap; background: var(--surface-2); border-radius: var(--radius-sm); padding: 8px 10px; }
-.director-clip-no { font-size: 11.5px; font-weight: 700; color: var(--primary); width: 16px; text-align: center; flex-shrink: 0; }
+.director-clip-list { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
+/* 这一行现在有 6 个操作按钮（上移 / 下移 / 去字幕 / 放大 / AI 改造 / 移除），补帧之后是 7 个：
+   光按钮就 190px 往上，而窄窗口下（1280 及以下）右侧这一列只有 250–330px。
+   所以**允许换行**，并且让信息优先——挤不下时整排操作掉到第二行（右对齐），
+   而不是把片段名压成一个字、或把按钮挤出这张卡片的底色之外。
+   名字靠 `flex-basis: 200px` 拿到基准宽度，靠 `min-width: 0` 优雅缩短（配 ellipsis）：
+   这两个必须一起给。只给 min-width 不给 0 的话，名字既不缩短也不换行，
+   结果是它把操作直接顶出去。 */
+.director-clip {
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: var(--space-2) var(--space-2-5);
+  background: var(--surface-2); border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-2-5);
+}
+.director-clip-no { font-size: var(--font-size-2xs); font-weight: 700; color: var(--primary); width: 16px; text-align: center; flex-shrink: 0; }
 .director-clip video { width: 72px; height: 44px; object-fit: cover; border-radius: 4px; background: #000; flex-shrink: 0; }
-.director-clip-info { flex: 1; min-width: 120px; }
-.director-clip-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.director-clip-info .muted { font-size: 11px; }
-.director-clip-ops { display: flex; gap: 2px; flex-shrink: 0; margin-left: auto; }
+.director-clip-info { flex: 1 1 200px; min-width: 0; }
+.director-clip-name { font-size: var(--font-size-xs); font-weight: 600; line-height: var(--leading-tight); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.director-clip-info .muted { font-size: var(--font-size-2xs); }
+/* 图标按钮之间用 --space-hair：这一档就是为这种场景留的，再大就不像一组了 */
+.director-clip-ops { display: flex; gap: var(--space-hair); flex-shrink: 0; margin-left: auto; }
 
 /* 转场与转场音效：三个控件一行，下面一行「成片会变短」的对账 */
 .director-transition { display: flex; flex-direction: column; gap: 10px; }
@@ -1506,6 +1556,29 @@ input, textarea, select { font-family: inherit; }
 .upscale-mark { margin-left: 6px; }
 .upscale-notes { display: flex; flex-direction: column; gap: 6px; }
 
+/* ============ 补帧（v1.1.32） ============ */
+
+/* 弹窗骨架、模型/显卡选择卡、底栏、素材信息行都直接复用 `subrm-*` 与 `upscale-src`：
+   形状需求一模一样（同样是「一款模型 + 一个档位 + 一块卡」的三段式），
+   再起一套只会让两边日后各自漂移。这里只补两处没有现成等价物的。 */
+
+/* 「24 帧 → 60 帧（补 2.50 倍）」这一句是补帧弹窗里最该被看见的数：
+   接口要的是目标帧率，用户想的是「变顺多少」，中间这步换算得替他翻出来。
+   所以用左侧色条与底色把它从上下两栏里拎出来——但不用报警色，它只是个换算结果 */
+.interp-calc {
+  font-size: var(--font-size-sm); line-height: var(--leading-normal); color: var(--text);
+  background: var(--surface-2); border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm); padding: var(--space-2) var(--space-2-5);
+}
+.interp-calc b { color: var(--primary); }
+
+/* 只做 2 倍的模型：说明「为什么只有这一档」。小字、次要色——它解释原因，不是警告 */
+.interp-2x { font-size: var(--font-size-2xs); line-height: var(--leading-normal); color: var(--text-3); }
+
+/* 不能用时的「下一步怎么做」跟在原因后面，算同一段话。颜色继承外面的告警块，
+   否则一句话里一半是红的、一半是灰的，看着像两条不同的消息 */
+.director-merge-warn .upscale-route-action { margin-top: var(--space-1); color: inherit; }
+
 .task-error { background: var(--danger-soft); color: var(--danger); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-top: 10px; word-break: break-word; }
 .gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
 .gen-item { position: relative; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); background: var(--surface-2); aspect-ratio: 1; cursor: pointer; }
@@ -1531,7 +1604,7 @@ input, textarea, select { font-family: inherit; }
 
 /* ============ 资产库 ============ */
 
-.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+.asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3-5); }
 .asset-card { border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); background: var(--surface); transition: transform .15s, box-shadow .15s; }
 .asset-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
 .asset-thumb { aspect-ratio: 1; background: var(--surface-2); cursor: pointer; position: relative; display: grid; place-items: center; overflow: hidden; }
@@ -1539,12 +1612,25 @@ input, textarea, select { font-family: inherit; }
 .asset-thumb video { width: 100%; height: 100%; object-fit: cover; }
 .asset-thumb .play-ic { position: absolute; width: 46px; height: 46px; border-radius: 50%; background: rgba(0,0,0,.55); display: grid; place-items: center; color: #fff; }
 .asset-thumb .play-ic svg { width: 20px; height: 20px; margin-left: 3px; }
-.asset-meta { padding: 9px 11px; }
-.asset-name { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.asset-time { font-size: 11px; color: var(--text-3); margin-top: 2px; }
-/* 操作行现在有三个按钮（放大 / 下载 / 删除），卡片最窄时一行放不下——
-   不许换行就会被 overflow: hidden 的卡片裁掉一个按钮，那等于少了一个功能 */
-.asset-actions { display: flex; gap: 2px; padding: 0 6px 8px; flex-wrap: wrap; }
+.asset-meta { padding: var(--space-2) var(--space-2-5); }
+/* 卡片名是这张卡最主要的信息，所以它用正文色 + 半粗，而不是跟着时间来一同降级成次要色——
+   之前两者都偏灰，一张卡扫过去分不出哪行是名字 */
+.asset-name {
+  font-size: var(--font-size-xs); font-weight: 500; color: var(--text);
+  line-height: var(--leading-tight);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.asset-time { font-size: var(--font-size-2xs); color: var(--text-3); margin-top: var(--space-1); }
+/* 操作行现在是三个按钮（放大 / 下载 / 删除），卡片最窄时一行放不下——
+   不许换行就会被 overflow: hidden 的卡片裁掉一个按钮，那等于少了一个功能。
+   缝用 --space-1：原来那个 2px 让三个按钮几乎贴在一起，看着像一整块而不是三个动作 */
+.asset-actions {
+  display: flex; gap: var(--space-1); flex-wrap: wrap;
+  /* 上边与信息拉开一点（不同组要分开），底下与卡片内边距对齐 */
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  margin-top: var(--space-1);
+  border-top: 1px solid var(--border);
+}
 .asset-actions button { flex: 0 0 auto; }
 
 /* ============ 文档产物（自动链 Markdown 文稿） ============ */

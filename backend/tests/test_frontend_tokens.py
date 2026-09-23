@@ -49,23 +49,29 @@ def test_both_themes_define_the_same_tokens():
     而且这种不一致只在手动点过主题切换之后才发现。
 
     字体、圆角、栏宽这些与主题无关的 token 只写在 `:root` 里，属于设计意图，
-    所以按名单放行；名单之外的不一致一律判错。
+    所以**按前缀放行**；名单之外的不一致一律判错。
+
+    为什么用前缀而不是一份名单：名单会随着级差加档而忘记更新（这一版加间距与字号时
+    就漏了一次，是这条用例把它拦下来的）。前缀表达的是**规则**——
+    「这一族与主题无关」——而不是把当前有多少个档抄一遍。
+
+    **注意 `--text-` 不能进这个前缀表**：`--text` / `--text-2` / `--text-3` / `--text-invert`
+    是**文字颜色**，必须两套主题都给。这也是字号那一族改叫 `--font-size-*` 的原因——
+    原来叫 `--text-xs`，与颜色族只差一个字符，前缀白名单根本没法写清楚。
     """
     text = CSS.read_text(encoding="utf-8")
     blocks = re.findall(r'(?::root|\[data-theme="dark"\])\s*\{(.*?)\}', text, re.S)
     assert len(blocks) >= 2, '没有找到两套主题的 token 定义（:root 与 [data-theme="dark"]）'
     light, dark = _defined(blocks[0]), _defined(blocks[1])
 
-    theme_independent = {
-        "--font-sans",
-        "--font-mono",
-        "--radius-sm",
-        "--radius",
-        "--radius-lg",
-        "--sidebar-w",
-    }
-    missing_in_dark = sorted(light - dark - theme_independent)
-    missing_in_light = sorted(dark - light - theme_independent)
+    prefixes = ("--font-", "--space-", "--leading-", "--radius")
+    exact = {"--sidebar-w"}
+
+    def theme_independent(name: str) -> bool:
+        return name in exact or name.startswith(prefixes)
+
+    missing_in_dark = sorted(n for n in light - dark if not theme_independent(n))
+    missing_in_light = sorted(n for n in dark - light if not theme_independent(n))
     assert not missing_in_dark, f"暗色主题缺少这些变量：{missing_in_dark}"
     assert not missing_in_light, f"亮色主题缺少这些变量：{missing_in_light}"
 

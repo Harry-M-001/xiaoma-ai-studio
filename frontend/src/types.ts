@@ -1037,6 +1037,95 @@ export interface UpscaleRequest {
   param_values?: Record<string, unknown>;
 }
 
+/* ---------------- 补帧（v1.1.32） ----------------
+ *
+ * 与放大是**同一条口径**：能不能补、能补到多少、用哪块卡全由后端一次算好
+ * （`GET /api/interpolate/options`），前端只显示、外加两个算术（倍数与预计帧数）。
+ *
+ * 有一处比放大更硬：**目标帧率跟着模型走**。只有 v4 系能补到任意帧数，
+ * 选到只做 2 倍的模型时，`targets` 里就只有一个值（`note2xOnly` 说明原因）——
+ * 所以下拉的选项**必须**来自所选模型的 `targets`，不能自己列一列「常见帧率」。
+ */
+
+/** 待补帧的素材。帧率 / 帧数 / 时长都以这里的为准，前端不自己 probe */
+export interface InterpolateSource {
+  id: number;
+  name: string;
+  width: number;
+  height: number;
+  /** 原帧率 */
+  fps: number;
+  /** 秒（浮点；与放大的整数秒不同，这里的倍数是拿它算的） */
+  duration: number;
+  /** 原帧数 */
+  frames: number;
+  size: number;
+}
+
+export interface InterpolateModel {
+  key: string;
+  label: string;
+  /** 一句话说这一款适合什么 */
+  note: string;
+  /** true = 能补到任意帧数；false = 只做 2 倍 */
+  custom: boolean;
+  /** custom=false 时必有：说明「这一版只做 2 倍」（用户会想知道为什么只有 48） */
+  note2xOnly: string;
+  /** **该模型能选的目标帧率**，只有这些 */
+  targets: number[];
+}
+
+export interface InterpolateDevice {
+  id: number;
+  name: string;
+  usable: boolean;
+  recommended: boolean;
+  note: string;
+}
+
+/**
+ * 补帧弹窗要的一切。
+ *
+ * `available=false` 时 `reason` 一定非空。与放大那边不同，这里**只有一条路**
+ * （本机 RIFE），所以没有路线可选：不能补就把原因与下一步动作直接摆出来，
+ * 能跳的按 `actionRoute` 给个入口——而不是给一个点不动的「开始补帧」。
+ */
+export interface InterpolateOptions {
+  kind: "video";
+  source: InterpolateSource;
+  available: boolean;
+  /** available=false 时必有：一句用户能照做的话 */
+  reason: string;
+  /** 可选：一句下一步动作 */
+  action: string;
+  /** "engines" = 能跳本机引擎页；空串 = 没有可跳的 */
+  actionRoute: string;
+  engineLabel: string;
+  models: InterpolateModel[];
+  defaultModel: string;
+  defaultTarget: number;
+  devices: InterpolateDevice[];
+  deviceAuto: boolean;
+  deviceNote: string;
+  limits: {
+    /** 一次最多能吐多少帧 */
+    maxOutFrames: number;
+    /** 一次最多补几倍 */
+    maxFactor: number;
+  };
+  /** 纯文本，逐条小字显示，不渲染 markdown */
+  notes: string[];
+}
+
+/** 补帧请求体（§2）。`gpu`：-1 = 自动，>=0 = 具体设备号 */
+export interface InterpolateRequest {
+  asset_id: number;
+  model: string;
+  /** **目标帧率**（不是「补几倍」）：倍数是界面上给用户看的说法，接口要的是帧率 */
+  target: number;
+  gpu: number;
+}
+
 /**
  * 静图缓动样片的出片报告。
  *

@@ -26,6 +26,7 @@ import contextlib
 import logging
 import re
 import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -138,13 +139,29 @@ def _number_frames(frames: Path) -> str:
 # ------------------------------------------------------------------ 设备
 
 
-#: 问设备清单用的参数。
+#: 问设备清单用的参数（超分那两档）。
 #:
 #: **不能用「不带参数运行」**——实测那样它只打用法表（857 字符里一行设备都没有），
 #: 因为设备清单是在它真正开始初始化 Vulkan 时才打的。这里的组合会走到那一步、
 #: 然后被无效的设备号挡回来，是最便宜的一种问法（实测 0.2 秒，比丢一个不存在的
 #: 输入文件快 4 倍），而且**不会碰 GPU 也不会加载模型**。
 _DEVICE_PROBE_ARGS = ["-g", "99", "-i", "nope.png", "-o", "nope.png"]
+
+#: 补帧那一档要另一套：它要求 `-i`/`-o` 是**目录**，给 `.png` 会被参数校验挡回来
+#: （实测设备行 0 行），走不到初始化那一步。
+#:
+#: 而且**给的目录必须真实存在**：实测给一个不存在的目录名同样在枚举之前就被挡回来
+#: （所以第一版写 `nope_dir` 拿到的是 0 个设备）。这里改成临时开一个空目录——
+#: 空目录里没有 PNG，就算哪天 `-g 99` 不再被拒，也只会立刻读完空目录，不会动到别的东西。
+_RIFE_PROBE_PREFIX = ["-g", "99"]
+
+
+def _probe_args(engine_key: str) -> tuple[list[str], str | None]:
+    """问设备清单的参数。返回 `(参数, 用完要删的临时目录)`。"""
+    if engine_key != "rife":
+        return list(_DEVICE_PROBE_ARGS), None
+    probe_dir = tempfile.mkdtemp(prefix="rife-probe-")
+    return [*_RIFE_PROBE_PREFIX, "-i", probe_dir, "-o", probe_dir], probe_dir
 
 
 async def devices(engine_key: str, *, force: bool = False) -> list[up.Device]:
@@ -164,9 +181,10 @@ async def devices(engine_key: str, *, force: bool = False) -> list[up.Device]:
     if exe is None:
         return []
     text = ""
+    args, scratch = _probe_args(engine_key)
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(exe), *_DEVICE_PROBE_ARGS, cwd=str(exe.parent),
+            str(exe), *args, cwd=str(exe.parent),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         try:
@@ -178,6 +196,9 @@ async def devices(engine_key: str, *, force: bool = False) -> list[up.Device]:
     except (FileNotFoundError, OSError) as e:
         logger.warning("问设备清单失败（%s）：%s", engine_key, e)
         return []
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     found = up.parse_devices(text)
     _devices[engine_key] = (time.monotonic(), found)
@@ -405,7 +426,11 @@ async def run_video(
         await _must(94)
 
         out_size = up.target_size(width, height, scale)
-        cmd = [ffmpeg, "-y", "-i", pattern]
+        # **必须给 `-framerate`**：那一串 PNG 本身不带帧率，image2 解复用器默认按
+        # **25fps** 读。不给它，150 帧就会被当成 6 秒，再按 `-r 30` 重采样成 180 帧——
+        # 产物比原片长、还比原片多帧。这是个隐蔽的错：容器时长会被音轨撑住看起来正常，
+        # 而流上的帧率正是我们写进去的那个，所以只断言这两样是抓不到的。
+        cmd = [ffmpeg, "-y", "-framerate", f"{fps:g}", "-i", pattern]
         # 音轨：有就拷回来（`?` 让没有音轨的片子也能走这条命令），这与上游 README 同一条
         cmd += ["-i", str(src),
                 "-map", "0:v:0", "-map", "1:a:0?",
@@ -431,6 +456,16 @@ async def run_video(
             )
         if has_audio and not got_info.get("has_audio"):
             logger.warning("原片有音轨但产物没有：%s", src)
+        # 帧数对帐：**帧数是唯一能证明「帧真的都在」的维度**（见 ffmpeg_service
+        # .probe_video_frames 的注释）。读不出来就不判——有些容器不报 nb_frames，
+        # 为它把一件正经事判失败代价不成比例。
+        got_frames = await ffmpeg_service.probe_video_frames(final)
+        if got_frames is not None and abs(got_frames - total) > 1:
+            final.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"产物有 {got_frames} 帧，应该是 {total} 帧——"
+                "帧数不对就说明合帧那一步的帧率串了，已判为失败"
+            )
         duration = int(round(float(got_info.get("duration") or 0)))
         await _report(100)
         return final, got_w, got_h, total, duration

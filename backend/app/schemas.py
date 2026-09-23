@@ -297,6 +297,22 @@ class UpscaleIn(BaseModel):
     param_values: dict = {}
 
 
+class InterpolateIn(BaseModel):
+    """给一段视频补帧。
+
+    `target` 是**目标帧率**（不是「补几倍」）：用户想的是「把 24 帧的片子变成 60 帧的」，
+    而引擎要的是总帧数——那一步换算由 `services/interpolate.out_frames` 做，
+    不把这个算术摆到界面上让用户自己乘。
+
+    `model` / `gpu` 的含义与放大那边一致：可选项都由 `/api/interpolate/options` 给。
+    """
+
+    asset_id: int
+    model: str = ""
+    target: int = Field(default=60, ge=1, le=480)
+    gpu: int = -1
+
+
 class VideoGenerateIn(BaseModel):
     model_key: str
     prompt: str = Field(..., min_length=1)

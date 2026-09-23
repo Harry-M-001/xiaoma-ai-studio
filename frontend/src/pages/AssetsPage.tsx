@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { AudioLines, Download, FileText, Images, Library, Maximize2, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
+import { AudioLines, Download, FileText, Gauge, Images, Library, Maximize2, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
 import { api } from "../api";
 import type { Asset } from "../types";
 import { Empty, formatSize, formatTime, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 import Lightbox from "../components/Lightbox";
 import { UpscaleDialog } from "../components/UpscaleDialog";
+import { InterpDialog } from "../components/InterpDialog";
 import { downloadUrl } from "../components/TaskCard";
 
 const FILTERS = [
@@ -32,6 +33,8 @@ export default function AssetsPage({
   const [preview, setPreview] = useState<{ url: string; kind: string; dl?: string } | null>(null);
   // 正在放大的那个素材（弹窗里挑路线/模型/倍数）
   const [upscaling, setUpscaling] = useState<Asset | null>(null);
+  // 正在补帧的那个素材（弹窗里挑模型 / 目标帧率 / 显卡）。**只有视频有「帧率」这个概念**
+  const [interping, setInterping] = useState<Asset | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const load = async (kind: string, append = false) => {
@@ -180,6 +183,17 @@ export default function AssetsPage({
                       放大
                     </button>
                   )}
+                  {/* 补帧只给视频：图片没有「帧率」这个概念，列出来只会是点下去报错的一颗按钮 */}
+                  {a.kind === "video" && (
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      title="补帧：把这段片子的帧率补高，画面更顺（原片不动，产物是新资产，跑完在资产库里出现）"
+                      onClick={() => setInterping(a)}
+                    >
+                      <Gauge size={13} />
+                      补帧
+                    </button>
+                  )}
                   <a className="btn btn-ghost btn-sm" href={downloadUrl(a.id)} title="下载">
                     <Download size={13} />
                     下载
@@ -220,6 +234,18 @@ export default function AssetsPage({
             }
             setUpscaling(null);
           }}
+        />
+      )}
+
+      {/* 补帧：与放大同一个口径——产物是新资产、原片不动。
+          区别是它**恒为后台任务**（逐帧过一遍），所以关窗时列表里还没有东西，
+          产物跑完会在资产库里自己出现，这里不用往列表里插 */}
+      {interping && (
+        <InterpDialog
+          asset={interping}
+          onClose={() => setInterping(null)}
+          onGoEngines={onNavigate ? () => onNavigate("engines") : undefined}
+          onDone={() => setInterping(null)}
         />
       )}
     </div>

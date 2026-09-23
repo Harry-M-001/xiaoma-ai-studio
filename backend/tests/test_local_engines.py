@@ -704,6 +704,59 @@ def test_a_slow_but_alive_route_is_abandoned():
         server.shutdown()
 
 
+class _RangeIgnoringHandler(BaseHTTPRequestHandler):
+    """声称支持续传、却把**整包**又塞一遍的服务器。
+
+    这不是编出来的场景：实测续传 rife-ncnn-vulkan 那个 411MB 的包时，走代理拿到的
+    本地文件是 556MB——服务端对一个带 `Range` 的请求回了 206，却给了整包。
+    于是本地那份成了「前缀 + 另一个整包」，**永远过不了 sha256**。
+    """
+
+    body = b"z" * (3 << 20)
+
+    def do_GET(self) -> None:  # noqa: N802
+        assert self.headers.get("Range"), "这条用例要的正是「带 Range 却回整包」"
+        self.send_response(206)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Length", str(len(self.body)))
+        self.send_header("Content-Range", f"bytes 0-{len(self.body) - 1}/{len(self.body)}")
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *_args) -> None:
+        return
+
+
+def test_a_source_that_ignores_range_does_not_poison_the_local_copy():
+    """服务端回 206 却塞整包时，本地那份要**当场作废**。
+
+    不这么做的话，用户看到的是「校验和不一致」，而每点一次重试都要再下一整包，
+    并且**看不出为什么**——因为失败的那份文件是「前缀 + 另一个整包」，
+    体积比清单大，而体积不对这件事界面上一开始并不说。
+    """
+    server = HTTPServer(("127.0.0.1", 0), _RangeIgnoringHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/x.zip"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = _engine(_RangeIgnoringHandler.body, url)
+            job = {"key": "fake", "done": 0}
+            with _sandbox(root, [engine]):
+                # 先放一个半包，逼它下次带 Range 去续传
+                ei.archive_path(engine).write_bytes(b"z" * (1 << 20))
+                try:
+                    asyncio.run(ei._download(engine, job, use_env_proxy=False))
+                except ValueError as e:
+                    assert "整包" in str(e), str(e)
+                else:
+                    raise AssertionError("服务端没按 Range 给数据，这份却被当成了好的")
+                assert not ei.archive_path(engine).exists(), "废掉的那份必须删掉"
+                assert job["done"] == 0, "进度要归零——不然界面会停在一个假进度上"
+    finally:
+        server.shutdown()
+
+
 def test_verify_reports_a_size_mismatch_before_hashing():
     """体积都不对就不用算哈希了：给用户的理由要具体（差多少）。"""
     payload = _zip_bytes({"bin/tool.exe": b"MZ"})

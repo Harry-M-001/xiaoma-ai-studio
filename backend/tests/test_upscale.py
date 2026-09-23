@@ -145,6 +145,10 @@ def _probe(path: Path) -> dict:
     v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
     a = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
     return {"w": v.get("width"), "h": v.get("height"), "audio": a is not None,
+            # **帧数必须一起报出来**：它是唯一能证明「帧真的都在」的维度。
+            # 只断言时长与帧率时，一个「合帧时按 25fps 读 PNG 序列」的错能完全躲过去
+            # （时长被音轨撑住、帧率是写进去的那个，两样都显得正常）。
+            "frames": int(v.get("nb_frames") or 0),
             "duration": round(float(data.get("format", {}).get("duration") or 0), 2)}
 
 
@@ -749,12 +753,18 @@ def test_the_video_pipeline_keeps_the_frame_count_fps_and_audio():
     """
     with _TempData() as data, tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "clip.mp4"
+        # **8fps 是故意的**：image2 解复用器默认按 25fps 读 PNG 序列，
+        # 用 8fps 才验得出「合帧时到底有没有把帧率告诉它」——25fps 那种素材会刚好蒙对
         _make_video(src, 64, 32, 8, fps=8)
         out, w, h, frames, seconds = _run_video(FAKE_DIR_ENGINE, src, scale=1)
         info = _probe(out)
         assert (w, h) == (64, 32), f"{w}x{h}"
         assert frames == 8, f"应该是 8 帧，实际 {frames}"
         assert info["w"] == 64 and info["h"] == 32, info
+        assert info["frames"] == 8, (
+            f"**产物里的帧数是 {info['frames']}，应该是 8**："
+            "合帧那一步没把 PNG 序列的帧率告诉 ffmpeg（它默认按 25fps 读）"
+        )
         assert info["audio"] is True, "原音轨没拷回来"
         assert abs(info["duration"] - 1.0) < 0.25, info
         assert str(out).startswith(str(data))

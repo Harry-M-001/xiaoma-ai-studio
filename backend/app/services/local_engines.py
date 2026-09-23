@@ -246,6 +246,33 @@ ENGINES: tuple[Engine, ...] = (
         gpu="vulkan",
     ),
     Engine(
+        key="rife",
+        label="RIFE 补帧（把 24 帧补顺到 60 帧）",
+        kind="interpolate",
+        filename="rife-ncnn-vulkan-20221029-windows.zip",
+        url=(
+            "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/"
+            "rife-ncnn-vulkan-20221029-windows.zip"
+        ),
+        size=431540241,
+        # 上游这个 release **没有给摘要**（GitHub API 的 digest 是 null），所以这个是
+        # 我们自己下完整包之后算的，算完又与 API 的字节数对过（431540241，一致）。
+        sha256="d8e4d772d26cd8006ef0ad0bc82eb191b53c68677d1ae2f42506d74cbbbea606",
+        license="MIT",
+        homepage="https://github.com/nihui/rife-ncnn-vulkan",
+        archive="zip",
+        marker="rife-ncnn-vulkan.exe",
+        why="把片子补顺：24 帧补成 60 帧之后，镜头横移与人物动作不再一格一格。"
+        "它是拿前后两帧算出中间那一帧，所以补出来的是模型猜的画面，不是简单的平均。",
+        note="这个包 411MB，是因为上游把 12 个模型全塞进去了（rife / rife-HD / rife-UHD / "
+        "rife-anime / rife-v2 ~ v4.6）。常用的其实是 rife-v4.6 与 rife-anime，"
+        "但我们不动手删上游的文件：删了之后哪天要用另一个模型就得整包重下。"
+        "包里的 vcomp140.dll 是它需要的 VC 运行库，已经随包带着，不用另装。"
+        "上游 2022-10 之后没再发版（与 Real-ESRGAN 同一年），社区至今仍在用。",
+        proof="local-download",
+        gpu="vulkan",
+    ),
+    Engine(
         key="vsr",
         label="VSR 去字幕（高质量档，AI 补全）",
         kind="subtitle",
