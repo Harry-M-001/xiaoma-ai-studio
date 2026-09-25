@@ -114,6 +114,26 @@ def test_the_sidebar_can_scroll_to_its_last_item():
     assert "overflow-y: auto" in rule.group(1), "侧边栏不能滚动（底部入口会被裁掉）"
 
 
+def test_the_group_sits_right_under_home_and_is_collapsed_by_default():
+    """折叠组固定在**首页下面**（用户 2026-09-25 指定），且**默认收起**。
+
+    结构断言：渲染折叠组那一段必须夹在「首页」与「其余项」之间——用「主分组拆成
+    `headItem` / `tailItems`」来表达，而不是给 `home` 这个 key 写死一个特例，
+    这样首页被关掉时它自然上移到第一位。
+
+    「默认收起」靠 `?? false`：去掉它，侧边栏一进来又是十几行，这一组就白做了。
+    """
+    sidebar = _text(SRC / "components" / "Sidebar.tsx")
+    assert "const [headItem, ...tailItems] = mainItems;" in sidebar, (
+        "没有把主分组拆成「首页」与「其余」"
+    )
+    head_at = sidebar.index("{headItem &&")
+    group_at = sidebar.index('groupKey="create"')
+    tail_at = sidebar.index("{tailItems.map(")
+    assert head_at < group_at < tail_at, "折叠组没有排在首页下面"
+    assert "prefs.navGroupOpen.get(groupKey) ?? false" in sidebar, "折叠组默认不是收起"
+
+
 # ---------- 2. 改名三处一致 ----------
 
 

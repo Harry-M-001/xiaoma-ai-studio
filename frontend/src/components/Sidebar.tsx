@@ -54,6 +54,10 @@ export default function Sidebar({
   const mainItems = nav.filter((item) => item.group !== "settings" && item.group !== "create");
   const createItems = nav.filter((item) => item.group === "create");
   const settingItems = nav.filter((item) => item.group === "settings");
+  // 折叠组排在**首页之后、其余项之前**（用户指定）：创作入口离首页最近，从首页进来第一眼
+  // 就该看到它们。实现就是「第一项单独渲染 + 其余照常」——首页被关掉时它自然上移到第一位，
+  // 不需要为「首页」这个 key 写死一个特例。
+  const [headItem, ...tailItems] = mainItems;
 
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
@@ -76,16 +80,16 @@ export default function Sidebar({
         {!collapsed && "收起导航"}
       </button>
 
-      {mainItems.map((item) => (
+      {headItem && (
         <NavRow
-          key={item.key || item.route}
-          item={item}
+          key={headItem.key || headItem.route}
+          item={headItem}
           route={route}
           collapsed={collapsed}
           onNavigate={onNavigate}
           badgeRoutes={badgeRoutes}
         />
-      ))}
+      )}
 
       {createItems.length > 0 && (
         <CollapsibleGroup
@@ -97,6 +101,17 @@ export default function Sidebar({
           badgeRoutes={badgeRoutes}
         />
       )}
+
+      {tailItems.map((item) => (
+        <NavRow
+          key={item.key || item.route}
+          item={item}
+          route={route}
+          collapsed={collapsed}
+          onNavigate={onNavigate}
+          badgeRoutes={badgeRoutes}
+        />
+      ))}
 
       {settingItems.length > 0 && (
         <>

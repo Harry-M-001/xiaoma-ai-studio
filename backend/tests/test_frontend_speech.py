@@ -167,11 +167,20 @@ def test_only_one_audio_element_is_created():
 
 
 def test_the_page_guides_to_settings_when_no_speech_model():
-    """没配语音模型时给「去哪儿加」而不是一句「生成失败」。"""
+    """没配语音模型时给「去哪儿加」而不是一句「生成失败」。
+
+    2026-09-25（`#57` 音频生成分两支）换了写法：原来是「没模型就整页 early return」，
+    现在它只是三个分支里的一支——页签与「音乐生成」那一支照样要能打开。
+    守的东西没变：那句引导、以及「去配置」的入口，都要挂在**这一支**里。
+    """
     page = _text(SRC / "pages" / "SpeechPage.tsx")
-    empty = page[page.index("if (models.length === 0)") : page.index("const tooLong")]
-    assert "还没有可用的语音模型" in empty and "能力 = 音频" in empty, "空状态的引导没说清楚"
-    assert "onGoSettings" in empty, "空状态没有去配置的入口"
+    assert "const noSpeechModel = models.length === 0;" in page, "没配模型这件事没有被算出来"
+    # 切片终点是最后那个 return 的开头，所以这一段正好是「没模型」这一支
+    branch = page[
+        page.index("if (noSpeechModel)") : page.index('{tabs}\n      <div className="studio-grid">')
+    ]
+    assert "还没有可用的语音模型" in branch and "能力 = 音频" in branch, "空状态的引导没说清楚"
+    assert "onGoSettings" in branch, "空状态没有去配置的入口"
 
 
 def test_oversize_text_is_blocked_before_spending():
@@ -223,6 +232,37 @@ def test_styles_exist():
                 ".speech-empty", ".speech-list", ".speech-item", ".speech-item-actions",
                 ".asset-audio-thumb", ".lightbox-audio", ".field-hint-inline"):
         assert cls in css, f"styles.css 里没有 {cls}"
+
+
+def test_the_page_has_two_tabs_that_are_always_reachable():
+    """「音频生成」有两支（配音 / 音乐生成），且**页签在三处分支里都渲染**。
+
+    `{tabs}` 必须出现 3 次：没配语音模型、正常配音、看音乐那一支。少一处就会出现
+    「页面变成了别的东西、还回不去」——原来那句没模型就整页 early return 正是这个毛病。
+    """
+    page = _text(SRC / "pages" / "SpeechPage.tsx")
+    assert '"speech" | "music"' in page, "没有两支页签的状态"
+    assert 'setTab("speech")' in page and 'setTab("music")' in page, "页签不能切换"
+    assert "音乐生成" in page, "没有音乐生成这一支"
+    n = page.count("{tabs}")
+    assert n == 3, f"页签只在 {n} 处渲染（没模型 / 配音 / 音乐三处都该看得见）"
+
+
+def test_the_music_tab_is_honest_about_not_being_wired():
+    """音乐那一支**不许摆一个点了没反应的东西**，而且必须写明「还没接」。
+
+    这是这一支唯一真正的风险：为了「看起来完整」先摆一个表单加生成按钮，用户点下去
+    才发现没反应——那比直说没做更糟。同时把上游结论钉在代码里，免得以后有人凭印象
+    把它接成「云侧 BYOK」。
+    """
+    page = _text(SRC / "pages" / "SpeechPage.tsx")
+    music = page[page.index("function MusicPanel"):]
+    assert "还没接" in music, "音乐那一支没说清自己还没接"
+    for bad in ("生成音乐", "开始生成音乐", "api.music", 'listModels("music")', "music_generation"):
+        assert bad not in music, f"音乐那一支摆了用不了的东西：{bad}"
+    # 上游那条关键限制与开源模型这条主路径，都要留在代码里（带日期）
+    assert "2026 年 8 月 20 日" in page, "没记下上游「不再对新用户开放」那条限制"
+    assert "Music 3" in page, "没记下开源模型这条主路径"
 
 
 def test_the_page_uses_classes_that_exist():

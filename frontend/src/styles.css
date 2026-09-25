@@ -1885,6 +1885,16 @@ input, textarea, select { font-family: inherit; }
 
 /* ============ 配音（TTS 试听） ============ */
 
+/* 音频生成页的两支页签（配音 / 音乐生成）。页签本身走全站统一的 .segmented，
+   这里只管它与下面内容之间的距离。 */
+.audio-tabs { margin-bottom: 18px; }
+
+/* 「音乐生成」那一支的路子说明：还没接生成，所以这一页只交代路怎么走 */
+.music-paths { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.music-paths li { display: flex; flex-direction: column; gap: 4px; }
+.music-paths li > b { font-size: 13px; font-weight: 600; }
+.music-paths li > span { font-size: 13px; color: var(--text-3); line-height: 1.75; }
+
 .speech-voices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .speech-voice {
   padding: 4px 11px; border-radius: 999px; cursor: pointer;
