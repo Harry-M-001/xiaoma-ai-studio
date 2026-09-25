@@ -16,6 +16,7 @@ import type { DirectorDoc } from "./director3d/types";
 const K = {
   theme: "xm_theme",
   sidebar: "xm_sidebar_collapsed",
+  navGroups: "xm_nav_groups_open",
   palette: "xm_canvas_palette",
   chainLevel: "xm_canvas_chain_level",
   thumb: "xm_canvas_thumb",
@@ -78,6 +79,25 @@ const FLAG = (on: string, off: string) => (raw: string) => {
   return null;
 };
 
+/**
+ * 折叠组状态那张表。形状坏掉（不是对象、是数组、是段垃圾）就整张当空——
+ * 少记几个展开状态是小事，把坏数据当配置用出去才是。
+ */
+function readGroupMap(): Record<string, unknown> {
+  return (
+    read(K.navGroups, (raw) => {
+      try {
+        const v: unknown = JSON.parse(raw);
+        return v && typeof v === "object" && !Array.isArray(v)
+          ? (v as Record<string, unknown>)
+          : null;
+      } catch {
+        return null;
+      }
+    }) ?? {}
+  );
+}
+
 export const prefs = {
   theme: {
     get: (): Theme | null => read(K.theme, (r) => (r === "dark" || r === "light" ? r : null)),
@@ -87,6 +107,25 @@ export const prefs = {
   sidebarCollapsed: {
     get: () => read(K.sidebar, FLAG("1", "0")),
     set: (v: boolean) => writeRaw(K.sidebar, v ? "1" : "0"),
+  },
+
+  /**
+   * 侧边栏折叠组（如「创作台」）的展开状态，按组 key 记。
+   *
+   * 存成一个对象 `{ create: true }` 而不是一组固定键：将来多几个折叠组时不用再加键、
+   * 也不用管老库缺哪个键。**返回 null 表示「用户没设过」**——这个区别很重要：
+   * 侧边栏要靠它决定「默认收起」还是「按当前路由自动展开」（见 `Sidebar.tsx`）。
+   */
+  navGroupOpen: {
+    get: (key: string): boolean | null => {
+      const v = readGroupMap()[key];
+      return typeof v === "boolean" ? v : null;
+    },
+    set: (key: string, open: boolean) => {
+      const all = readGroupMap();
+      all[key] = open;
+      writeRaw(K.navGroups, JSON.stringify(all));
+    },
   },
 
   paletteOpen: {

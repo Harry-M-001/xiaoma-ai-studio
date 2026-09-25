@@ -4,7 +4,7 @@
 
 后端把音频链修得再全，前端接错一处也白做。这里守五类最容易错的地方：
 
-1. **导航与路由要成对**：后端注册表加了「配音」，前端 `App.tsx` 也得认这个 route，
+1. **导航与路由要成对**：后端注册表里有这一项，前端 `App.tsx` 也得认这个 route，
    否则点进去是空白页（或落回首页，用户以为功能没做）。
 2. **老库要靠迁移**：`ensure_seed` 只插缺行、从不覆盖。启用已有的 `audio` 模态行、
    重排已有的导航顺序，都必须写数据迁移——种子改了等于没改。
@@ -44,17 +44,22 @@ def _nav_seed() -> list[dict]:
 
 
 def test_the_new_nav_entry_exists_on_both_sides():
-    """后端种子与前端兜底导航都要有「配音」，且路由名一致。"""
+    """后端种子与前端兜底导航都要有这一项，且路由名一致。
+
+    2026-09-25（#56 导航改造）口径变了两处：**名称**「配音」→「音频生成」、
+    **分组** `main` → `create`（收进「创作台」折叠组）。变的是界面上的说法与位置，
+    路由名 `speech` 没变——它是前后端的契约，也是老库升级后仍然对得上的那个锚点。
+    """
     seed = next((item for item in _nav_seed() if item["route"] == "speech"), None)
-    assert seed is not None, "后端导航种子里没有「配音」"
-    assert seed["label"] == "配音" and seed["group_name"] == "main", seed
+    assert seed is not None, "后端导航种子里没有这一项"
+    assert seed["label"] == "音频生成" and seed["group_name"] == "create", seed
 
     app = _text(SRC / "App.tsx")
-    assert 'route: "speech"' in app, "前端兜底导航里没有配音"
-    assert 'import SpeechPage from "./pages/SpeechPage"' in app, "没引入配音页"
+    assert 'route: "speech"' in app, "前端兜底导航里没有这一项"
+    assert 'import SpeechPage from "./pages/SpeechPage"' in app, "没引入这个页面"
     known = re.search(r"const KNOWN_ROUTES = new Set\(\[(.*?)\]\)", app, re.S)
     assert known and '"speech"' in known.group(1), "路由白名单里没有 speech（会被当成未知路由）"
-    assert re.search(r'case "speech":\s*\n\s*return <SpeechPage', app), "路由没有分支到配音页"
+    assert re.search(r'case "speech":\s*\n\s*return <SpeechPage', app), "路由没有分支到这个页面"
 
 
 def test_the_nav_order_matches_the_migration():

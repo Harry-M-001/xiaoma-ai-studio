@@ -157,7 +157,7 @@ export default function EnginesPage({ onNavigate }: { onNavigate?: (route: strin
         info={data.localTts}
         busy={busyKey === "local-tts"}
         onConnect={() =>
-          void act("local-tts", () => api.connectLocalTts(), "已接入：去配音页选「本机跑」试试")
+          void act("local-tts", () => api.connectLocalTts(), "已接入：去音频生成页选「本机跑」试试")
         }
         onDisconnect={() =>
           void act("local-tts", () => api.disconnectLocalTts(), "已停用本机配音模型")
@@ -245,7 +245,7 @@ function LocalTtsCard({
           </div>
           <div className="eng-why">
             一段话在本机念出来，不联网、不花调用费；中文英文都能念，自带
-            {info.voiceCount || "若干"}个音色。接上之后配音页、样片旁白、画布逐镜对白
+            {info.voiceCount || "若干"}个音色。接上之后音频生成页、样片旁白、画布逐镜对白
             都能选它。
           </div>
           {!info.ready && (
@@ -255,7 +255,7 @@ function LocalTtsCard({
           )}
           {info.ready && !info.connected && (
             <div className="eng-note">
-              引擎已经装好了，点右边「接成本机配音模型」，配音页就会多出一个「本机跑」的模型。
+              引擎已经装好了，点右边「接成本机配音模型」，音频生成页就会多出一个「本机跑」的模型。
             </div>
           )}
           {info.connected && (
@@ -276,9 +276,9 @@ function LocalTtsCard({
               </div>
               <div className="eng-note">
                 {info.named
-                  ? "配音页的「音色」一栏填这里的名字就能指定；分镜表的角色音色表也写名字，"
+                  ? "音频生成页的「音色」一栏填这里的名字就能指定；分镜表的角色音色表也写名字，"
                     + "例如「小焰=zf_xiaoxiao」。留空用第 0 号。"
-                  : `配音页的「音色」一栏填这里的号码就能指定；分镜表的角色音色表也写号码，`
+                  : `音频生成页的「音色」一栏填这里的号码就能指定；分镜表的角色音色表也写号码，`
                     + `例如「小焰=47」。留空用第 0 号。`}
               </div>
             </details>
@@ -288,7 +288,7 @@ function LocalTtsCard({
           {info.connected ? (
             <>
               <button className="btn btn-primary" onClick={() => onNavigate?.("speech")}>
-                <Play size={14} /> 去配音页试试
+                <Play size={14} /> 去音频生成页试试
               </button>
               <button className="btn btn-ghost" disabled={busy} onClick={onDisconnect}>
                 停用

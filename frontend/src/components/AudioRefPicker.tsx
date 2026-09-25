@@ -59,7 +59,7 @@ export default function AudioRefPicker({
     return (
       <div className="audio-ref-empty">
         <AudioLines size={14} />
-        <span>还没有配音。到「配音」页写几句、生成一段，再回来挂到这一镜上。</span>
+        <span>还没有配音。到「音频生成」页写几句、生成一段，再回来挂到这一镜上。</span>
       </div>
     );
   }

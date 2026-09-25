@@ -28,7 +28,7 @@ export default function ProjectsPage({
     try {
       setProjects(await api.listProjects());
     } catch {
-      toast.error("项目列表加载失败");
+      toast.error("画布列表加载失败");
       setProjects([]);
     }
   };
@@ -46,14 +46,14 @@ export default function ProjectsPage({
 
   const doCreate = async () => {
     if (!formName.trim()) {
-      toast.error("请输入项目名称");
+      toast.error("请输入画布名称");
       return;
     }
     setSaving(true);
     try {
       await api.createProject(formName.trim(), formDesc.trim());
       await load();
-      toast.success("项目已创建");
+      toast.success("画布已创建");
       setCreating(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "创建失败");
@@ -76,7 +76,7 @@ export default function ProjectsPage({
   };
 
   const doDelete = async (p: Project) => {
-    if (!window.confirm(`删除项目「${p.name}」？此操作不可恢复。`)) return;
+    if (!window.confirm(`删除画布「${p.name}」？此操作不可恢复。`)) return;
     try {
       await api.deleteProject(p.id);
       await load();
@@ -91,7 +91,7 @@ export default function ProjectsPage({
     else toast.info(`「${p.name}」的画布编辑器即将上线`);
   };
 
-  /** 建一个铺好链的示例项目并直接进画布——比「先建空项目再想」少走一步 */
+  /** 建一张铺好链的示例画布并直接进画布——比「先建空的再想」少走一步 */
   const startDemo = async () => {
     setDemoBusy(true);
     try {
@@ -112,8 +112,10 @@ export default function ProjectsPage({
     <div className="page">
       <div className="page-header">
         <div>
-          <div className="page-title">项目</div>
-          <div className="page-desc">一次完整作品的容器。每个项目内置一张可视化画布，从一句话创意铺到成片。</div>
+          <div className="page-title">自由画布</div>
+          <div className="page-desc">
+            一次完整作品的容器。每一张画布都能从一句话创意铺到成片，节点自由连线。
+          </div>
         </div>
         <div className="row" style={{ gap: 8 }}>
           <button className="btn btn-ghost" onClick={startDemo} disabled={demoBusy}>
@@ -122,7 +124,7 @@ export default function ProjectsPage({
           </button>
           <button className="btn btn-primary" onClick={openCreate}>
             <Plus size={16} />
-            新建项目
+            新建画布
           </button>
         </div>
       </div>
@@ -135,8 +137,8 @@ export default function ProjectsPage({
         <div className="card">
           <Empty
             icon={<FolderOpen />}
-            title="还没有项目"
-            desc="新建一个项目，把一次完整创作（角色设定、分镜、成片）组织起来；或者点「从示例开始」直接看一条铺好的链长什么样。"
+            title="还没有画布"
+            desc="新建一张画布，把一次完整创作（角色设定、分镜、成片）组织起来；或者点「从示例开始」直接看一条铺好的链长什么样。"
             action={
               <button className="btn btn-primary" onClick={startDemo} disabled={demoBusy}>
                 {demoBusy ? <Spinner /> : <Sparkles size={15} />}
@@ -199,7 +201,7 @@ export default function ProjectsPage({
 
       {creating && (
         <Modal
-          title="新建项目"
+          title="新建画布"
           onClose={() => setCreating(false)}
           footer={
             <>
@@ -214,7 +216,7 @@ export default function ProjectsPage({
           }
         >
           <div className="field">
-            <label className="field-label">项目名称</label>
+            <label className="field-label">画布名称</label>
             <input
               className="input"
               placeholder="例如：小马宝莉·暮光闪闪的日常"
@@ -228,7 +230,7 @@ export default function ProjectsPage({
             <textarea
               className="textarea"
               rows={3}
-              placeholder="这个项目要做什么、用哪些模型…"
+              placeholder="这张画布要做什么、用哪些模型…"
               value={formDesc}
               onChange={(e) => setFormDesc(e.target.value)}
             />
@@ -238,7 +240,7 @@ export default function ProjectsPage({
 
       {renaming && (
         <Modal
-          title="重命名项目"
+          title="重命名画布"
           onClose={() => setRenaming(null)}
           footer={
             <>

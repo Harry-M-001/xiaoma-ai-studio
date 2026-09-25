@@ -64,7 +64,7 @@ export default function HomePage({
     try {
       await api.createProject(name, "");
       setProjects(await api.listProjects());
-      toast.success("项目已创建，到「项目」页查看");
+      toast.success("画布已创建，到「自由画布」页查看");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "创建失败");
     } finally {
@@ -72,7 +72,7 @@ export default function HomePage({
     }
   };
 
-  /** 建一个铺好链的示例项目并直接进画布 */
+  /** 建一张铺好链的示例画布并直接进画布 */
   const startDemo = async () => {
     setDemoBusy(true);
     try {
@@ -95,7 +95,7 @@ export default function HomePage({
    * - 还没有作品但有模型：铺一条示例（新手最快看到成果的路径）
    * - 连模型都没有：先去接入（否则点什么都只会撞到同一个错误）
    *
-   * 判断依据全部来自已有的接口（项目列表 / setup-status），不额外问用户。
+   * 判断依据全部来自已有的接口（画布列表 / setup-status），不额外问用户。
    */
   const recent = projects?.[0];
   const primary = (() => {
@@ -135,7 +135,7 @@ export default function HomePage({
             </button>
             <button className="btn btn-ghost" onClick={quickCreate} disabled={creating}>
               {creating ? <Spinner /> : <Plus size={15} />}
-              新建项目
+              新建画布
             </button>
           </div>
         </div>
@@ -169,9 +169,9 @@ export default function HomePage({
       {projects && projects.length > 0 && (
         <section className="home-section">
           <div className="home-section-head">
-            <h2>最近项目</h2>
+            <h2>最近画布</h2>
             <button className="btn btn-ghost btn-sm" onClick={() => onNavigate("projects")}>
-              全部项目
+              全部画布
               <ArrowRight size={13} />
             </button>
           </div>
@@ -181,10 +181,10 @@ export default function HomePage({
                 key={p.id}
                 className="home-project card home-enter"
                 style={{ animationDelay: `${i * 40}ms` }}
-                // 点最近项目就直接进它的画布：以前这里只跳到项目列表，
+                // 点最近画布就直接进它的画布：以前这里只跳到画布列表，
                 // 想继续做的人还得多点一次（组件本来就拿到了 onOpenCanvas）
                 onClick={() => (onOpenCanvas ? onOpenCanvas(p) : onNavigate("projects"))}
-                title={onOpenCanvas ? "打开画布" : "查看全部项目"}
+                title={onOpenCanvas ? "打开画布" : "查看全部画布"}
               >
                 <div className="home-project-name">{p.name}</div>
                 <div className="home-project-desc">{p.description || "暂无描述"}</div>
@@ -204,12 +204,12 @@ export default function HomePage({
       {projects && projects.length === 0 && (
         <section className="home-section">
           <div className="home-section-head">
-            <h2>最近项目</h2>
+            <h2>最近画布</h2>
           </div>
           <div className="home-empty card">
             <div className="home-empty-title">还没有作品</div>
             <div className="home-empty-desc">
-              这里会列出你最近打开的项目。想要立刻看到成品，「从示例开始」会按你现有的模型铺好一条完整链路
+              这里会列出你最近打开的画布。想要立刻看到成品，「从示例开始」会按你现有的模型铺好一条完整链路
               （创意 → 小说 → 剧本 → 分镜 → 出图），然后点画布上方的「运行整图」就行。
             </div>
             <div className="home-empty-actions">

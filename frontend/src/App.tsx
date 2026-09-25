@@ -19,6 +19,7 @@ import TasksPage from "./pages/TasksPage";
 import DirectorPage from "./pages/DirectorPage";
 import HomePage from "./pages/HomePage";
 import ProjectsPage from "./pages/ProjectsPage";
+import AgentPage from "./pages/AgentPage";
 import CanvasPage from "./pages/CanvasPage";
 import ProvidersPage from "./pages/ProvidersPage";
 import SettingsPage from "./pages/SettingsPage";
@@ -32,25 +33,31 @@ const DEFAULT_CONFIG: ConfigMap = {
   "app.logo_text": "马",
 };
 
-/** nav 接口失败时的内置默认导航，保证离线可用（与后端初始数据一致） */
+/**
+ * nav 接口失败时的内置默认导航，保证离线可用（与后端初始数据一致）。
+ *
+ * `create` 组会被侧边栏收进「创作台」折叠组（见 `components/Sidebar.tsx`）。
+ * 「项目」这个词已经让给 Agent 了：`projects` 这一项现在是「自由画布」。
+ */
 const DEFAULT_NAV: NavMeta[] = [
   { key: "home", label: "首页", icon: "home", route: "home", group: "main", requires_auth: false },
-  { key: "projects", label: "项目", icon: "folder", route: "projects", group: "main", requires_auth: false },
-  { key: "chat", label: "文本对话", icon: "message", route: "chat", group: "main", requires_auth: false },
-  { key: "image", label: "图片生成", icon: "image", route: "image", group: "main", requires_auth: false },
-  { key: "video", label: "视频生成", icon: "video", route: "video", group: "main", requires_auth: false },
-  { key: "speech", label: "配音", icon: "audio", route: "speech", group: "main", requires_auth: false },
+  { key: "projects", label: "自由画布", icon: "folder", route: "projects", group: "main", requires_auth: false },
+  { key: "agent", label: "Agent", icon: "bot", route: "agent", group: "main", requires_auth: false },
   { key: "assets", label: "资产库", icon: "library", route: "assets", group: "main", requires_auth: false },
   { key: "prompts", label: "提示词库", icon: "sparkles", route: "prompts", group: "main", requires_auth: false },
   { key: "tasks", label: "任务中心", icon: "tasks", route: "tasks", group: "main", requires_auth: false },
   { key: "director", label: "导演台", icon: "clapperboard", route: "director", group: "main", requires_auth: false },
+  { key: "chat", label: "文本对话", icon: "message", route: "chat", group: "create", requires_auth: false },
+  { key: "image", label: "图片生成", icon: "image", route: "image", group: "create", requires_auth: false },
+  { key: "video", label: "视频生成", icon: "video", route: "video", group: "create", requires_auth: false },
+  { key: "speech", label: "音频生成", icon: "audio", route: "speech", group: "create", requires_auth: false },
   { key: "providers", label: "模型服务", icon: "settings", route: "providers", group: "settings", requires_auth: false },
   { key: "engines", label: "本机引擎", icon: "cpu", route: "engines", group: "settings", requires_auth: false },
   { key: "settings", label: "系统设置", icon: "sliders", route: "settings", group: "settings", requires_auth: false },
 ];
 
 /** 前端已实现的页面路由；导航里出现的其它 route 视为「未安装模块」 */
-const KNOWN_ROUTES = new Set(["home", "projects", "canvas", "chat", "image", "video", "speech", "assets", "prompts", "tasks", "director", "providers", "engines", "settings"]);
+const KNOWN_ROUTES = new Set(["home", "projects", "canvas", "chat", "image", "video", "speech", "assets", "prompts", "tasks", "director", "agent", "providers", "engines", "settings"]);
 
 /** route → modules.* 开关键，用于按配置关闭模块 */
 const MODULE_KEYS: Record<string, string> = {
@@ -233,6 +240,8 @@ function Shell() {
             onGoProviders={() => setRoute("providers")}
           />
         );
+      case "agent":
+        return <AgentPage onNavigate={setRoute} />;
       case "canvas":
         return canvasProject ? (
           <CanvasPage

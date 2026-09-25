@@ -152,6 +152,11 @@ input, textarea, select { font-family: inherit; }
   flex-direction: column;
   padding: 16px 12px;
   gap: 4px;
+  /* 侧边栏会随窗口高度被裁：`overflow-y: visible` + 外层 `.app-shell` 的 `hidden`
+     会让底部的「系统设置」与主题/锁定按钮**直接够不着**（实测 658px 高的窗口下，
+     系统设置顶边在 721px 处）。折叠组只是让这件事少发生几次，真正要治的是不给滚。 */
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
@@ -181,6 +186,19 @@ input, textarea, select { font-family: inherit; }
 .nav-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 600; }
 .nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
 .nav-group-label { font-size: 11px; color: var(--text-3); padding: 16px 12px 6px; letter-spacing: 1px; }
+
+/* 折叠组：组名本身就是按钮——收起时它还会被点亮，免得人在组里却看不出自己在哪 */
+.nav-collapse-group { display: flex; flex-direction: column; gap: 4px; }
+.nav-item .nav-group-chevron { margin-left: auto; width: 15px; height: 15px; transition: transform .15s; }
+.nav-group-toggle.open .nav-group-chevron { transform: rotate(180deg); }
+/* 子项往里缩一格 + 一条竖线：一眼看出「这几个是这一组里的」 */
+.nav-group-items {
+  display: flex; flex-direction: column; gap: 4px;
+  padding-left: 10px; margin-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.nav-group-items .nav-item { font-size: 13px; padding: 8px 10px; }
+.nav-group-items .nav-item svg { width: 16px; height: 16px; }
 
 .sidebar-footer { margin-top: auto; padding: 10px 8px 2px; display: flex; flex-direction: column; gap: 2px; }
 .sidebar-footer .nav-item { font-size: 13px; }

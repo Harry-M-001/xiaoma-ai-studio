@@ -188,7 +188,7 @@ register(
              "value": True, "sort_order": 37, "description": "关闭后导航与页面隐藏"},
             {"key": "modules.director", "group_name": "modules", "label": "导演台", "value_type": "bool",
              "value": True, "sort_order": 38, "description": "关闭后导航与页面隐藏"},
-            {"key": "modules.projects", "group_name": "modules", "label": "项目", "value_type": "bool",
+            {"key": "modules.projects", "group_name": "modules", "label": "自由画布", "value_type": "bool",
              "value": True, "sort_order": 39, "description": "关闭后导航与页面隐藏"},
             {"key": "safety.confirm_before_generate", "group_name": "safety", "label": "生成前二次确认", "value_type": "bool",
              "value": True, "sort_order": 1, "description": "开启后，提交图片 / 视频生成前弹窗确认，防止误点烧钱"},
@@ -309,22 +309,32 @@ register(
             FieldSpec("label", "名称", "string", required=True),
             FieldSpec("icon", "图标名", "string", help="message / image / video / library / settings / workflow / community"),
             FieldSpec("route", "路由", "string", required=True, help="对应前端的页面标识"),
-            FieldSpec("group_name", "分组", "select", options=["main", "settings"], default="main"),
+            FieldSpec("group_name", "分组", "select", options=["main", "create", "settings"], default="main",
+                      help="main = 直接列出；create = 收进「创作台」折叠组；settings = 设置小节"),
             FieldSpec("sort_order", "排序", "int", default=0),
             FieldSpec("enabled", "显示", "bool", default=True),
             FieldSpec("requires_auth", "需登录", "bool", default=False),
         ],
         seed=[
             {"key": "home", "label": "首页", "icon": "home", "route": "home", "group_name": "main", "sort_order": 0},
-            {"key": "projects", "label": "项目", "icon": "folder", "route": "projects", "group_name": "main", "sort_order": 1},
-            {"key": "chat", "label": "文本对话", "icon": "message", "route": "chat", "group_name": "main", "sort_order": 2},
-            {"key": "image", "label": "图片生成", "icon": "image", "route": "image", "group_name": "main", "sort_order": 3},
-            {"key": "video", "label": "视频生成", "icon": "video", "route": "video", "group_name": "main", "sort_order": 4},
-            {"key": "speech", "label": "配音", "icon": "audio", "route": "speech", "group_name": "main", "sort_order": 5},
+            # 「项目」这个词让给 Agent 了：这一项现在是「自由画布」，代码里的 `projects` 表/路由不动
+            {"key": "projects", "label": "自由画布", "icon": "folder", "route": "projects", "group_name": "main", "sort_order": 1},
+            # Agent 工作台（路线图批次 12）。**先占位**：页面已能打开，但里面如实写着「还没做」，
+            # 免得侧边栏的结构是残缺的。不想要这个入口在「系统设置 → 导航菜单」里关掉即可。
+            {"key": "agent", "label": "Agent", "icon": "bot", "route": "agent", "group_name": "main", "sort_order": 2},
             {"key": "assets", "label": "资产库", "icon": "library", "route": "assets", "group_name": "main", "sort_order": 6},
             {"key": "prompts", "label": "提示词库", "icon": "sparkles", "route": "prompts", "group_name": "main", "sort_order": 7},
             {"key": "tasks", "label": "任务中心", "icon": "tasks", "route": "tasks", "group_name": "main", "sort_order": 8},
             {"key": "director", "label": "导演台", "icon": "clapperboard", "route": "director", "group_name": "main", "sort_order": 9},
+            # 创作台：四个「写 / 画 / 拍 / 说」的页面收进一个可折叠组。
+            # 注意它们的 sort_order 仍是各自的老值（2–5），**刻意没重排**——重排要动迁移，
+            # 而这一组内部只要相对顺序对就够了（组内按 sort_order 升序渲染）。
+            # 与上面 agent 的 2 不冲突：两者在不同分组里，前端分组后才渲染。
+            {"key": "chat", "label": "文本对话", "icon": "message", "route": "chat", "group_name": "create", "sort_order": 2},
+            {"key": "image", "label": "图片生成", "icon": "image", "route": "image", "group_name": "create", "sort_order": 3},
+            {"key": "video", "label": "视频生成", "icon": "video", "route": "video", "group_name": "create", "sort_order": 4},
+            # 「配音」改名「音频生成」：这一支以后分「配音」与「音乐生成」两支（音乐生成还没做）
+            {"key": "speech", "label": "音频生成", "icon": "audio", "route": "speech", "group_name": "create", "sort_order": 5},
             {"key": "workflow", "label": "工作流", "icon": "workflow", "route": "workflow", "group_name": "main", "sort_order": 10, "enabled": False},
             {"key": "community", "label": "社区", "icon": "community", "route": "community", "group_name": "main", "sort_order": 11, "enabled": False, "requires_auth": True},
             {"key": "providers", "label": "模型服务", "icon": "settings", "route": "providers", "group_name": "settings", "sort_order": 1},
