@@ -378,3 +378,81 @@ class ComfyWorkflow(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
+
+# ============================================================
+# Agent 工作台（2.0）：项目 → 会话（任务）→ 步骤
+# ============================================================
+
+
+class AgentProject(Base):
+    """Agent 项目：一组会话（任务）的归属。
+
+    **这一层存在的唯一理由是把上下文分开**：同一个画布上「选角」和「剪片」是两件事，
+    它们的会话不该互相看见对方的步骤；而同一件事的多次会话（任务）又该归在一起。
+
+    `canvas_project_id` 是「这个项目在动哪张自由画布」——会话不单独绑定，统一继承项目的，
+    少一个可填错的字段。它**不是**本机文件夹；文件夹形态（读/写/命令）是路线图 `#61/#62`。
+    """
+
+    __tablename__ = "agent_projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    canvas_project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentSession(Base):
+    """一次 Agent 会话（= 一次任务），归属于一个项目。
+
+    `agent_project_id` 为空的是历史数据（v2.0.0 之前建的会话）：界面上单独列在「未归档」，
+    不强行塞进某个项目——把别人的会话挪进一个他没建过的项目，比留个「未归档」更糟。
+    """
+
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    agent_project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False, default="新会话")
+    # 用户选的大脑（service_id:model_name）；空 = 交给后端挑一个可用的文本模型
+    model_key: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    # 画布绑定的**兜底值**：正常情况下从项目继承；会话上留一份是为了未归档会话也能用
+    canvas_project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentStep(Base):
+    """会话里的一步：用户说的、模型说的、或一次工具调用。
+
+    **存的是可回放的最小集**：参数、结果摘要、耗时、状态。不存完整上下文——
+    那会让这张表变成一份没人敢删的日志。工具结果里的大内容（比如整张画布）只存
+    摘要，需要全文时按 id 现读。
+    """
+
+    __tablename__ = "agent_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # user | assistant | tool
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="assistant")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    tool_args: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tool_result: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # read | write | irreversible
+    tier: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    # ok | error | pending | rejected | skipped
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ok")
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 模型这一步用的 token（上游给了才记，没给就是 0）
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+

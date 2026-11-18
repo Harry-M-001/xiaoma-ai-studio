@@ -78,8 +78,9 @@ COPY_TREES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # 放大那条「走你的 ComfyUI」要用户拿这份模板去画布上导入，不进包的话便携版用户
     # 就没法用这条路线（而源码版能用，又是「同一功能两种安装方式不一样」那类坑）。
     # 全部加起来约 53 KB，与「大文件不进包」不相干。
-    # 排除调研笔记：那是给自己看的（另一个项目的架构调研），不是给用户的说明书。
-    ("docs", ("toonflow-research.md",)),
+    # 排除手里的素材，不是给用户的说明书：toonflow-research.md 是另一个项目的架构调研；
+    # KIE.md 里放的是**真实 API Key**（已在 .gitignore 里），绝不能进分发包。
+    ("docs", ("toonflow-research.md", "KIE.md")),
 )
 
 # 进包的单个文件
@@ -680,6 +681,8 @@ def clean_stage(out: Path) -> None:
         out / "backend" / "app",
         out / "backend" / "alembic",
         out / "backend" / "tools",
+        out / "backend" / "assets",
+        out / "docs",
         out / "backend" / "alembic.ini",
         out / "backend" / "requirements.txt",
         out / "backend" / "__pycache__",

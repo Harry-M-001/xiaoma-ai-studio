@@ -241,7 +241,7 @@ function Shell() {
           />
         );
       case "agent":
-        return <AgentPage onNavigate={setRoute} />;
+        return <AgentPage onNavigate={setRoute} onOpenCanvas={openCanvas} />;
       case "canvas":
         return canvasProject ? (
           <CanvasPage

@@ -28,3 +28,6 @@ secret.key
 .DS_Store
 Thumbs.db
 *.log
+
+# 本地密钥：KIE 的测试 Key 只放本机，**不进仓库**
+docs/KIE.md

@@ -146,6 +146,93 @@ export interface Asset {
   created_at: string;
 }
 
+// ---------- Agent 工作台（2.0）----------
+
+export interface AgentToolMeta {
+  name: string;
+  label: string;
+  tier: "read" | "write" | "irreversible";
+  tierLabel: string;
+  description: string;
+}
+
+export interface AgentSessionInfo {
+  id: number;
+  title: string;
+  modelKey: string;
+  projectId: number | null;
+  /** 归属的 Agent 项目；旧会话为空（界面列在「未归档」） */
+  agentProjectId: number | null;
+  /** 实际生效的自由画布 id（项目绑定优先） */
+  canvasId?: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Agent 项目：一组会话（任务）的容器，用来把上下文分开 */
+export interface AgentProjectInfo {
+  id: number;
+  name: string;
+  description: string;
+  canvasProjectId: number | null;
+  sessions: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * 一步 = 用户说的 / 模型说的 / 或一次工具调用。
+ *
+ * `toolArgs` / `toolResult` 是后端解析过的对象（解析失败时是原始字符串）——
+ * 界面上要能展开看，所以不在这里再定型成任何业务结构。
+ */
+export interface AgentStepInfo {
+  id: number;
+  seq: number;
+  role: "user" | "assistant" | "tool";
+  content: string;
+  toolName: string;
+  toolArgs: unknown;
+  toolResult: unknown;
+  tier: string;
+  tierLabel: string;
+  status: "ok" | "error" | "pending" | "rejected" | "skipped";
+  durationMs: number;
+  tokens: number;
+  createdAt: string;
+}
+
+export interface AgentRunResult {
+  status: "done" | "need_confirm" | "max_rounds";
+  reply?: string;
+  step?: number;
+  tool?: string;
+  tierLabel?: string;
+  preview?: Record<string, unknown>;
+  model?: string;
+  rounds?: number;
+}
+
+export interface AgentPayload {
+  session: AgentSessionInfo;
+  agentProject: AgentProjectInfo | null;
+  steps: AgentStepInfo[];
+  pending: AgentStepInfo | null;
+  run?: AgentRunResult;
+}
+
+export interface AgentWorkspaceMeta {
+  models: ModelOption[];
+  tools: AgentToolMeta[];
+  /** 内置技能：只有名字与描述常驻，正文由 load_skill 按需取 */
+  skills: { key: string; name: string; description: string }[];
+  tiers: Record<string, string>;
+  projects: AgentProjectInfo[];
+  sessions: AgentSessionInfo[];
+  ready: boolean;
+  problem: string;
+}
+
 // ---------- 导演台：转场与转场音效 ----------
 
 /**

@@ -159,6 +159,95 @@ class OpenAICompatAdapter(BaseAdapter):
         ):
             yield piece
 
+    async def chat_once(
+        self,
+        model: str,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """非流式 + 工具调用。
+
+        为什么要单独一条而不是复用 `chat_stream`：流式响应里的 `tool_calls` 是按
+        **下标增量**拼的（`index` + 分片的 `arguments` 字符串），各家还各有偏差；
+        Agent 每步只等一次完整响应，非流式拿到的就是完整的 `message.tool_calls`，
+        拼装这件事根本不存在。
+        """
+        if not self.base_url or not self.api_key:
+            raise AdapterError(
+                "该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials"
+            )
+        client = await self.client()
+        url = f"{self.base_url}/chat/completions"
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        if max_tokens:
+            body["max_tokens"] = int(max_tokens)
+
+        try:
+            resp = await client.post(url, headers={**self.headers(),
+                                                   "Content-Type": "application/json"}, json=body)
+        except httpx.HTTPError as e:
+            raise AdapterError(
+                network_error_message(e), log_detail=network_error_detail(e, url)
+            ) from e
+        if resp.status_code != 200:
+            raise_upstream_error(resp)
+
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise AdapterError(
+                "上游返回的不是可解析的对话结果", log_detail=f"bad_json host={url_host(url)}"
+            ) from e
+        # **HTTP 200 里的业务错误**：KIE 这类聚合网关会把 401/400/429 包在 body 的
+        # `{"code":400,"msg":"…"}` 里返回，只看状态码会把它当成一次「模型没说话」的
+        # 成功响应——表现是 Agent 静默结束、界面上一句回答都没有。
+        code = data.get("code") if isinstance(data, dict) else None
+        if code is not None and int(code) not in (0, 200):
+            raise AdapterError(
+                f"上游返回错误（{code}）：{str(data.get('msg') or '')[:200]}",
+                log_detail=f"upstream_code={code} host={url_host(url)}",
+            )
+        try:
+            message = (data.get("choices") or [{}])[0].get("message") or {}
+        except (AttributeError, IndexError) as e:
+            raise AdapterError(
+                "上游返回的不是可解析的对话结果", log_detail=f"bad_shape host={url_host(url)}"
+            ) from e
+
+        calls: list[dict[str, Any]] = []
+        for i, tc in enumerate(message.get("tool_calls") or []):
+            fn = (tc or {}).get("function") or {}
+            name = str(fn.get("name") or "").strip()
+            if not name:
+                continue
+            args = fn.get("arguments")
+            if not isinstance(args, str):
+                # 少数服务直接给对象；统一成字符串，后面 parse 才是同一条路
+                args = json.dumps(args if args is not None else {}, ensure_ascii=False)
+            calls.append({
+                "id": str((tc or {}).get("id") or f"call_{i}"),
+                "name": name,
+                "arguments": args,
+            })
+
+        return {
+            "content": message.get("content") or "",
+            "tool_calls": calls,
+            "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason") or "",
+            "usage": data.get("usage") or {},
+        }
+
     async def generate_image(
         self,
         *,

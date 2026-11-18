@@ -24,6 +24,7 @@ from app.config import settings
 from app.database import SessionLocal, init_db
 from app.routers import (
     admin,
+    agent,
     audio,
     canvas,
     chat,
@@ -117,6 +118,7 @@ app.include_router(upscale.router)
 app.include_router(interpolate.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
+app.include_router(agent.router)
 app.include_router(share.router)
 app.include_router(comfy.router)
 app.include_router(update.router)

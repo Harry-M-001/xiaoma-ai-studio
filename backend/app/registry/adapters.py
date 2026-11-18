@@ -14,6 +14,7 @@ from app.providers.ark import ArkAdapter
 from app.providers.base import AdapterError, BaseAdapter
 from app.providers.comfyui import ComfyUIAdapter
 from app.providers.dashscope import DashScopeAdapter
+from app.providers.kie import KieAdapter
 from app.providers.local_tts import LocalTTSAdapter
 from app.providers.openai_compat import OpenAICompatAdapter
 
@@ -73,6 +74,13 @@ register(
     lambda base_url, api_key: DashScopeAdapter(base_url, api_key),
     "阿里百炼 DashScope",
     "可灵 Kling v3 系列 / 通义万相 wan2.7 系列在此接入；模型名如 kling/kling-v3-omni-video-generation、wan2.7-i2v-2026-04-25。",
+)
+register(
+    "kie",
+    lambda base_url, api_key: KieAdapter(base_url, api_key),
+    "KIE 异步任务（图片）",
+    "统一任务接口（createTask → recordInfo）。Base URL 填 https://api.kie.ai；"
+    "模型名如 bytedance/seedream-v4-text-to-image。文本对话请另建一条「OpenAI 兼容」服务。",
 )
 register(
     "comfyui",

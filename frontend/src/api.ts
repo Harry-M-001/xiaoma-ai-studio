@@ -4,6 +4,10 @@ import type {
   Asset,
   AuditLog,
   ChatMessage,
+  AgentPayload,
+  AgentProjectInfo,
+  AgentSessionInfo,
+  AgentWorkspaceMeta,
   ChatSession,
   ComfyWorkflow,
   ConfigImportResult,
@@ -256,6 +260,50 @@ export const api = {
   },
   deleteAsset: (id: number) =>
     request<{ ok: boolean }>(`/api/assets/${id}`, { method: "DELETE" }),
+
+  // ---------- Agent 工作台（2.0） ----------
+  agentMeta: () => request<AgentWorkspaceMeta>("/api/agent/meta"),
+  listAgentProjects: () => request<AgentProjectInfo[]>("/api/agent/projects"),
+  createAgentProject: (payload: {
+    name: string;
+    description?: string;
+    canvas_project_id?: number | null;
+  }) => request<AgentProjectInfo>("/api/agent/projects", { method: "POST", body: json(payload) }),
+  patchAgentProject: (
+    id: number,
+    payload: { name?: string; description?: string; canvas_project_id?: number | null }
+  ) => request<AgentProjectInfo>(`/api/agent/projects/${id}`, { method: "PATCH", body: json(payload) }),
+  deleteAgentProject: (id: number) =>
+    request<{ ok: boolean; unfiled: number }>(`/api/agent/projects/${id}`, { method: "DELETE" }),
+  listAgentSessions: () => request<AgentSessionInfo[]>("/api/agent/sessions"),
+  createAgentSession: (payload: {
+    title?: string;
+    model_key?: string;
+    project_id?: number | null;
+    agent_project_id?: number | null;
+  }) => request<AgentPayload>("/api/agent/sessions", { method: "POST", body: json(payload) }),
+  getAgentSession: (id: number) => request<AgentPayload>(`/api/agent/sessions/${id}`),
+  patchAgentSession: (
+    id: number,
+    payload: {
+      title?: string;
+      model_key?: string;
+      project_id?: number | null;
+      agent_project_id?: number | null;
+    }
+  ) => request<AgentPayload>(`/api/agent/sessions/${id}`, { method: "PATCH", body: json(payload) }),
+  deleteAgentSession: (id: number) =>
+    request<{ ok: boolean }>(`/api/agent/sessions/${id}`, { method: "DELETE" }),
+  agentSend: (id: number, content: string) =>
+    request<AgentPayload>(`/api/agent/sessions/${id}/messages`, {
+      method: "POST",
+      body: json({ content }),
+    }),
+  agentConfirm: (id: number, stepId: number, approve: boolean) =>
+    request<AgentPayload>(`/api/agent/sessions/${id}/confirm`, {
+      method: "POST",
+      body: json({ step_id: stepId, approve }),
+    }),
   // ---- 导演台 ----
   ffmpegStatus: () => request<{ available: boolean; version: string | null }>("/api/director/ffmpeg"),
   listDirectorVideos: () => request<Asset[]>("/api/director/videos"),

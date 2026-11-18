@@ -455,6 +455,39 @@ register(
                 "models_json": [],
             },
             {
+                "key": "kie", "name": "KIE（聚合）", "kind": "openai",
+                # **Base URL 里带模型段**：KIE 的聊天接口是 /<模型>/v1/chat/completions，
+                # 所以一个聊天模型要建一条服务；换模型就换 Base URL（见 hint）。
+                "base_url": "https://api.kie.ai/gemini-3-8-flash-openai/v1", "sort_order": 9,
+                "hint": "聚合接口：一个 Key 覆盖聊天/图片/视频/音频。聊天走 /<模型>/v1/chat/completions，"
+                        "所以每个聊天模型单独建一条（Base URL 带上模型段）；已实测支持工具调用。",
+                # 32 位十六进制、没有前缀。形状与少数平台撞车，但「粘贴 Key 自动接入」会真发一次
+                # 请求验证，撞了也只是多一个候选，不会被静默配错。
+                "key_pattern": r"^[0-9a-f]{32}$",
+                "models_json": [
+                    {"name": "gemini-3-8-flash-openai", "modality": "text",
+                     "label": "Gemini 3.8 Flash（KIE）"},
+                ],
+            },
+            {
+                "key": "kie_image", "name": "KIE（图片/视频·异步）", "kind": "kie",
+                "base_url": "https://api.kie.ai", "sort_order": 10,
+                "hint": "图片/视频走统一异步任务接口（createTask → recordInfo），参考图与首帧会先上传成 URL。"
+                        "文生图：*-text-to-image；参考图编辑：*-edit（如 bytedance/seedream-v4-edit）；"
+                        "视频：kling/v2-5-turbo-image-to-video-pro 或 *-text-to-video-pro。",
+                "key_pattern": r"^[0-9a-f]{32}$",
+                "models_json": [
+                    {"name": "bytedance/seedream-v4-text-to-image", "modality": "image",
+                     "label": "Seedream 4.0 文生图（KIE）"},
+                    {"name": "bytedance/seedream-v4-edit", "modality": "image",
+                     "label": "Seedream 4.0 参考图编辑（KIE）"},
+                    {"name": "kling/v2-5-turbo-image-to-video-pro", "modality": "video",
+                     "label": "Kling 2.5 Turbo 首帧生视频（KIE）"},
+                    {"name": "kling/v2-5-turbo-text-to-video-pro", "modality": "video",
+                     "label": "Kling 2.5 Turbo 文生视频（KIE）"},
+                ],
+            },
+            {
                 "key": "ollama", "name": "本地 Ollama", "kind": "openai",
                 "base_url": "http://127.0.0.1:11434/v1", "sort_order": 8,
                 "hint": "完全本地运行，API Key 可任意填写",

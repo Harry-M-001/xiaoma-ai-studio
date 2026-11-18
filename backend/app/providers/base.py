@@ -203,6 +203,25 @@ class BaseAdapter(ABC):
         max_tokens 为 None 表示交给上游默认值（长文分块生成时会显式限制单次长度）。
         """
 
+    async def chat_once(
+        self,
+        model: str,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """非流式对话，**支持工具调用**。返回归一化后的结果：
+
+            {"content": str, "tool_calls": [{"id","name","arguments"}], "usage": dict}
+
+        Agent 的运行循环只能走这条路——流式状态下拼装 tool_calls 各家的增量格式并不统一，
+        而 Agent 每一步本来就等得起一次完整响应。默认实现直接拒绝：不是所有服务都支持工具调用，
+        **判不出来就别装作能**（与「模型不支持工具时降级成建议卡片」同一条口径）。
+        """
+        raise unsupported("工具调用")
+
     # ---- 图片 ----
 
     @abstractmethod
