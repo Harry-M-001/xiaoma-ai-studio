@@ -11,9 +11,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.registry.canvas_nodes import (
+    FANOUT_IMAGE_KINDS,
     NODE_SCHEMAS,
     STORYBOARD_IMAGE_KINDS,
     is_batch_image,
+    is_fanout_image,
+    is_image_group,
     is_storyboard_image,
 )
 from app.registry.schema_registry import SCHEMA_REGISTRY
@@ -292,10 +295,33 @@ def test_storyboard_image_node_contract():
     assert schema["handles"]["sources"][0]["type"] == "image"
 
 
+def test_image_group_is_the_generic_fanout_primitive():
+    """图片组是通用原语：分镜图是它的旧配方，两者都走同一段扇出执行。"""
+    assert is_image_group("imageGroup") is True
+    assert is_image_group("storyboardImage") is False
+    assert is_fanout_image("imageGroup") is True
+    assert is_fanout_image("storyboardImage") is True
+    assert is_fanout_image("image") is False
+    assert set(FANOUT_IMAGE_KINDS) == {"imageGroup", "storyboardImage"}
+    assert is_batch_image("imageGroup") is True
+
+    schema = NODE_SCHEMAS["imageGroup"]
+    assert schema["category"] == "image"
+    assert schema["label"] == "图片组"
+    for feature in ("styleSelect", "shotLimit", "modelSelect", "imageSize", "sampleCount"):
+        assert feature in schema["features"], feature
+    # 样片与分镜表同源：图片组也能出
+    assert "animatic" in schema["features"]
+    # 分镜图已收成配方：不再作为新建入口，但存量画布仍按原类型执行
+    assert not schema.get("hidden")
+    assert NODE_SCHEMAS["storyboardImage"].get("hidden") is True
+    assert NODE_SCHEMAS["storyboardImage"].get("presetOf") == "imageGroup"
+
+
 def test_style_select_only_on_expected_nodes():
     """风格只挂在会产出内容/画面的节点上（文本素材节点与工作流不需要）。"""
     with_style = {k for k, v in NODE_SCHEMAS.items() if "styleSelect" in v["features"]}
-    assert with_style == {"novel", "script", "storyboard", "storyboardImage", "video"}, with_style
+    assert with_style == {"novel", "script", "storyboard", "storyboardImage", "imageGroup", "video"}, with_style
 
 
 if __name__ == "__main__":

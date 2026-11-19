@@ -414,6 +414,31 @@ def test_renders_from_the_storyboard_plan_and_registers_a_video_asset():
         _run(scenario)
 
 
+def test_image_group_can_render_animatic():
+    """图片组是分镜图的上位原语，样片不能只认旧类型。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        files = {}
+        for no in ("1", "2"):
+            p = root / f"shot{no}.png"
+            p.write_bytes(_png(640, 360))
+            files[no] = p
+        out = root / "sample.mp4"
+        out.write_bytes(b"\x00\x00\x00\x18ftypmp42" + bytes(64))
+
+        async def scenario(maker):  # noqa: ANN001
+            node = _simg_node()
+            node["type"] = "imageGroup"
+            pid = await _seed(maker, node, ["1", "2"], files)
+            with _stub_storage({f"shot{no}.png": p for no, p in files.items()}, root):
+                with _stub_ffmpeg(out, {}):
+                    asset, report = await canvas_runner.render_animatic(pid, "simg")
+            assert asset.kind == "video" and asset.source == "animatic"
+            assert report["shots"] == 2
+
+        _run(scenario)
+
+
 def test_node_settings_actually_reach_the_plan():
     """节点上的画幅/分辨率/默认运镜/兜底时长都要真的用上。"""
     with tempfile.TemporaryDirectory() as tmp:

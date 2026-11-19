@@ -48,7 +48,6 @@ import type {
   CanvasDoc,
   CanvasNodeSchema,
   CanvasNodeStatus,
-  CanvasAgentDraft,
   CanvasAnimaticResult,
   CanvasLint,
   CanvasNodeVersions,
@@ -466,9 +465,6 @@ export const api = {
       schemaVersion: number;
       nodeSchemas: Record<string, CanvasNodeSchema>;
     }>("/api/canvas/contract"),
-  // AI 搭画布：只回草稿，不动画布。落定由前端做（它本来就有画布状态与自动保存）。
-  canvasAgentPlan: (payload: { brief: string; model_key?: string }) =>
-    request<CanvasAgentDraft>("/api/canvas/agent/plan", { method: "POST", body: json(payload) }),
   getCanvas: (projectId: number) =>
     request<CanvasDoc>(`/api/canvas/${projectId}`),
   saveCanvas: (projectId: number, doc: CanvasDoc) =>

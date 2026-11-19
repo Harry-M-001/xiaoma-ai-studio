@@ -1,20 +1,22 @@
-"""AI 搭画布（#19）与 Agent 结果协议（#22）的前端静态检查。
+"""「AI 搭画布」入口收进 Agent 后的前端静态检查。
 
 运行：venv/Scripts/python tests/test_frontend_agent.py
 
-后端那侧已经钉住了「宽容修复」和「结果协议」本身（见 test_canvas_agent.py）。
-这里守的是**前端有没有按协议用**，因为协议一旦被绕过，功能会以最难查的方式坏掉：
+背景：画布页原先有一个「AI 搭画布」按钮，用一句话生成节点草稿。Agent 上线后
+它和 Agent 里的 `draft_canvas` 是同一件事的两套入口——用户不知道该点哪个，
+维护也要改两处。现在口径是：
 
-1. **草稿必须经确认才落库**。「AI 搭画布」的整条价值就在这个确认动作上：
-   如果生成即落库，用户会得到一张自己没同意的画布，而自动保存会立刻把它写进库里。
-2. **落定必须标脏**。不标脏 = 不触发自动保存 = 用户看到节点在画布上、刷新后没了。
-3. **与已有内容错开**。草稿坐标从固定原点算起，直接落上去会正好压在旧节点上。
-4. **每个后端状态都要有对应的说法**。少一个，用户就会看到一块空白区域。
+1. **画布页不再有这条入口**：按钮、弹窗、草稿类型与请求函数都删掉；
+2. **后端 planner 还在**：它仍是 Agent 工具 `draft_canvas` 的实现，
+   只是不再由画布页直接调用；
+3. **降级路径必须留着**：不支持工具调用的模型仍然要能干活——自动链、模板、
+   手动添加节点、分享导入，这四条一个都不能少。
+
+这里的断言全是静态的：删干净之后如果有人又把它加回来，测试会立刻红。
 """
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -22,118 +24,70 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "frontend" / "src"
 CANVAS = SRC / "pages" / "CanvasPage.tsx"
 API = SRC / "api.ts"
+TYPES = SRC / "types.ts"
 BACKEND_AGENT = ROOT / "backend" / "app" / "services" / "canvas_agent.py"
 BACKEND_ROUTER = ROOT / "backend" / "app" / "routers" / "canvas.py"
+BACKEND_TOOLS = ROOT / "backend" / "app" / "services" / "agent_tools.py"
+SKILL_SHORT_VIDEO = ROOT / "backend" / "app" / "skills" / "short-video.md"
 
 
 def _text(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def test_frontend_and_backend_agree_on_the_endpoint():
-    api = _text(API)
-    router = _text(BACKEND_ROUTER)
-    assert '"/api/canvas/agent/plan"' in api, "api.ts 里的地址变了"
-    assert '"/agent/plan"' in router, "后端没有这个路由"
-    assert "canvasAgentPlan:" in api and "api.canvasAgentPlan(" in _text(CANVAS)
-
-
-def test_the_apply_button_is_gated_on_status_ok():
-    """只有 ok 才给「放到画布上」。其余状态一律不给入口。"""
+def test_the_canvas_toolbar_no_longer_has_its_own_agent_entry():
+    """按钮、弹窗、草稿预览一并消失——半留半删比不删更糟。"""
     src = _text(CANVAS)
-    apply_idx = src.index("放到画布上")
-    gate_idx = src.rindex("{ok && (", 0, apply_idx)
-    assert gate_idx > 0, "「放到画布上」没有被 ok 判定包住"
-
-    dialog = src[src.index("function AgentDialog(") :]
-    # 生成本身绝不改动画布：onApply 只能在那个按钮里出现一次
-    assert dialog.count("onApply(") == 1, "onApply 在别处被调用了，草稿可能未经确认就落库"
+    for gone in ("AI 搭画布", "function AgentDialog", "DraftMiniMap", "AGENT_FAIL_TITLE"):
+        assert gone not in src, f"画布页里还有 {gone}，入口没收干净"
+    for gone in ("setAgentOpen", "applyAgentDraft", "canvasAgentPlan"):
+        assert gone not in src, f"画布页里还在调用 {gone}"
 
 
-def test_generating_a_draft_does_not_touch_the_canvas():
-    """生成草稿这一步只能是「请求 + 展示」，不能顺手往画布上写东西。"""
+def test_the_frontend_no_longer_requests_plans_directly():
+    """草稿只经 Agent 的 draft_canvas 生成，前端不再单独发这个请求。"""
+    assert "canvasAgentPlan" not in _text(API), "api.ts 里还留着 canvasAgentPlan"
+    assert "CanvasAgentDraft" not in _text(TYPES), "types.ts 里还留着草稿类型"
+
+
+def test_the_backend_planner_is_still_there_for_the_agent_tool():
+    """planner 没被误删：Agent 的 draft_canvas 还要调它。"""
+    assert "async def plan(" in _text(BACKEND_AGENT)
+    assert '"/agent/plan"' in _text(BACKEND_ROUTER), "后端路由被误删了"
+    tools = _text(BACKEND_TOOLS)
+    assert '"draft_canvas"' in tools and "canvas_agent.plan(" in tools
+    assert '"apply_canvas_draft"' in tools, "草稿落定的工具也不该消失"
+
+
+def test_the_agent_is_told_to_use_the_draft_tools():
+    """技能文档是模型的行为指南，入口搬进 Agent 后这里必须跟上。"""
+    skill = _text(SKILL_SHORT_VIDEO)
+    assert "draft_canvas" in skill, "短剧技能没有引导模型用 draft_canvas"
+
+
+def test_manual_paths_stay_available_for_models_without_tool_calling():
+    """非工具模型也得能把画布搭起来：自动链 / 添加节点 / 分享导入，缺一不可。"""
     src = _text(CANVAS)
-    body = src[src.index("function AgentDialog(") : src.index("/** 节点属性浮框")]
-    for forbidden in ("setNodes(", "setEdges(", "setDirty(", "api.saveCanvas("):
-        assert forbidden not in body, f"搭画布对话框里出现了 {forbidden}，生成不该动画布"
+    for needed in ("自动链", "添加节点", "分享"):
+        assert needed in src, f"画布页少了「{needed}」这条手动路径"
 
 
-def _agent_apply() -> str:
+def test_new_node_menu_skips_recipe_kinds():
+    """「添加节点」不再列出配方节点（旧分镜图）：新画布统一用图片组。"""
     src = _text(CANVAS)
-    body = src[src.index("const applyAgentDraft"):]
-    return body[: body.index("const applyImportedDoc")]
+    menu = src[src.index("canvas-addmenu-title"):]
+    menu = menu[: menu.index("</div>", menu.index("</button>")) + 6]
+    assert "s.hidden" in menu, "添加节点菜单没有按 hidden 过滤"
+    assert "storyboardImage" not in menu, "添加节点菜单里还在硬编码分镜图"
 
 
-def test_applying_delegates_to_the_shared_landing_helper():
-    """落定的三件事（错开 / 重盖章 / 补模型）现在由共用函数负责，两处不再各写一份。
-
-    这里只钉「确实走的是那一份」；那些性质本身由 test_frontend_share.py 钉住，
-    免得同一条断言在两个文件里各写一遍、以后只改一处。
-    """
-    body = _agent_apply()
-    assert "mergeCanvasContent(" in body, "AI 草稿没有走共用的落定逻辑"
-    for forbidden in ("setNodes(", "setEdges("):
-        assert forbidden not in body, f"落定细节漏回了 applyAgentDraft（{forbidden}）"
-
-
-def test_applying_marks_the_canvas_dirty_and_closes_the_dialog():
-    """不标脏就不会自动保存；不关弹窗用户会以为没生效。"""
-    src = _text(CANVAS)
-    helper = src[src.index("const mergeCanvasContent"):]
-    helper = helper[: helper.index("const applyAgentDraft")]
-    assert "setDirty(true)" in helper
-    assert "setAgentOpen(false)" in _agent_apply()
-
-
-def test_applying_offsets_away_from_existing_content():
-    """已有节点时外来内容必须平移，否则会正好压在旧内容上。"""
+def test_the_shared_landing_helper_is_still_used_by_import():
+    """落定逻辑只剩分享导入一个调用方了，但错开/重盖章/补模型这些性质不能丢。"""
     src = _text(CANVAS)
     helper = src[src.index("const mergeCanvasContent"):]
-    helper = helper[: helper.index("const applyAgentDraft")]
-    assert "existing.length > 0" in helper, "没有判断画布是否已有内容"
-    assert "shift" in helper and "position: { x: n.position.x + shift.x" in helper
-    assert "Math.max(...existing.map((n) => n.position.x))" in helper, "没有按现有内容的最右侧平移"
-
-
-def test_applying_ids_are_stamped_so_repeat_runs_do_not_collide():
-    src = _text(CANVAS)
-    helper = src[src.index("const mergeCanvasContent"):]
-    helper = helper[: helper.index("const applyAgentDraft")]
-    assert "Date.now().toString(36)" in helper and "im_${raw}_${stamp}" in helper
-
-
-def test_every_backend_status_has_a_frontend_saying():
-    """后端的结果协议加了状态而前端没跟上时，用户会看到一块空白的失败区。"""
-    backend = _text(BACKEND_AGENT)
-    statuses = re.findall(r"^STATUS_\w+ = \"(\w+)\"", backend, re.M)
-    assert len(statuses) >= 4, f"后端状态没取到：{statuses}"
-
-    src = _text(CANVAS)
-    table = src[src.index("const AGENT_FAIL_TITLE"):]
-    table = table[: table.index("};")]
-    for status in statuses:
-        assert f"{status}:" in table, f"前端没有处理状态 {status}"
-
-
-def test_status_is_not_rendered_by_string_matching():
-    """状态必须按 code 判断，不能去匹配报错文案——文案一改，判断就悄悄失效。"""
-    src = _text(CANVAS)
-    body = src[src.index("function AgentDialog(") : src.index("/** 节点属性浮框")]
-    assert 'draft.status === "ok"' in body or "draft?.status === \"ok\"" in body
-    assert not re.search(r"status\.(includes|startsWith)\(", body), "在按文案猜状态"
-
-
-def test_model_keys_are_filled_by_the_shared_helper():
-    """落内容时按类型填模型，且用的是与自动链同一份 helper（两处各写一遍必漂）。"""
-    src = _text(CANVAS)
-    helper = src[src.index("const mergeCanvasContent"):]
-    helper = helper[: helper.index("const applyAgentDraft")]
-    assert "modelKeyForNodeType(n.type, models)" in helper
-
-    chain = _text(SRC / "canvasChain.ts")
-    assert "export function modelKeyForNodeType" in chain
-    # 自动链也用它，不再自带一份
-    assert "modelKeyForNodeType(type, models)" in chain
+    helper = helper[: helper.index("const applyImportedDoc")]
+    for needed in ("Date.now().toString(36)", "modelKeyForNodeType(", "setDirty(true)"):
+        assert needed in helper, f"落定逻辑里缺 {needed}"
 
 
 if __name__ == "__main__":

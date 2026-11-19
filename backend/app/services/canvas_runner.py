@@ -35,8 +35,9 @@ from app.registry.canvas_nodes import (
     is_asset_image,
     is_batch_image,
     is_doc_kind,
+    is_fanout_image,
+    is_image_group,
     is_runnable,
-    is_storyboard_image,
     is_storyboard_sheet,
     normalize_type,
 )
@@ -669,30 +670,41 @@ async def _create_asset_image_tasks(
     return tasks
 
 
-async def _create_storyboard_image_tasks(
+async def _create_image_group_tasks(
     db: AsyncSession,
     project_id: int,
     node: dict,
     upstream_text: str,
     manual: list[Asset],
     card: style_service.StyleCard | None,
+    *,
+    label: str,
     dry_run: bool = False,
 ) -> list[Task]:
-    """分镜图节点：解析上游分镜表 → 逐镜建一个图片任务。
+    """逐行扇出：解析上游表格 → 每行建一个图片任务。
 
-    与资产设定图的关键差别：**每一镜的参考图是单独挑的**。
-    分镜的「画面」行里通常写着角色中文名，所以逐镜做一次角色提及注入，
-    就能把"这一镜该长什么样"的设定图挂上去，而不是把整批设定图全塞进去。
+    分镜图与图片组共用这一段（分镜图是内置配方）。与资产设定图的关键差别：
+    **每一行的参考图是单独挑的**——行文本里提到角色名，就只挂这一行提到的那几张设定图，
+    而不是把整批设定图全塞进去。
     """
     data = node.get("data") or {}
-    label = NODE_SCHEMAS["storyboardImage"]["label"]
 
     shots = storyboard_sheet.parse_storyboard(upstream_text)
+    if not shots and is_image_group(str(node.get("type") or "")):
+        # 图片组还接受任意 Markdown 表格（只要有「提示词 / 画面」列），
+        # 不要求上游一定产出分镜格式。
+        shots = storyboard_sheet.parse_table_rows(upstream_text)
     if not shots:
+        table_hint = (
+            "，或一张带「提示词 / 画面」列的 Markdown 表格"
+            if is_image_group(str(node.get("type") or ""))
+            else ""
+        )
         raise ValueError(
-            f"「{label}」没能从上游内容里解析出分镜表："
-            "请先运行上游「分镜」节点，并确认它产出的是镜头表"
-            "（`### 镜头N | 景别 | 运镜 | 时长s` + `- 画面：` / `- 首帧提示词：`）"
+            f"「{label}」没能从上游内容里解析出可用的行："
+            "请先运行上游节点，并确认它产出的是镜头表"
+            "（`### 镜头N | 景别 | 运镜 | 时长s` + `- 画面：`）"
+            + table_hint
         )
     total_found = len(shots)
     shots = _dedupe_shots(
@@ -955,7 +967,7 @@ async def _create_shot_video_tasks(
     by_shot = await _assets_by_shot(db, images)
     if not by_shot:
         raise ValueError(
-            f"「{label}」没有拿到带镜号的分镜图：请把上游「分镜图」节点接进来；"
+            f"「{label}」没有拿到带镜号的分镜图：请把上游「图片组」或「分镜图」节点接进来；"
             "想用图库里手动选的图，就把「逐镜出视频」关掉、改用普通模式"
         )
 
@@ -1496,13 +1508,14 @@ async def _build_node_tasks(
             dry_run=dry_run,
         )
 
-    if is_storyboard_image(ntype):
-        # 上游图片一律不带进来：每一镜要的是"这一镜提到的那几个角色"，
-        # 把整批设定图全塞进去只会稀释主体（改由逐镜的提及注入来挑）。
+    if is_fanout_image(ntype):
+        # 上游图片一律不带进来：每一行要的是"这一行提到的那几个角色"，
+        # 把整批设定图全塞进去只会稀释主体（改由逐行的提及注入来挑）。
         manual = await _apply_manual_refs(db, data, [])
         card = await style_service.load_card(db, str(data.get("styleKey") or ""))
-        return await _create_storyboard_image_tasks(
-            db, project_id, node, upstream_text, manual, card, dry_run=dry_run
+        label = str((NODE_SCHEMAS.get(ntype) or {}).get("label") or "图片组")
+        return await _create_image_group_tasks(
+            db, project_id, node, upstream_text, manual, card, label=label, dry_run=dry_run
         )
 
     # 视频节点逐镜出片（D 期）：分镜图节点已经逐镜出好图，这里一镜一段送进生视频。
@@ -2021,8 +2034,8 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
             if node is None:
                 raise ValueError("节点不存在")
             ntype = normalize_type(node.get("type") or "")
-            if not is_storyboard_image(ntype):
-                raise AnimaticInputError("只有「分镜图」节点能出样片——它才有一镜一张图")
+            if not is_fanout_image(ntype):
+                raise AnimaticInputError("只有「图片组 / 分镜图」节点能出样片——它才有一镜一张图")
 
             upstream = await _resolve_upstream(db, project_id, doc, node_id)
             _prompt, _images, _videos, upstream_text = await _node_inputs(db, doc, node, upstream)

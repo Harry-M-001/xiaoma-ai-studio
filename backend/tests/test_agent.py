@@ -44,11 +44,23 @@ def test_the_tool_set_covers_the_canvas_loop():
         "list_agent_projects", "create_agent_project",
         "list_projects", "get_canvas", "summarize_canvas", "preview_canvas", "lint_canvas",
         "create_project", "draft_canvas", "apply_canvas_draft", "update_node", "connect_nodes",
+        "add_image_group",
         "run_canvas", "run_node", "canvas_status",
         "list_skills", "load_skill", "get_task", "get_asset", "list_engines",
         "list_prompt_templates",
     ):
         assert required in names, f"缺少工具 {required}"
+
+
+def test_image_group_tool_is_reversible_and_needs_a_source():
+    """铺图片组是可撤销工具（不是花钱操作），但必须指明接在哪个上游后面。"""
+    spec = agent_tools.by_name("add_image_group")
+    assert spec is not None, "没有「铺图片组」这个工具"
+    assert spec.tier == agent_tools.TIER_WRITE, "铺节点不该是不可逆操作"
+    assert spec.parameters["required"] == ["source_node_id"]
+    assert "imageGroup" in (agent_runner.build_system_prompt(
+        AgentSession(id=1, title="t", model_key="")
+    )), "系统提示词的节点类型表里没有图片组"
 
 
 # ================================================================ 1b. 技能（渐进披露）

@@ -26,7 +26,9 @@ from app.models import AgentProject, AgentSession, AgentStep, Asset, Project, Pr
 from app.registry.canvas_nodes import (
     CANVAS_SCHEMA_VERSION,
     NODE_SCHEMAS,
+    is_hidden_kind,
     normalize_type,
+    preset_of,
     validate_document,
 )
 from app.services import agent_skills, canvas_agent, canvas_runner, engine_install, local_engines
@@ -602,6 +604,9 @@ def _doc_from_draft(draft: dict, project: Project, model_keys: dict[str, str]) -
     nodes = []
     for n in draft.get("nodes") or []:
         kind = normalize_type(str(n.get("kind") or ""))
+        # 旧草稿（M5 之前）里可能还写着配方节点：落定时改写成承载它的原语
+        if is_hidden_kind(kind):
+            kind = preset_of(kind) or kind
         if kind not in NODE_SCHEMAS:
             continue
         nid = f"ag_{n.get('id')}_{stamp}"
@@ -710,6 +715,64 @@ async def _update_node(ctx: ToolContext, args: dict) -> dict:
         "ok": True,
         "data": {"project_id": project.id, "node_id": node_id, "ignored_params": ignored},
         "hint": "只有白名单里的参数会被写进去；被忽略的键在 ignored_params 里。",
+    }
+
+
+async def _add_image_group(ctx: ToolContext, args: dict) -> dict:
+    """在上游节点后面接一个图片组（1→N 出图），可撤销。"""
+    project = await _get_project(ctx, args)
+    source = str(args.get("source_node_id") or "").strip()
+    doc = _doc(project)
+    src = next((n for n in doc["nodes"] if n.get("id") == source), None)
+    if src is None:
+        raise ToolError(f"画布里没有节点 {source}。", hint="先用 get_canvas 看一遍节点 id。")
+    kind = normalize_type(str(src.get("type") or ""))
+
+    model_key = str(args.get("model_key") or "").strip()
+    if not model_key:
+        rows = await provider_store.list_services(ctx.db)
+        option = next(iter(provider_store.list_model_options(rows, "image")), None)
+        if option is None:
+            raise ToolError(
+                "还没有可用的图片模型。",
+                hint="到「模型服务」接入一个，或在参数里指定 model_key。",
+            )
+        model_key = option.key
+
+    stamp = int(time.time() * 1000)
+    node_id = f"ag_ig_{stamp}"
+    pos = src.get("position") or {}
+    data: dict = {"model_key": model_key}
+    for key, arg in (("prompt", "prompt"), ("styleKey", "style_key"), ("shotLimit", "shot_limit")):
+        value = args.get(arg)
+        if value not in (None, ""):
+            data[key] = value
+    doc["nodes"].append({
+        "id": node_id,
+        "type": "imageGroup",
+        "position": {"x": float(pos.get("x") or 0) + 380, "y": float(pos.get("y") or 0)},
+        "data": data,
+    })
+    doc["edges"].append({
+        "id": f"ag_c_{stamp}",
+        "source": source,
+        "sourceHandle": (NODE_SCHEMAS[kind].get("handles", {}).get("sources") or [{}])[0].get("id"),
+        "target": node_id,
+        "targetHandle": "in-any",
+    })
+    try:
+        nodes, edges = validate_document(doc)
+    except ValueError as e:
+        raise ToolError(
+            f"加上图片组之后文档不合法：{e}",
+            hint="确认上游节点的输出端口类型（文本或图片都能接）。",
+        ) from e
+    project.canvas_json = json.dumps({**doc, "nodes": nodes, "edges": edges}, ensure_ascii=False)
+    await ctx.db.commit()
+    return {
+        "ok": True,
+        "data": {"project_id": project.id, "node_id": node_id, "source": source, "model_key": model_key},
+        "hint": "图片组已接在上游后面；跑之前用 preview_canvas 看要几次调用。",
     }
 
 
@@ -966,6 +1029,24 @@ TOOLS: tuple[ToolSpec, ...] = (
         _obj({"project_id": {"type": "integer"}, "source": {"type": "string"}, "target": {"type": "string"}},
              ["source", "target"]),
         _connect_nodes,
+    ),
+    ToolSpec(
+        "add_image_group", "铺图片组",
+        "在上游节点后面接一个图片组：按上游表格逐行出图（一个节点产出 N 张、按行号保序、"
+        "每行只挂它提到的资产设定图）。比让模型现场铺 N 个并列图片节点更省、更稳。",
+        TIER_WRITE,
+        _obj(
+            {
+                "project_id": {"type": "integer"},
+                "source_node_id": {"type": "string"},
+                "model_key": {"type": "string"},
+                "prompt": {"type": "string"},
+                "style_key": {"type": "string"},
+                "shot_limit": {"type": "integer"},
+            },
+            ["source_node_id"],
+        ),
+        _add_image_group,
     ),
     ToolSpec(
         "canvas_status", "画布进度", "看每个节点最近一次任务的状态与错误。跑完用它核对，别凭记忆说结果。",

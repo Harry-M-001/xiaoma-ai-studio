@@ -29,6 +29,18 @@ MAX_SHOTS = 24
 # 汇总性标题：出现在 plan 与正文里，不能当成镜头
 _SKIP_TITLE_WORDS = ("清单", "大纲", "目录", "表格", "总览", "summary", "资产")
 
+# Markdown 表格的分隔行：`| --- | :---: |`
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$")
+
+# 通用表格的表头 → 内部键（图片组接任意表格时用）
+_TABLE_HEADERS = {
+    "no": ("序号", "编号", "镜号", "#", "no", "index", "id"),
+    "name": ("名称", "标题", "名字", "name", "title", "label"),
+    # 「提示词」优先级高于「画面」：前者通常已经是给模型的英文描述
+    "prompt": ("提示词", "生图提示词", "首帧提示词", "prompt", "image prompt"),
+    "scene": ("画面", "画面描述", "描述", "内容", "visual", "content"),
+}
+
 # 标题行：`## 镜头3 | ...` / `**镜头3 | ...**`
 _ATX_HEADING = re.compile(r"^\s{0,3}(#{2,4})\s*(.+?)\s*#*\s*$")
 _BOLD_HEADING = re.compile(r"^\s*\*\*(.+?)\*\*\s*[:：]?\s*$")
@@ -279,3 +291,62 @@ def limit_shots(shots: list[Shot], limit: int) -> list[Shot]:
     if limit <= 0:
         return list(shots)
     return list(shots[:limit])
+
+
+def _table_key(cell: str) -> str:
+    name = _clean(cell).lower()
+    for key, aliases in _TABLE_HEADERS.items():
+        if name in aliases:
+            return key
+    return ""
+
+
+def parse_table_rows(text: str) -> list[Shot]:
+    """通用 Markdown 表格 → 行（图片组接任意表格时用）。
+
+    只认第一张**带「提示词 / 画面 / 描述」列**的表；列名按同义词匹配，顺序随意。
+    每行成一个 Shot：`no` 取序号列（没有就按行号），`heading` 取名称列，
+    提示词同时写进 `first_frame` 与 `scene`（下游生图取前者，生视频拼后者）。
+    """
+    lines = (text or "").splitlines()
+    for i in range(len(lines) - 1):
+        header, sep = lines[i], lines[i + 1]
+        if "|" not in header or not _TABLE_SEP.match(sep):
+            continue
+        cols = [c.strip() for c in header.strip().strip("|").split("|")]
+        keys = [_table_key(c) for c in cols]
+        if "prompt" in keys:
+            prompt_idx, prompt_is_first = keys.index("prompt"), True
+        elif "scene" in keys:
+            prompt_idx, prompt_is_first = keys.index("scene"), False
+        else:
+            continue
+        no_idx = keys.index("no") if "no" in keys else None
+        name_idx = keys.index("name") if "name" in keys else None
+
+        rows: list[Shot] = []
+        j = i + 2
+        while j < len(lines):
+            raw = lines[j].strip()
+            if not raw or "|" not in raw:
+                break
+            cells = [c.strip() for c in raw.strip("|").split("|")]
+            if len(cells) <= prompt_idx:
+                break
+            prompt = _clean(cells[prompt_idx])
+            if prompt:
+                no = _clean(cells[no_idx]) if no_idx is not None and len(cells) > no_idx else str(len(rows) + 1)
+                heading = (
+                    _clean(cells[name_idx])
+                    if name_idx is not None and len(cells) > name_idx and _clean(cells[name_idx])
+                    else f"第{no}行"
+                )
+                rows.append(Shot(no=no or str(len(rows) + 1), heading=heading,
+                                 scene=prompt,
+                                 first_frame=prompt if prompt_is_first else ""))
+                if len(rows) >= MAX_SHOTS:
+                    break
+            j += 1
+        if rows:
+            return rows
+    return []

@@ -31,7 +31,7 @@ def _text(p: Path) -> str:
 
 def _share_dialog() -> str:
     src = _text(CANVAS)
-    return src[src.index("function ShareDialog(") : src.index("/* ---------------- AI 搭画布")]
+    return src[src.index("function ShareDialog(") : src.index("/* ---------------- 运行整图的二次确认")]
 
 
 def _apply_imported() -> str:
@@ -129,14 +129,14 @@ def test_share_dialog_shows_license_and_author_before_importing():
 
 
 def test_every_apply_path_stamps_ids_and_fills_models():
-    """两个来源（AI 草稿、分享导入）都得走同一份落定逻辑，否则早晚只改一处。"""
+    """落定只有分享导入这一条路了，但仍必须走共用逻辑，否则早晚只改一处。"""
     src = _text(CANVAS)
     body = src[src.index("const mergeCanvasContent"):]
-    body = body[: body.index("const applyAgentDraft")]
+    body = body[: body.index("const applyImportedDoc")]
     for needed in ("Date.now().toString(36)", "modelKeyForNodeType(", "setDirty(true)"):
         assert needed in body, f"落定逻辑里缺 {needed}"
 
-    for caller in ("applyAgentDraft", "applyImportedDoc"):
+    for caller in ("applyImportedDoc",):
         fn = src[src.index(f"const {caller}"):]
         fn = fn[: fn.index(");", fn.index("useCallback("))]
         assert "mergeCanvasContent(" in fn, f"{caller} 没有走共用的落定逻辑"

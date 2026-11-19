@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 
 from app.database import Base  # noqa: E402
 from app.models import Asset, ComfyWorkflow, Project, ProviderService, Task  # noqa: E402
-from app.services import canvas_runner, provider_store  # noqa: E402
+from app.services import canvas_runner, provider_store, storyboard_sheet  # noqa: E402
 
 RUNNER_SRC = (BACKEND / "app" / "services" / "canvas_runner.py").read_text(encoding="utf-8")
 
@@ -231,11 +231,30 @@ def test_storyboard_image_dry_run_writes_nothing():
         doc = _graph()
         pid = await _new_project(maker, doc)
         async with maker() as db:
-            tasks = await canvas_runner._create_storyboard_image_tasks(
-                db, pid, _node(doc, "n-shots-img"), SHEET, [], None, dry_run=True
+            tasks = await canvas_runner._create_image_group_tasks(
+                db, pid, _node(doc, "n-shots-img"), SHEET, [], None,
+                label="分镜图", dry_run=True
             )
             assert len(tasks) == 2  # 两镜
             assert await _task_count(db) == 0
+
+    _run(scenario)
+
+
+def test_image_group_executes_through_the_same_fanout():
+    """图片组走的是同一段扇出执行：同一张分镜表 → 同样两镜，且不落库。"""
+    async def scenario(maker):
+        doc = _graph()
+        _node(doc, "n-shots-img")["type"] = "imageGroup"
+        pid = await _new_project(maker, doc)
+        async with maker() as db:
+            upstream = await canvas_runner._resolve_upstream(db, pid, doc, "n-shots-img")
+            tasks = await canvas_runner._build_node_tasks(
+                db, pid, doc, _node(doc, "n-shots-img"), upstream, dry_run=True
+            )
+            assert len(tasks) == 2  # 两镜
+            assert await _task_count(db) == 0
+            assert {t.canvas_node_id for t in tasks} == {"n-shots-img"}
 
     _run(scenario)
 
@@ -254,6 +273,24 @@ def test_shot_video_dry_run_writes_nothing():
             )
             assert len(tasks) == 2  # 两镜各一段
             assert await _task_count(db) == before
+
+    _run(scenario)
+
+
+def test_shot_video_reads_an_image_group_upstream():
+    """逐镜视频不挑上游类型：图片组出的图同样带着镜号，照旧一镜一段。"""
+    async def scenario(maker):
+        doc = _graph(video=True)
+        _node(doc, "n-shots-img")["type"] = "imageGroup"
+        pid = await _new_project(maker, doc)
+        await _seed_storyboard_images(maker, pid)
+        async with maker() as db:
+            upstream = await canvas_runner._resolve_upstream(db, pid, doc, "n-video")
+            tasks = await canvas_runner._build_node_tasks(
+                db, pid, doc, _node(doc, "n-video"), upstream, dry_run=True
+            )
+            assert len(tasks) == 2  # 两镜各一段
+            assert all(t.kind == "video" for t in tasks)
 
     _run(scenario)
 
@@ -471,6 +508,51 @@ def _body(name: str) -> str:
     return RUNNER_SRC[start : min(ends) if ends else len(RUNNER_SRC)]
 
 
+ROW_TABLE = """| 序号 | 画面 | 提示词 |
+| --- | --- | --- |
+| 1 | 橘猫坐在窗台 | a ginger cat on a windowsill, soft light |
+| 2 | 橘猫跳下窗台 | a ginger cat jumping down, motion blur |
+"""
+
+
+def test_image_group_accepts_a_plain_table():
+    """图片组不止认分镜格式：任何带「提示词 / 画面」列的 Markdown 表格都能逐行出图。"""
+    async def scenario(maker):
+        doc = _graph()
+        _node(doc, "n-shots-img")["type"] = "imageGroup"
+        _node(doc, "n-shots")["data"]["docText"] = ROW_TABLE
+        pid = await _new_project(maker, doc)
+        async with maker() as db:
+            upstream = await canvas_runner._resolve_upstream(db, pid, doc, "n-shots-img")
+            tasks = await canvas_runner._build_node_tasks(
+                db, pid, doc, _node(doc, "n-shots-img"), upstream, dry_run=True
+            )
+            assert len(tasks) == 2
+            assert "windowsill" in tasks[0].prompt and "jumping" in tasks[1].prompt
+            assert await _task_count(db) == 0
+
+    _run(scenario)
+
+
+def test_image_group_still_prefers_storyboard_format():
+    """两种格式并存时按分镜表走，别把镜头表当普通表格解析。"""
+    shots = storyboard_sheet.parse_table_rows(ROW_TABLE)
+    assert [s.no for s in shots] == ["1", "2"]
+    assert shots[0].image_prompt == "a ginger cat on a windowsill, soft light"
+    # 空文本 / 没有提示词列 → 空
+    assert storyboard_sheet.parse_table_rows("没有表格") == []
+    assert storyboard_sheet.parse_table_rows("| 名字 | 数量 |\n| --- | --- |\n| 猫 | 2 |\n") == []
+
+
+def test_auto_chain_uses_the_image_group_primitive():
+    """自动链不再铺固定的「分镜图」类型，改成通用图片组（分镜图降为配方）。"""
+    src = (BACKEND.parent / "frontend" / "src" / "canvasChain.ts").read_text(encoding="utf-8")
+    assert "{ type: IMAGE_GROUP_KIND, col: 4, row: 1 }" in src, "L3 没有铺图片组"
+    assert '["storyboard", IMAGE_GROUP_KIND]' in src, "图片组没接分镜表"
+    assert "[IMAGE_GROUP_KIND, \"video\"]" in src, "视频没接图片组"
+    assert 'type: "storyboardImage"' not in src, "自动链还在铺旧的固定节点"
+
+
 def test_guard_preview_shares_the_same_builder():
     """预览必须走 dry_run 的建任务代码，不能自己另写一套估算法。"""
     body = _body("preview_graph")
@@ -482,7 +564,7 @@ def test_guard_fanout_builders_accept_dry_run():
     """会一次建出多个任务的函数都必须能收 dry_run（以后新增批量节点别漏）。"""
     for name in (
         "_create_asset_image_tasks",
-        "_create_storyboard_image_tasks",
+        "_create_image_group_tasks",
         "_create_shot_video_tasks",
         "_create_node_task",
         "_build_node_tasks",
@@ -504,7 +586,7 @@ def test_guard_dry_run_returns_before_commit():
     """三个批量建任务函数都要在 commit 之前就为 dry_run 返回。"""
     for name in (
         "_create_asset_image_tasks",
-        "_create_storyboard_image_tasks",
+        "_create_image_group_tasks",
         "_create_shot_video_tasks",
     ):
         body = _body(name)

@@ -98,8 +98,8 @@ def test_a_deleted_asset_gives_a_sentence_not_a_dead_player():
     assert "不在了" in section, "加载失败时没有给一句解释"
 
 
-def test_only_the_storyboard_image_node_offers_it():
-    """只有分镜图节点该有这个入口：它是唯一「一镜一张图」的节点。
+def test_only_the_fanout_image_nodes_offer_it():
+    """图片组与它的旧配方分镜图都可以出样片：两者都是「一行一张图」。
 
     后端注册表与前端 `features` 必须说的是同一件事——注册表里没开，
     前端多画一个按钮就会点出一个 400。
@@ -109,7 +109,7 @@ def test_only_the_storyboard_image_node_offers_it():
         for kind, schema in NODE_SCHEMAS.items()
         if "animatic" in (schema.get("features") or [])
     ]
-    assert owners == ["storyboardImage"], f"开了样片入口的节点是 {owners}，应当只有分镜图"
+    assert owners == ["storyboardImage", "imageGroup"], f"开了样片入口的节点是 {owners}"
 
     src = _text(CANVAS)
     assert 'features.includes("animatic") && <AnimaticSection' in src, (

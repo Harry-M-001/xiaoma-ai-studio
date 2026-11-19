@@ -638,42 +638,13 @@ input, textarea, select { font-family: inherit; }
 /* 文档正文编辑器：长文编辑要够大，所以在大弹窗基础上再放宽 */
 .canvas-dialog.wide { width: min(1040px, 94vw); height: min(760px, 88vh); }
 
-/* ============ AI 搭画布 ============ */
+/* ============ 画布弹窗里的面板（分享/导入共用） ============ */
 
 /* 比正文编辑器窄：这里主要是读（草稿预览 + 说明），不是改长文 */
 .canvas-dialog.agent { width: min(720px, 94vw); max-height: 86vh; }
 .agent-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; }
-.agent-brief { width: 100%; resize: vertical; font-family: inherit; line-height: 1.6; }
-.agent-examples { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.agent-example {
-  font-size: 11.5px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
-  border: 1px dashed var(--border-strong); background: transparent; color: var(--text-3);
-}
-.agent-example:hover { border-color: var(--primary); color: var(--primary); }
 
 .agent-result { display: flex; flex-direction: column; gap: 10px; }
-.agent-summary { font-size: 13px; font-weight: 600; color: var(--text); }
-.agent-caveat { font-size: 11.5px; color: var(--text-3); line-height: 1.7; }
-
-/* 迷你预览：横向可滚，宽链不会被压成一团 */
-.agent-mini {
-  overflow-x: auto; overflow-y: hidden; padding: 12px;
-  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
-}
-.agent-mini-inner { position: relative; }
-.agent-mini-edges { position: absolute; inset: 0; pointer-events: none; }
-.agent-mini-edges path { fill: none; stroke: var(--border-strong); stroke-width: 1.4; }
-.agent-mini-node {
-  position: absolute; display: flex; align-items: center; justify-content: center;
-  border: 1px solid var(--primary-border); border-radius: 6px; background: var(--surface);
-  color: var(--text-2); font-size: 11px; white-space: nowrap; padding: 0 4px;
-}
-
-.agent-node-list { display: flex; flex-direction: column; gap: 2px; }
-.agent-node-row { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px dashed var(--border); font-size: 12px; }
-.agent-node-row:last-child { border-bottom: none; }
-.agent-node-kind { flex-shrink: 0; width: 84px; color: var(--text-3); }
-.agent-node-prompt { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .agent-lines-title { font-size: 11.5px; font-weight: 600; color: var(--text-3); margin-top: 4px; }
 .agent-lines { list-style: disc; margin: 0 0 0 18px; padding: 0; font-size: 12px; line-height: 1.75; color: var(--text-3); }

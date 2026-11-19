@@ -315,11 +315,30 @@ def test_required_modalities_follows_the_node_catalogue():
 
 
 def test_system_prompt_covers_every_node_kind_in_the_registry():
-    """契约是唯一事实源：注册表里加一个节点类型，提示词里必须自动出现。"""
+    """契约是唯一事实源：注册表里加一个节点类型，提示词里必须自动出现。
+
+    已收成配方的旧类型（`hidden`）例外：它们不再教给模型，
+    否则模型会继续铺出「分镜图 + 图片组」并存的两套说法。
+    """
+    from app.registry.canvas_nodes import is_hidden_kind
+
     prompt = canvas_agent.build_system_prompt({}, [])
     for kind, schema in NODE_SCHEMAS.items():
+        if is_hidden_kind(kind):
+            assert f"- {kind}（{schema['label']}）" not in prompt, f"配方 {kind} 不该再出现在提示词里"
+            continue
         assert f"- {kind}（{schema['label']}）" in prompt, f"提示词里没有 {kind}"
     assert "只输出一个 JSON 对象" in prompt
+
+
+def test_a_recipe_kind_in_a_draft_is_rewritten_to_its_host_node():
+    """模型仍写老类型（分镜图）时，草稿里直接改写成图片组，不丢节点也不留老类型。"""
+    _, nodes, edges, notes = canvas_agent.repair(
+        {"summary": "s", "nodes": [{"id": "n1", "kind": "storyboardImage", "prompt": "逐镜出图"}], "edges": []},
+        {}, [],
+    )
+    assert [n["kind"] for n in nodes] == ["imageGroup"]
+    assert any("并入" in n for n in notes), f"没有说明改写：{notes}"
 
 
 def test_system_prompt_lists_the_real_option_values():

@@ -35,7 +35,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import ParamOption
 from app.providers.base import AdapterError
-from app.registry.canvas_nodes import NODE_SCHEMAS, VIDEO_MODES, normalize_type
+from app.registry.canvas_nodes import (
+    NODE_SCHEMAS,
+    VIDEO_MODES,
+    is_batch_image,
+    is_hidden_kind,
+    normalize_type,
+    preset_of,
+)
 from app.services import provider_store, style_service
 
 logger = logging.getLogger("xiaoma.canvas_agent")
@@ -187,6 +194,10 @@ def build_system_prompt(
         "【可用节点类型】",
     ]
     for kind, schema in NODE_SCHEMAS.items():
+        # 配方节点（如旧分镜图）不再教给模型：新画布统一用承载它的原语，
+        # 否则模型会继续铺出「分镜图 + 图片组」并存的两套说法。
+        if is_hidden_kind(kind):
+            continue
         params = _agent_params(kind)
         in_types = "/".join(h["type"] for h in schema["handles"]["targets"]) or "无"
         out_type = "/".join(h["type"] for h in schema["handles"]["sources"]) or "无"
@@ -211,8 +222,8 @@ def build_system_prompt(
         "【常见需求的搭法】",
         "- 只要文字产出：idea → novel → script → storyboard",
         "- 还要看到画面：再接 assetSheet → assetImage（角色/场景设定图），",
-        "  或 storyboard → storyboardImage（逐镜出图）",
-        "- 还要出片子：storyboardImage 之后接 video（params 里给 shotVideo: chain，逐镜出片并首尾相连）",
+        "  或 storyboard → imageGroup（逐镜出图；图片组就是通用的逐行出图原语）",
+        "- 还要出片子：imageGroup 之后接 video（params 里给 shotVideo: chain，逐镜出片并首尾相连）",
     ]
     if styles:
         lines += ["", "【可选风格卡】用户明确提到风格时才填 params.styleKey（多个节点都填同一个）："]
@@ -416,6 +427,17 @@ def repair(
         if kind not in NODE_SCHEMAS:
             dropped_kinds[kind or "(空)"] = dropped_kinds.get(kind or "(空)", 0) + 1
             continue
+        # 配方节点（旧分镜图）：执行语义已经完全由原语承载，直接改写，
+        # 既不给用户留一个「老类型」画布，也不用他重搭。
+        if is_hidden_kind(kind):
+            host = preset_of(kind)
+            if not host:
+                continue
+            notes.append(
+                f"节点「{NODE_SCHEMAS[kind]['label']}」已并入"
+                f"「{NODE_SCHEMAS[host]['label']}」，草稿里已改用后者（执行效果相同）。"
+            )
+            kind = host
 
         params: dict[str, Any] = {}
         allowed = _agent_params(kind)
@@ -635,7 +657,7 @@ async def plan(
         resolved = await provider_store.resolve_model(db, model_key, "text")
     except AdapterError:
         # 指定的模型不可用就退回「随便挑一个能用的文本模型」：
-        # 用户点的是「AI 搭画布」，不是「用某个特定模型搭画布」。
+        # 用户要的是搭画布这件事，不是「用某个特定模型搭画布」。
         rows = await provider_store.list_services(db)
         first = next(iter(provider_store.list_model_options(rows, "text")), None)
         if first is None:
@@ -701,7 +723,7 @@ async def plan(
         names = "与".join(label.get(m, m) for m in missing)
         warnings.append(f"这份草稿需要{names}模型，你还没接入；可以先把前面的节点跑起来，缺的那一步等接入后再跑。")
 
-    batch_nodes = sum(1 for n in nodes if n["kind"] in ("assetImage", "storyboardImage"))
+    batch_nodes = sum(1 for n in nodes if is_batch_image(n["kind"]))
     if batch_nodes:
         warnings.append(
             f"草稿里有 {batch_nodes} 个节点是「一行/一镜一个任务」的批量出图节点，"

@@ -572,6 +572,10 @@ export interface CanvasNodeSchema {
   /** 文档节点可自定义「输入框」标题与占位文案（如「你的想法」/「补充要求」） */
   promptLabel?: string;
   promptPlaceholder?: string;
+  /** 已收成配方的旧节点：不再出现在新建入口，只为存量画布兼容 */
+  hidden?: boolean;
+  /** 配方现在由哪个节点承载（如 storyboardImage → imageGroup） */
+  presetOf?: string;
 }
 
 export interface CanvasNodeData {
@@ -655,37 +659,6 @@ export interface CanvasNodeData {
   /** 是否自动挂载提示词里提到的资产设定图（false = 关闭，默认开） */
   mentionRefs?: boolean;
   [k: string]: unknown;
-}
-
-/**
- * AI 搭画布：一份**未落库**的草稿。
- *
- * `status` 是机器可读的结果（不是给人看的文案），前端据此决定给什么下一步：
- * ok 有草稿可落 / need_input 需求太短 / need_credentials 没有可用的文本模型 /
- * unparsable 模型没给合法 JSON / upstream_error 上游调用失败。
- */
-export interface CanvasAgentNode {
-  id: string;
-  kind: string;
-  data: CanvasNodeData;
-  /** 后端按拓扑算好的落位（不问模型要坐标，所以它一定是整齐的） */
-  position: { x: number; y: number };
-}
-
-export interface CanvasAgentDraft {
-  status: "ok" | "need_input" | "need_credentials" | "unparsable" | "upstream_error";
-  summary: string;
-  nodes: CanvasAgentNode[];
-  edges: { from: string; to: string }[];
-  /** 后端在修复模型输出时做的改动（丢掉的节点/连线、被改回默认的参数） */
-  notes: string[];
-  /** 下手之前就该知道的事（缺模型、批量节点的花费、视频慢且贵） */
-  warnings: string[];
-  /** 这份草稿需要哪些能力 */
-  requires: string[];
-  /** requires 里本机没有的 */
-  missing: string[];
-  nextAction: string;
 }
 
 /* ---------------- 社区分享 ---------------- */

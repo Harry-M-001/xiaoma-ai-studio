@@ -165,10 +165,17 @@ NODE_SCHEMAS: dict[str, dict] = {
     # 参考图 = 节点上手动选的 + 该镜文本里提到的资产设定图。
     # `animatic` = 出完图之后可以零成本出一版「静图缓动样片」：
     # 按分镜表的时长与运镜把静图串成能看的片子，先审节奏再决定要不要花视频钱。
+    #
+    # 现在它已经是图片组的一条**内置配方**（执行走同一段扇出）：
+    # - `hidden`：不再出现在「添加节点」等新建入口，新画布一律用图片组；
+    # - `presetOf`：模型/草稿里仍写老类型时，修复阶段直接改写成图片组；
+    # - 存量画布里的 storyboardImage 照常执行，不做迁移。
     "storyboardImage": {
         "kind": "storyboardImage",
         "category": "image",
         "label": "分镜图",
+        "hidden": True,
+        "presetOf": "imageGroup",
         "description": "读上游分镜表逐镜出图（用每镜的首帧提示词，自动追加风格词）；"
         "提到资产名会自动挂设定图；出完图可以零成本出一版静图样片",
         "features": [
@@ -182,6 +189,31 @@ NODE_SCHEMAS: dict[str, dict] = {
         ],
         "promptLabel": "补充要求",
         "promptPlaceholder": "可选：每镜都必须出现的元素、统一的画面要求（风格请用上面的风格卡）",
+        "handles": {
+            "targets": [{"id": "in-any", "type": "any"}],
+            "sources": [{"id": "out-image", "type": "image"}],
+        },
+    },
+    # ---- 图片组：通用的「一个节点 → N 张图」（组合原语） ----
+    # 分镜图是它内置的一条配方（读分镜表）；以后商品多角度、角色表情包也从这里长，
+    # 不再为每种场景新增一个节点类型。第一版先复用分镜表的解析与逐行参考注入。
+    "imageGroup": {
+        "kind": "imageGroup",
+        "category": "image",
+        "label": "图片组",
+        "description": "按上游表格逐行出图：一个节点产出 N 张、按行号保序；"
+        "每行用自己的提示词，提到资产名会自动挂设定图。适合分镜、多角度、批量变体",
+        "features": [
+            "prompt",
+            "modelSelect",
+            "styleSelect",
+            "imageSize",
+            "sampleCount",
+            "shotLimit",
+            "animatic",
+        ],
+        "promptLabel": "补充要求",
+        "promptPlaceholder": "可选：每一行都必须出现的元素、统一的画面要求（风格请用上面的风格卡）",
         "handles": {
             "targets": [{"id": "in-any", "type": "any"}],
             "sources": [{"id": "out-image", "type": "image"}],
@@ -214,6 +246,12 @@ ASSET_IMAGE_KINDS = ("assetImage",)
 # 分镜图节点：逐镜批量产生图片任务（同样是 1 个节点 → N 个任务）
 STORYBOARD_IMAGE_KINDS = ("storyboardImage",)
 
+# 图片组节点：通用的「1 → N」出图原语；分镜图是它的一条内置配方
+IMAGE_GROUP_KINDS = ("imageGroup",)
+
+# 所有「逐行扇出」的出图节点：执行器与样片都按这个集合判断
+FANOUT_IMAGE_KINDS = IMAGE_GROUP_KINDS + STORYBOARD_IMAGE_KINDS
+
 # 分镜表节点：产出镜头表（`### 镜头N | 景别 | 运镜 | 时长`），逐镜出图/出片与静态体检的输入
 STORYBOARD_SHEET_KINDS = ("storyboard",)
 
@@ -234,9 +272,18 @@ def is_storyboard_image(ntype: str) -> bool:
     return normalize_type(ntype) in STORYBOARD_IMAGE_KINDS
 
 
+def is_image_group(ntype: str) -> bool:
+    return normalize_type(ntype) in IMAGE_GROUP_KINDS
+
+
+def is_fanout_image(ntype: str) -> bool:
+    """逐行扇出（1 个节点 → N 张图）：图片组与它的旧配方分镜图。"""
+    return normalize_type(ntype) in FANOUT_IMAGE_KINDS
+
+
 def is_batch_image(ntype: str) -> bool:
     """会「一个节点派发 N 个任务」的节点类型。"""
-    return is_asset_image(ntype) or is_storyboard_image(ntype)
+    return is_asset_image(ntype) or is_fanout_image(ntype)
 
 
 def is_runnable(ntype: str) -> bool:
@@ -247,6 +294,18 @@ def is_runnable(ntype: str) -> bool:
 def normalize_type(ntype: str) -> str:
     """旧类型归一（imageEdit → image）。"""
     return LEGACY_TYPE_ALIASES.get(ntype, ntype)
+
+
+def is_hidden_kind(ntype: str) -> bool:
+    """已收成配方：不再出现在新建入口，只为存量画布保留。"""
+    schema = NODE_SCHEMAS.get(normalize_type(ntype)) or {}
+    return bool(schema.get("hidden"))
+
+
+def preset_of(ntype: str) -> str:
+    """这条配方现在用哪个节点承载（空 = 它不是配方）。"""
+    schema = NODE_SCHEMAS.get(normalize_type(ntype)) or {}
+    return str(schema.get("presetOf") or "")
 
 
 def validate_document(doc: dict) -> list[dict]:

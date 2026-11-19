@@ -48,7 +48,6 @@ import {
   Trash2,
   Upload,
   Video,
-  Wand2,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
@@ -56,7 +55,6 @@ import { api } from "../api";
 import type {
   AgentMeta,
   Asset,
-  CanvasAgentDraft,
   CanvasAnimaticReport,
   CanvasRunSummary,
   CanvasDoc,
@@ -85,7 +83,7 @@ import { prefs } from "../prefs";
 import {
   ASSET_IMAGE_KIND,
   CHAIN_LEVELS,
-  STORYBOARD_IMAGE_KIND,
+  IMAGE_GROUP_KIND,
   buildChainNodes,
   missingModelMessage,
   modelKeyForNodeType,
@@ -818,241 +816,6 @@ function ShareDialog({
                 导入到画布
               </button>
             )
-          )}
-        </div>
-    </Dialog>
-  );
-}
-
-/* ---------------- AI 搭画布 ---------------- */
-
-const AGENT_EXAMPLES = [
-  "做一个 60 秒竖屏短剧，三幕结构，从一句话创意开始",
-  "只要文字产出：小说到分镜，先不要出图",
-  "角色要立得住：先出资产表做设定图，再逐镜出图",
-];
-
-/** 预览卡片与间距：固定尺寸而不是按后端坐标缩放——7 列的链缩到 460px 宽会糊成一坨 */
-const MINI_COL_W = 106;
-const MINI_ROW_H = 38;
-const MINI_CARD_W = 88;
-const MINI_CARD_H = 26;
-
-/**
- * 草稿的迷你预览。
- *
- * 不按后端坐标等比缩放，而是取「列序 / 行序」重新摆：后端布局本来就是整齐的网格，
- * 取序号之后无论 3 个节点还是 12 个节点，预览都一样看得清。
- * 形状忠实（分叉能看出来），尺寸不忠实——这是有意的取舍。
- */
-function DraftMiniMap({
-  draft,
-  labelOf,
-}: {
-  draft: CanvasAgentDraft;
-  labelOf: (kind: string) => string;
-}) {
-  const xs = [...new Set(draft.nodes.map((n) => n.position.x))].sort((a, b) => a - b);
-  const colOf = new Map(xs.map((x, i) => [x, i]));
-  const byCol = new Map<number, CanvasAgentDraft["nodes"]>();
-  for (const n of draft.nodes) {
-    const c = colOf.get(n.position.x) ?? 0;
-    byCol.set(c, [...(byCol.get(c) ?? []), n]);
-  }
-  const place = new Map<string, { x: number; y: number }>();
-  let maxRows = 1;
-  for (const [col, list] of byCol) {
-    const sorted = [...list].sort((a, b) => a.position.y - b.position.y);
-    maxRows = Math.max(maxRows, sorted.length);
-    sorted.forEach((n, row) => place.set(n.id, { x: col * MINI_COL_W, y: row * MINI_ROW_H }));
-  }
-  const width = Math.max(1, xs.length) * MINI_COL_W;
-  const height = maxRows * MINI_ROW_H;
-
-  return (
-    <div className="agent-mini">
-      <div className="agent-mini-inner" style={{ width, height }}>
-        <svg className="agent-mini-edges" width={width} height={height}>
-          {draft.edges.map((e, i) => {
-            const a = place.get(e.from);
-            const b = place.get(e.to);
-            if (!a || !b) return null;
-            const y1 = a.y + MINI_CARD_H / 2;
-            const y2 = b.y + MINI_CARD_H / 2;
-            const mid = (a.x + MINI_CARD_W + b.x) / 2;
-            return (
-              <path
-                key={i}
-                d={`M ${a.x + MINI_CARD_W} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${b.x} ${y2}`}
-              />
-            );
-          })}
-        </svg>
-        {draft.nodes.map((n) => {
-          const p = place.get(n.id)!;
-          return (
-            <div
-              key={n.id}
-              className="agent-mini-node"
-              style={{ left: p.x, top: p.y, width: MINI_CARD_W, height: MINI_CARD_H }}
-              title={String(n.data.prompt ?? "")}
-            >
-              {labelOf(n.kind)}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-/** 状态 → 这块面板该怎么说话。文案集中在表里，免得散在 JSX 里各写一遍。 */
-const AGENT_FAIL_TITLE: Record<CanvasAgentDraft["status"], string> = {
-  ok: "",
-  need_input: "需求再具体一点",
-  need_credentials: "还没有可用的文本模型",
-  unparsable: "模型没有按格式回答",
-  upstream_error: "调用模型失败",
-};
-
-function AgentDialog({
-  textModels,
-  schemas,
-  onApply,
-  onClose,
-}: {
-  textModels: ModelOption[];
-  schemas: Record<string, CanvasNodeSchema>;
-  onApply: (draft: CanvasAgentDraft) => void;
-  onClose: () => void;
-}) {
-  const toast = useToast();
-  const [brief, setBrief] = useState("");
-  const [modelKey, setModelKey] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [draft, setDraft] = useState<CanvasAgentDraft | null>(null);
-
-  const labelOf = (kind: string) => schemas[kind]?.label ?? kind;
-
-  const run = async () => {
-    if (brief.trim().length < 4) {
-      toast.error("先说说你想做什么");
-      return;
-    }
-    setBusy(true);
-    try {
-      setDraft(await api.canvasAgentPlan({ brief: brief.trim(), model_key: modelKey }));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "生成失败");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const ok = draft?.status === "ok";
-
-  return (
-    <Dialog
-      onClose={onClose}
-      label="AI 搭画布"
-      maskClassName="canvas-dialog-mask"
-      className="canvas-dialog agent"
-    >
-        <div className="canvas-dialog-head">
-          <span className="canvas-dialog-title">AI 搭画布</span>
-          <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
-            <X size={14} />
-          </button>
-        </div>
-
-        <div className="agent-body">
-          <div className="field">
-            <label className="field-label">你想要什么</label>
-            <textarea
-              className="input agent-brief"
-              rows={2}
-              autoFocus
-              value={brief}
-              placeholder="例如：做一个 60 秒竖屏短剧，三幕结构，从一句话创意开始"
-              onChange={(e) => setBrief(e.target.value)}
-            />
-            <div className="agent-examples">
-              {AGENT_EXAMPLES.map((ex) => (
-                <button key={ex} type="button" className="agent-example" onClick={() => setBrief(ex)}>
-                  {ex}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="field">
-            <label className="field-label">用哪个模型搭（可留空，自动挑一个可用的文本模型）</label>
-            <ModelSelect models={textModels} value={modelKey} onChange={setModelKey} placeholder="自动选择" />
-          </div>
-
-          {draft && (
-            <div className="agent-result">
-              {ok ? (
-                <>
-                  <div className="agent-summary">{draft.summary || "已按你的需求搭好草稿"}</div>
-                  <DraftMiniMap draft={draft} labelOf={labelOf} />
-                  <div className="agent-node-list">
-                    {draft.nodes.map((n) => (
-                      <div key={n.id} className="agent-node-row">
-                        <span className="agent-node-kind">{labelOf(n.kind)}</span>
-                        <span className="agent-node-prompt">{String(n.data.prompt ?? "") || "（未写要求）"}</span>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <div className="agent-fail">
-                  <div className="agent-fail-title">{AGENT_FAIL_TITLE[draft.status]}</div>
-                  {draft.nextAction ? <div className="agent-fail-next">{draft.nextAction}</div> : null}
-                </div>
-              )}
-
-              {draft.warnings.length > 0 && (
-                <ul className="agent-lines warn">
-                  {draft.warnings.map((w, i) => (
-                    <li key={i}>{w}</li>
-                  ))}
-                </ul>
-              )}
-              {draft.notes.length > 0 && (
-                <>
-                  <div className="agent-lines-title">我对模型给的东西做了这些改动</div>
-                  <ul className="agent-lines">
-                    {draft.notes.map((n, i) => (
-                      <li key={i}>{n}</li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {ok && (
-                <div className="agent-caveat">
-                  这只是草稿：落定之后每个节点的要求都可以再改，也可以先只跑前面几步看看效果。
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="canvas-dialog-foot">
-          <span className="canvas-dialog-hint">
-            {ok ? `${draft.nodes.length} 个节点 · 还没放到画布上` : "生成不影响现有画布"}
-          </span>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-            关闭
-          </button>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void run()} disabled={busy}>
-            {busy ? <Spinner /> : <Sparkles size={14} />}
-            {draft ? "重新生成" : "生成草稿"}
-          </button>
-          {ok && (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => onApply(draft)}>
-              放到画布上
-            </button>
           )}
         </div>
     </Dialog>
@@ -2449,7 +2212,9 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
           <div className="field-hint">
             {String(data.nodeType) === ASSET_IMAGE_KIND
               ? "点开可放大；资产名已入库，下游提到名字会自动挂图"
-              : "点开可放大；格子上的标签就是镜号"}
+              : String(data.nodeType) === IMAGE_GROUP_KIND
+                ? "点开可放大；格子上的标签是行号，提到资产名会自动挂设定图"
+                : "点开可放大；格子上的标签就是镜号"}
           </div>
         </div>
       )}
@@ -2824,7 +2589,6 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [assetKind, setAssetKind] = useState<AssetKind>("all");
   const [railTab, setRailTab] = useState<"elements" | "assets">("elements");
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
-  const [agentOpen, setAgentOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [pickerFor, setPickerFor] = useState<{ nodeId: string; slot?: "first" | "last" } | null>(null);
   const [lightbox, setLightbox] = useState<LightboxItem | null>(null);
@@ -3094,18 +2858,6 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       return added.length;
     },
     [models, schemas, setEdges, setNodes]
-  );
-
-  const applyAgentDraft = useCallback(
-    (draft: CanvasAgentDraft) => {
-      const count = mergeCanvasContent(
-        draft.nodes.map((n) => ({ id: n.id, type: n.kind, position: n.position, data: n.data })),
-        draft.edges.map((e) => ({ source: e.from, target: e.to })),
-      );
-      setAgentOpen(false);
-      toast.success(`已放上 ${count} 个节点，可以逐个改，也可以直接运行`);
-    },
-    [mergeCanvasContent, toast]
   );
 
   const applyImportedDoc = useCallback(
@@ -3696,14 +3448,6 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             </button>
             <button
               className="btn btn-ghost btn-sm"
-              onClick={() => setAgentOpen(true)}
-              title="用一句话描述你想要什么，让 AI 把节点拓扑搭出来（只出草稿，确认后才落到画布上）"
-            >
-              <Wand2 size={14} />
-              AI 搭画布
-            </button>
-            <button
-              className="btn btn-ghost btn-sm"
               onClick={() => setShareOpen(true)}
               title="把这个画布分享给别人（分享码或 .json 文件），或导入别人分享的画布"
             >
@@ -3885,20 +3629,23 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                 }}
               >
                 <div className="canvas-addmenu-title">添加节点</div>
-                {Object.entries(schemas).map(([type, s]) => (
-                  <button
-                    key={type}
-                    className="canvas-addmenu-item"
-                    onClick={() => {
-                      addNodeAt(type, addMenu.x, addMenu.y);
-                      setAddMenu(null);
-                    }}
-                  >
-                    {CATEGORY_ICON[s.category]}
-                    <span>{s.label}</span>
-                    <em>{s.description}</em>
-                  </button>
-                ))}
+                {Object.entries(schemas)
+                  // 配方节点（如旧分镜图）不再作为新节点入口，统一用承载它的原语
+                  .filter(([, s]) => !s.hidden)
+                  .map(([type, s]) => (
+                    <button
+                      key={type}
+                      className="canvas-addmenu-item"
+                      onClick={() => {
+                        addNodeAt(type, addMenu.x, addMenu.y);
+                        setAddMenu(null);
+                      }}
+                    >
+                      {CATEGORY_ICON[s.category]}
+                      <span>{s.label}</span>
+                      <em>{s.description}</em>
+                    </button>
+                  ))}
               </div>
             </>
           )}
@@ -3918,15 +3665,6 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             onSave={(text) => saveDocText(editorFor.nodeId, text)}
             onClear={() => saveDocText(editorFor.nodeId, "")}
             onClose={() => setEditorFor(null)}
-          />
-        )}
-
-        {agentOpen && (
-          <AgentDialog
-            textModels={models.filter((m) => m.modality === "text")}
-            schemas={schemas}
-            onApply={applyAgentDraft}
-            onClose={() => setAgentOpen(false)}
           />
         )}
 
