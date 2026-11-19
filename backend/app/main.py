@@ -33,7 +33,9 @@ from app.routers import (
     engines,
     interpolate,
     generation,
+    harness,
     logs,
+    mcp,
     meta,
     projects,
     providers,
@@ -48,6 +50,7 @@ from app.services import (
     engine_install,
     ffmpeg_service,
     log_service,
+    mcp_gate,
     ollama_service,
 )
 from app.services.runner import runner
@@ -92,6 +95,8 @@ async def lifespan(app: FastAPI):
         pass
     # 正在下载的本机引擎要停下来：不然进程关了、那条 httpx 连接还挂着写文件
     await engine_install.shutdown()
+    # 挂着等确认的 MCP 调用随进程一起结束，不让它悬在 dsh 那一侧
+    mcp_gate.cleanup_stale()
     runner.shutdown()
 
 
@@ -119,6 +124,8 @@ app.include_router(interpolate.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(agent.router)
+app.include_router(mcp.router)
+app.include_router(harness.router)
 app.include_router(share.router)
 app.include_router(comfy.router)
 app.include_router(update.router)

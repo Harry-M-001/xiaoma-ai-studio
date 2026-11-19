@@ -3,6 +3,7 @@ import { Puzzle } from "lucide-react";
 import Sidebar, { type RouteKey } from "./components/Sidebar";
 import LoginGate from "./components/LoginGate";
 import SetupBanner from "./components/SetupBanner";
+import McpGate from "./components/McpGate";
 import { ToastProvider } from "./components/Toast";
 import { Empty } from "./components/common";
 import { api, authToken, cfgBool, cfgString } from "./api";
@@ -323,6 +324,8 @@ function Shell() {
         <SetupBanner route={route} onNavigate={setRoute} />
         {renderPage()}
       </main>
+      {/* dsh sidecar 的执行确认：MCP 工具调用挂起，任何页面都要能看到 */}
+      <McpGate />
     </div>
   );
 }

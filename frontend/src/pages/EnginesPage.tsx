@@ -12,8 +12,9 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
-import type { EngineItem, EngineLocalTts, EnginePageData } from "../types";
+import type { EngineItem, EngineLocalTts, EnginePageData, HarnessStatus } from "../types";
 import { Empty, Spinner } from "../components/common";
+import HarnessDirPicker from "../components/HarnessDirPicker";
 import { useToast } from "../components/Toast";
 
 /**
@@ -164,6 +165,8 @@ export default function EnginesPage({ onNavigate }: { onNavigate?: (route: strin
         }
         onNavigate={onNavigate}
       />
+
+      <HarnessCard />
 
       <div className="eng-list">
         {data.engines.map((e) => (
@@ -451,6 +454,232 @@ function EngineCard({
       {item.job?.error && <div className="eng-note eng-note-warn">上次失败：{item.job.error}</div>}
       {item.job?.phase === "done" && item.job.note && (
         <div className="eng-note eng-note-ok">{item.job.note}</div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * DeepSeek Harness（高级模式）：可选组件。
+ *
+ * 装它不会改变原 Agent 的任何行为——只有点了「启动」才会多起一个 Node 进程。
+ * 下载与安装都是慢活儿，状态由后端后台任务推进，这里只轮询与显示。
+ */
+function HarnessCard() {
+  const toast = useToast();
+  const [st, setSt] = useState<HarnessStatus | null>(null);
+  const [busy, setBusy] = useState("");
+  const [wsDraft, setWsDraft] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const timer = useRef<number | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setSt(await api.harnessStatus());
+    } catch {
+      /* 轮询失败不打扰：下一轮继续 */
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, [load]);
+
+  useEffect(() => {
+    if (timer.current) window.clearTimeout(timer.current);
+    const working = ["checking", "downloading", "installing"].includes(st?.job.state ?? "");
+    if (working || busy === "start") {
+      timer.current = window.setTimeout(() => void load(), 1500);
+    }
+  }, [st, busy, load]);
+
+  const install = async () => {
+    setBusy("install");
+    try {
+      await api.harnessInstall();
+      toast.success("已开始下载与安装，进度会显示在这张卡上");
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "安装失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const start = async () => {
+    setBusy("start");
+    try {
+      const r = await api.harnessStart();
+      if (r.ok && r.url) {
+        toast.success("高级模式已启动");
+        window.open(r.url, "_blank", "noopener");
+      } else {
+        toast.error(r.error || "启动失败");
+      }
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "启动失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const stop = async () => {
+    setBusy("stop");
+    try {
+      await api.harnessStop();
+      toast.success("已停止");
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "停止失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const saveWorkspace = async () => {
+    setBusy("ws");
+    try {
+      const r = await api.harnessSetWorkspace((wsDraft ?? st?.workspace.path ?? "").trim());
+      toast.success(`工作区已保存：${r.path}`);
+      setWsDraft(null);
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "工作区不可用");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  if (!st) return null;
+  const working = ["checking", "downloading", "installing"].includes(st.job.state);
+
+  return (
+    <div className="card eng-card harness-card">
+      <div className="eng-row">
+        <div className="eng-row-main">
+          <div className="eng-name">
+            <b>DeepSeek Harness</b>
+            <span className={"eng-chip tiny" + (st.running ? " ok" : "")}>
+              {st.running ? "运行中" : st.dsh.installed ? "已安装" : "未安装"}
+            </span>
+          </div>
+          <div className="eng-why">
+            可选的高级模式：文件、Shell、代码搜索与子 Agent 交给 DeepSeek Harness，
+            画布与花钱的确认仍由小马守着。不装、不启动时，原 Agent 完全不受影响。
+          </div>
+        </div>
+        <span className="eng-status">固定版本 {st.dsh.pinned}</span>
+      </div>
+
+      <div className="harness-chips">
+        <span className={"eng-chip" + (st.node.ready ? " ok" : " warn")}>
+          Node：{st.node.ready ? st.node.text : "未就绪"}
+        </span>
+        <span className={"eng-chip" + (st.dsh.installed ? " ok" : "")}>
+          dsh：{st.dsh.installed ? st.dsh.version || "已安装" : "未安装"}
+        </span>
+        <span className={"eng-chip" + (st.modelReady ? " ok" : " warn")}>
+          DeepSeek Key：{st.modelReady ? "可用" : "缺失"}
+        </span>
+        <span className="eng-chip">{st.permission}</span>
+      </div>
+
+      <div className="harness-workspace">
+        <label className="field-label">工作区（dsh 只能写这个目录）</label>
+        <div className="harness-ws-row">
+          <input
+            className="input"
+            value={wsDraft ?? st.workspace.path}
+            placeholder="例如 D:\\我的短剧项目"
+            onChange={(e) => setWsDraft(e.target.value)}
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={Boolean(busy)}
+            onClick={() => setPicking(true)}
+          >
+            浏览…
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={Boolean(busy) || (wsDraft ?? st.workspace.path).trim() === st.workspace.path}
+            onClick={() => void saveWorkspace()}
+          >
+            保存
+          </button>
+        </div>
+        <div className={"eng-note" + (st.workspace.ready ? "" : " eng-note-warn")}>
+          {st.workspace.ready ? "目录可写，dsh 的越界写入会被沙箱拒绝。" : st.workspace.reason}
+        </div>
+      </div>
+
+      {working && (
+        <div className="harness-progress">
+          <Spinner />
+          {st.job.detail || "处理中…"}
+        </div>
+      )}
+      {st.job.state === "error" && <div className="eng-note eng-note-warn">{st.job.error}</div>}
+
+      <div className="harness-actions">
+        {!st.dsh.installed && (
+          <button className="btn btn-primary" disabled={Boolean(busy) || working} onClick={() => void install()}>
+            <Download size={14} /> 下载并安装
+          </button>
+        )}
+        {st.dsh.installed && !st.running && (
+          <button
+            className="btn btn-primary"
+            disabled={Boolean(busy) || !st.workspace.ready}
+            title={st.workspace.ready ? "" : st.workspace.reason}
+            onClick={() => void start()}
+          >
+            <Play size={14} /> 启动高级模式
+          </button>
+        )}
+        {st.running && (
+          <>
+            <a className="btn btn-primary" href={st.url} target="_blank" rel="noreferrer">
+              <ExternalLink size={14} /> 打开
+            </a>
+            {st.owned && (
+              <button className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void stop()}>
+                <X size={14} /> 停止
+              </button>
+            )}
+          </>
+        )}
+        {st.running && !st.owned && (
+          <span className="eng-note">
+            端口上已经有一个 dsh 在跑（不是这里启动的），所以只给「打开」。
+          </span>
+        )}
+      </div>
+
+      {st.log && (
+        <details className="harness-log">
+          <summary>最近日志</summary>
+          <pre>{st.log}</pre>
+        </details>
+      )}
+
+      {picking && (
+        <HarnessDirPicker
+          initial={wsDraft ?? st.workspace.path}
+          onPick={(path) => {
+            setWsDraft(path);
+            setPicking(false);
+            toast.success("已选择目录，点「保存」后生效");
+          }}
+          onClose={() => setPicking(false)}
+        />
       )}
     </div>
   );

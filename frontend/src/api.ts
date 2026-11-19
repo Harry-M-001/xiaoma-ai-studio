@@ -17,10 +17,13 @@ import type {
   EngineJob,
   EngineLocalTts,
   EnginePageData,
+  HarnessDirs,
+  HarnessStatus,
   InterpolateOptions,
   InterpolateRequest,
   LogExport,
   LogsStatus,
+  McpConfirmation,
   ModalityMeta,
   ModelOption,
   ModelSpec,
@@ -305,6 +308,14 @@ export const api = {
       method: "POST",
       body: json({ step_id: stepId, approve }),
     }),
+  // ---------- dsh sidecar：阻塞式确认门 ----------
+  // 工具调用在 MCP 那一侧挂起，界面轮询这张表；批准动作只在这里，模型拿不到。
+  mcpConfirmations: () => request<{ items: McpConfirmation[] }>("/api/mcp/confirmations"),
+  mcpConfirm: (stepId: number, approve: boolean) =>
+    request<{ ok: boolean }>(`/api/mcp/confirmations/${stepId}`, {
+      method: "POST",
+      body: json({ approve }),
+    }),
   // ---- 导演台 ----
   ffmpegStatus: () => request<{ available: boolean; version: string | null }>("/api/director/ffmpeg"),
   listDirectorVideos: () => request<Asset[]>("/api/director/videos"),
@@ -565,6 +576,24 @@ export const api = {
     request<EngineLocalTts>("/api/engines/local-tts/connect", { method: "POST" }),
   disconnectLocalTts: () =>
     request<EngineLocalTts>("/api/engines/local-tts/disconnect", { method: "POST" }),
+
+  // ---- DeepSeek Harness（可选组件，高级模式）----
+  harnessStatus: () => request<HarnessStatus>("/api/harness/status"),
+  harnessInstall: () =>
+    request<{ job: HarnessStatus["job"] }>("/api/harness/install", { method: "POST" }),
+  harnessStart: (port?: number) =>
+    request<{ ok: boolean; url?: string; error?: string; hint?: string; detail?: string }>(
+      "/api/harness/start",
+      { method: "POST", body: json({ port: port ?? 3080 }) },
+    ),
+  harnessStop: () => request<{ ok: boolean }>("/api/harness/stop", { method: "POST" }),
+  harnessSetWorkspace: (path: string) =>
+    request<{ ok: boolean; path: string }>("/api/harness/workspace", {
+      method: "POST",
+      body: json({ path }),
+    }),
+  harnessDirs: (path = "") =>
+    request<HarnessDirs>(`/api/harness/dirs?path=${encodeURIComponent(path)}`),
 
   // ---- 在线更新 ----
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),

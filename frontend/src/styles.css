@@ -672,6 +672,11 @@ input, textarea, select { font-family: inherit; }
 .run-confirm-total { font-size: 13px; line-height: 1.8; color: var(--text-2); }
 .run-confirm-total b { color: var(--text); }
 
+/* MCP 阻塞式确认卡：文案短、以数字为主 */
+.run-confirm-lead { margin: 0; font-size: 13px; line-height: 1.8; color: var(--text-2); }
+.run-confirm-lead b { color: var(--text); }
+.run-confirm-hint { font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
+
 .run-confirm-nodes { display: flex; flex-direction: column; gap: 2px; }
 .run-confirm-row {
   display: flex; align-items: baseline; gap: 10px; padding: 6px 0;
@@ -951,6 +956,47 @@ input, textarea, select { font-family: inherit; }
   }
   .eng-status { max-width: none; text-align: left; }
 }
+
+/* DeepSeek Harness（可选组件）：状态、动作、日志 */
+.harness-card { margin-bottom: var(--space-4); }
+.harness-chips { display: flex; flex-wrap: wrap; gap: var(--space-1-5); margin-top: var(--space-2); }
+.harness-progress {
+  display: flex; align-items: center; gap: var(--space-2);
+  margin-top: var(--space-2); font-size: var(--font-size-sm); color: var(--text-2);
+}
+.harness-workspace { display: flex; flex-direction: column; gap: var(--space-1-5); margin-top: var(--space-3); }
+.harness-ws-row { display: flex; gap: var(--space-2); align-items: center; }
+.harness-ws-row .input { flex: 1; min-width: 0; }
+.harness-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.harness-log { margin-top: var(--space-2); }
+.harness-log summary { cursor: pointer; font-size: var(--font-size-xs); color: var(--text-3); }
+.harness-log pre {
+  max-height: 180px; overflow: auto; margin: var(--space-2) 0 0;
+  padding: var(--space-2); border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface-2);
+  font-size: var(--font-size-xs); line-height: 1.6; color: var(--text-3); white-space: pre-wrap;
+}
+
+/* 工作区选择器：只浏览目录 */
+.canvas-dialog.dir-picker { width: min(620px, 94vw); max-height: 80vh; }
+.dir-picker-path { display: flex; gap: var(--space-2); align-items: center; margin-bottom: var(--space-2); }
+.dir-picker-current {
+  flex: 1; min-width: 0; font-size: var(--font-size-xs); color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dir-picker-list { display: flex; flex-direction: column; gap: 2px; max-height: 46vh; overflow-y: auto; }
+.dir-picker-row {
+  display: flex; gap: var(--space-2); align-items: center; padding: 7px 8px;
+  border-radius: var(--radius-sm); border: 1px solid transparent; background: none;
+  color: var(--text); cursor: pointer; font-family: inherit; font-size: var(--font-size-sm);
+  text-align: left;
+}
+.dir-picker-row:hover { background: var(--surface-2); border-color: var(--border); }
+.dir-picker-hint {
+  display: flex; gap: var(--space-2); align-items: center;
+  font-size: var(--font-size-xs); color: var(--text-3); padding: var(--space-2-5) 0;
+}
+.dir-picker-hint.err { color: var(--danger); }
 
 /* ============ 社区分享 ============ */
 

@@ -173,9 +173,20 @@ async def _next_seq(db: AsyncSession, session_id: int) -> int:
     return int(last or 0) + 1
 
 
-async def add_step(db: AsyncSession, session_id: int, **kw: Any) -> AgentStep:
+async def stage_step(db: AsyncSession, session_id: int, **kw: Any) -> AgentStep:
+    """建一步但**先不提交**：调用方可能需要在提交前登记等待者。
+
+    MCP 的阻塞式确认门就是这种调用方：如果先提交、后登记，界面轮询会在这个
+    极短窗口里看到一条「没人等的 pending」，把它误判成超时。
+    """
     step = AgentStep(session_id=session_id, seq=await _next_seq(db, session_id), **kw)
     db.add(step)
+    await db.flush()  # 拿到 id，事务仍未提交
+    return step
+
+
+async def add_step(db: AsyncSession, session_id: int, **kw: Any) -> AgentStep:
+    step = await stage_step(db, session_id, **kw)
     await db.commit()
     await db.refresh(step)
     return step

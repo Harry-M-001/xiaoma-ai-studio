@@ -124,10 +124,10 @@ dsh → xms_run_canvas(project_id)
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| P0 | 复现试点：HTTP MCP + 只读工具 | dsh 能列画布、读画布、报代价，数字与后端一致 |
-| P1 | 阻塞式确认门 | 模型发起 run → 界面弹卡 → 取消不执行、确认才执行；模型无法自批 |
-| P2 | 可选组件打包 | 一键下载/校验/启动/停止；关掉后原 Agent 正常 |
-| P3 | 文件与 Shell | 限定工作区；危险命令逐条确认；越界写入被拒 |
+| P0 ✅ | 复现试点：HTTP MCP + 只读工具 | 已在仓库实现 `/api/mcp`，四个只读工具；实测 initialize / tools/list / list_projects / preview 全部可用 |
+| P1 ✅ | 阻塞式确认门 | 已实现：run 调用挂起 → 全局确认卡 → 拒绝/超时都不执行；实测拒绝返回 `ok:false`、重复确认 409 |
+| P2 ✅ | 可选组件打包 | 已实现「本机引擎 → DeepSeek Harness」卡片：一键安装（Node + dsh）、启动/停止、打开带 token 的页面；未安装/未启动时原 Agent 不受影响 |
+| P3 ✅ | 文件与 Shell | 已实现工作区选择与校验：dsh 以工作区为 cwd、强制 `workspace-write` + `ask`，越界写入由沙箱拒绝；不能在界面里逐条预审命令（执行时由 dsh 的审批浮层逐条询问） |
 
 ## 十、未决问题
 
@@ -135,4 +135,108 @@ dsh → xms_run_canvas(project_id)
 2. dsh 的 Web UI 是嵌入 iframe 还是新窗口打开（涉及端口与静态资源）。
 3. 是否允许 dsh 直接改画布 JSON 文件（不推荐；仍走 MCP）。
 4. Windows 便携包里 Node 运行时的体积与下载源。
-5. 与「原子节点 + 组合原语」的先后：建议组合原语先做，dsh 后接——否则 dsh 只能操作旧节点。
+5. 与「原子节点 + 组合原语」的先后：**组合原语已完成（图片组），dsh 已接上 P0/P1**。
+
+## 十一、P0/P1 落地记录（2026-11-19）
+
+**MCP 服务端**（`backend/app/routers/mcp.py`）
+
+- `POST /api/mcp`：手写的最小 MCP JSON-RPC（initialize / ping / tools/list / tools/call / notifications），
+  返回 `application/json`；无状态，不依赖 SSE。
+- 工具面：`xms_list_projects` / `xms_get_canvas` / `xms_summarize_canvas` / `xms_preview_canvas`
+  （只读）与 `xms_run_canvas`（阻塞式确认）。读工具直接复用 `agent_tools` 的实现，不抄第二份。
+
+**确认门**（`backend/app/services/mcp_gate.py`）
+
+- `xms_run_canvas` 先算 preview，再把调用落成 `agent_steps` 里一条 `pending`（挂在
+  「dsh 高级模式」会话下，同一张画布复用同一条会话），然后**挂起等待**。
+- 界面接口：`GET /api/mcp/confirmations`（轮询）、`POST /api/mcp/confirmations/{step_id}`
+  （`{approve: bool}`）。**审批接口不在 MCP 工具清单里**，模型拿不到。
+- 拒绝 / 超时（120 秒）/ 进程退出都按「没执行」返回；重复确认返回 409，
+  不存在二次执行的可能。
+- 批准后按「确认时看到的调用数」放行预算闸（`ack_calls`），再执行 `run_canvas`。
+
+**界面**（`frontend/src/components/McpGate.tsx`）
+
+- 挂在应用外壳上全局轮询，任何页面都能弹出确认卡；关掉卡片不会执行，
+  调用继续挂到超时。卡片上显示调用次数、会重做的节点、被阻塞的节点与剩余秒数。
+
+**验证**
+
+- `backend/tests/test_mcp.py`：协议形状、只读调用、批准才执行、拒绝/超时不执行、
+  会话复用、重复确认 409、前端挂载与轮询。
+- 本机实测：`tools/list` 五个工具；对 18 号画布发起 run → 确认卡出现（calls 0 / blocked 1）
+  → 拒绝 → MCP 返回 `{"ok": false, "error": "用户拒绝了这次执行，没有派发任何任务。"}`。
+
+**当前边界**
+
+- 接口层**强制只接受本机连接**（非 `127.0.0.1` / `::1` 一律 403）；P1 还没有 token，
+  即使把 `HOST` 改成 `0.0.0.0`，MCP 与确认接口也不会跟着暴露。
+- `run_node` 仍未开放（按设计等确认门跑顺再放）。
+- 文件 / Shell / 子 Agent 的沙箱与逐条审批属于 P3，还没接。
+
+## 十二、P2 落地记录（2026-11-19）
+
+**组件生命周期**（`backend/app/services/harness.py` + `backend/app/routers/harness.py`）
+
+- 数据目录下 `harness/`：`node/`（必要时下载的便携 Node）、`dsh/`（固定 `0.2.2-rc.1`）、
+  `home/`（`DSH_HOME`）、`dsh.log`、`dsh.pid`。主包不内置任何一项。
+- 安装是一个后台任务（`POST /api/harness/install`）：优先用 ≥24.9 的系统 Node；
+  没有就下载 Node 官方 zip，并用同目录 `SHASUMS256.txt` 校验 sha256；随后
+  `npm install --prefix` 固定版本 dsh。状态通过 `GET /api/harness/status` 轮询。
+- 启动（`POST /api/harness/start`）：先确保 `profiles/web` 已初始化，再把
+  `- insert:` 形式的 MCP 补丁写进 profile 的 `cordis.patch.yml`；`DEEPSEEK_API_KEY`
+  只进子进程环境（从「模型服务」里的 DeepSeek 官方服务解密取得）。默认端口 **3081**
+  （避开本机可能已经在跑的 3080 实例）。
+- dsh 启动后会把带 token 的地址打印到日志；状态接口把**带 token 的完整 URL** 返回给
+  「打开」，无 token 的根路径会 401。停止只杀自己写过 pid 的进程；端口上是别处起的
+  dsh 时只给「打开」，不给「停止」。
+
+**界面**
+
+- 「本机引擎」页新增 DeepSeek Harness 卡片：Node / dsh / Key 三个状态、安装进度、
+  启动/停止/打开、最近日志。文案写明「不装、不启动时，原 Agent 完全不受影响」。
+
+**验证（本机）**
+
+- 安装：系统 Node 24.18.1 + npm，约 2.5 分钟装好 `@deepseek-ai/dsh@0.2.2-rc.1`。
+- 启动：3081 就绪，`owned=true`；日志给出 `?token=…` 地址；停止后 `running=false`。
+- 挂载：dsh 启动时确实向 `/api/mcp` 发了 initialize / tools/list（后端日志可见），
+  说明 MCP 补丁生效。
+
+## 十三、P3 落地记录（2026-11-19）
+
+**工作区就是写入边界**
+
+- 启动前必须先选工作区（`POST /api/harness/workspace`，保存在 `harness/settings.json`）。
+  校验规则：绝对路径、真实存在的目录；拒绝相对路径、不存在的路径、磁盘根、仓库根及其
+  上级、数据目录及其上级。
+- 启动时把这个目录作为 dsh 进程的 `cwd`：dsh 的 `sandbox-policy` 默认
+  `workspaceRoot = process.cwd()`，所以「会话不可变 cwd」天然就是工作区；越界写入由
+  `dsh-fs-sandbox` / `dsh-tool-pwsh` 在调用层拒绝。
+- **不继承用户的试验配置**：启动时强制 `DSH_PERMISSION_MODE=workspace-write`，
+  即使环境里留过 `danger-full-access` 也不会被悄悄带上；审批策略随之为 `ask`
+  （dsh 的默认组合：非 full-access 时逐条询问）。
+- `DSH_HOME` 与工作区分开：会话日志、profile、插件仍放在 `harness/home`，不会被
+  工作区的清理动作误删。
+
+**界面**
+
+- Harness 卡片新增工作区输入与保存按钮；未就绪时「启动」按钮置灰并给出原因；
+  权限口径直接写在状态里（「只写工作区 · Shell 命令逐条确认」）。
+
+**验证（本机）**
+
+- 拒绝：仓库根、`backend/data`、`D:\\` 均返回 400，错误文案分别指出原因。
+- 通过：`D:\\ai-canvas-github\\dsh-workspace-test` 保存成功，状态 `ready=true`；
+  启动 3081 成功，停止正常。
+- 单元测试覆盖工作区校验、保存/读回、状态字段与前端入口。
+
+**仍未做**
+
+- 界面里**不逐条预审命令**：命令执行的审批在 dsh 自己的浮层里完成（`ask`），我们
+  只负责把权限口径钉死在安全的一档。
+- 目录选择器是 P3.1 已补的一层只读浏览（`GET /api/harness/dirs`，只列子目录），
+  不能在这里预览或编辑文件。
+
+

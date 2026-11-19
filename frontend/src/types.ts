@@ -235,6 +235,53 @@ export interface AgentWorkspaceMeta {
   problem: string;
 }
 
+/**
+ * dsh sidecar 发起的「跑整图」确认。
+ *
+ * 它不是在聊天里回的 `need_confirm`，而是 MCP 工具调用挂起后由界面轮询到的；
+ * `remaining` 是后端算好的剩余等待秒数，到 0 就按「没执行」返回给 dsh。
+ */
+export interface McpConfirmation {
+  stepId: number;
+  sessionId: number;
+  projectId: number | null;
+  projectName: string;
+  calls: number;
+  rerun: number;
+  blocked: number;
+  createdAt: string;
+  remaining: number;
+}
+
+/** dsh sidecar 的可选组件状态（下载 / 安装 / 启动都在后台任务里推进） */
+export interface HarnessStatus {
+  job: { state: string; detail: string; error: string };
+  node: { ready: boolean; text: string };
+  dsh: { installed: boolean; version: string; pinned: string };
+  /** dsh 的唯一写入边界：用户显式选的普通目录，不能是仓库根/数据目录 */
+  workspace: { path: string; ready: boolean; reason: string };
+  /** 生效的权限口径（只写工作区 + Shell 逐条确认） */
+  permission: string;
+  running: boolean;
+  /** 是不是本组件启动的（端口上可能是别处起的 dsh，那就不给「停止」） */
+  owned: boolean;
+  url: string;
+  /** 有没有可用的 DeepSeek 官方 Key（没有就不让启动，避免起来也调不了模型） */
+  modelReady: boolean;
+  log: string;
+  home: string;
+}
+
+/** 工作区选择器的一次目录浏览（只列子目录） */
+export interface HarnessDirs {
+  path: string;
+  parent: string;
+  entries: { name: string; path: string }[];
+  /** true = 盘符/根列表，此时 path 还有没意义 */
+  roots: boolean;
+}
+
+
 // ---------- 导演台：转场与转场音效 ----------
 
 /**
