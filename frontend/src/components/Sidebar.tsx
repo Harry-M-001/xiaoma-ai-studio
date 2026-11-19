@@ -1,6 +1,17 @@
-import { ChevronDown, ChevronLeft, ChevronRight, Moon, Sun, LogOut, Boxes } from "lucide-react";
-import { useEffect, useState } from "react";
-import type { NavMeta } from "../types";
+import {
+  Boxes,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  FolderOpen,
+  LogOut,
+  Moon,
+  MoreHorizontal,
+  Sun,
+} from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { api } from "../api";
+import type { AgentProjectInfo, AgentSessionInfo, NavMeta, Project } from "../types";
 import { prefs } from "../prefs";
 import { getNavIcon } from "./IconMap";
 
@@ -32,6 +43,8 @@ export default function Sidebar({
   collapsed,
   onToggleCollapsed,
   badgeRoutes,
+  onOpenCanvas,
+  onOpenAgentSession,
 }: {
   route: RouteKey;
   onNavigate: (r: RouteKey) => void;
@@ -49,15 +62,47 @@ export default function Sidebar({
   onToggleCollapsed: () => void;
   /** 需要挂提示红点的路由（如检测到新版本时提示「系统设置」） */
   badgeRoutes?: string[];
+  /** 工作区里的画布/任务要能直接打开 */
+  onOpenCanvas?: (p: { id: number; name: string }) => void;
+  onOpenAgentSession?: (id: number) => void;
 }) {
-  // main 组直接列出；create 组收进「创作台」折叠组；settings 组归到「设置」小节下
+  // main 组直接列出；create 组收进「创作台」折叠组；settings 组收进底部「更多」
   const mainItems = nav.filter((item) => item.group !== "settings" && item.group !== "create");
   const createItems = nav.filter((item) => item.group === "create");
   const settingItems = nav.filter((item) => item.group === "settings");
-  // 折叠组排在**首页之后、其余项之前**（用户指定）：创作入口离首页最近，从首页进来第一眼
-  // 就该看到它们。实现就是「第一项单独渲染 + 其余照常」——首页被关掉时它自然上移到第一位，
-  // 不需要为「首页」这个 key 写死一个特例。
   const [headItem, ...tailItems] = mainItems;
+
+  // 工作区：Agent 项目 → 任务；项目绑定的画布一并显示
+  const [wsProjects, setWsProjects] = useState<AgentProjectInfo[]>([]);
+  const [wsSessions, setWsSessions] = useState<AgentSessionInfo[]>([]);
+  const [canvases, setCanvases] = useState<Project[]>([]);
+  const [openWs, setOpenWs] = useState<number | null>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+
+  const loadWorkspace = useCallback(async () => {
+    try {
+      const [meta, projects] = await Promise.all([api.agentMeta(), api.listProjects()]);
+      setWsProjects(meta.projects || []);
+      setWsSessions(meta.sessions || []);
+      setCanvases(projects);
+      setOpenWs((prev) => prev ?? meta.projects?.[0]?.id ?? null);
+    } catch {
+      // 侧栏读不到不影响导航本身；下次路由变化会再试
+    }
+  }, []);
+
+  useEffect(() => {
+    if (route === "home" || route === "agent" || route === "projects" || route === "canvas") {
+      void loadWorkspace();
+    }
+  }, [route, loadWorkspace]);
+
+  const canvasName = (id: number | null | undefined) =>
+    canvases.find((c) => c.id === id)?.name || `画布 #${id}`;
+
+  const sessionsOf = (projectId: number) =>
+    wsSessions.filter((s) => s.agentProjectId === projectId);
+  const unfiled = wsSessions.filter((s) => s.agentProjectId === null);
 
   return (
     <aside className={`sidebar ${collapsed ? "collapsed" : ""}`}>
@@ -113,34 +158,150 @@ export default function Sidebar({
         />
       ))}
 
-      {settingItems.length > 0 && (
-        <>
-          <div className="nav-group-label">{collapsed ? "" : "设置"}</div>
-          {settingItems.map((item) => (
-            <NavRow
-              key={item.key || item.route}
-              item={item}
-              route={route}
-              collapsed={collapsed}
-              onNavigate={onNavigate}
-              badgeRoutes={badgeRoutes}
-            />
-          ))}
-        </>
+      {/* 工作区：项目 → 任务；图标态不显示（那里每一样都只是一枚图标，树会失去意义） */}
+      {!collapsed && wsProjects.length > 0 && (
+        <div className="nav-workspace">
+          <div className="nav-group-label">工作区</div>
+          {wsProjects.map((p) => {
+            const sessions = sessionsOf(p.id);
+            const open = openWs === p.id;
+            return (
+              <div key={p.id} className="ws-project-wrap">
+                <button
+                  className={`ws-project ${open ? "open" : ""}`}
+                  onClick={() => setOpenWs(open ? null : p.id)}
+                  aria-expanded={open}
+                  title={p.description || p.name}
+                >
+                  <ChevronDown className={`ws-chevron ${open ? "open" : ""}`} />
+                  <span className="ws-name">{p.name}</span>
+                  <span className="ws-count">{sessions.length}</span>
+                </button>
+                {open && (
+                  <div className="ws-items">
+                    {p.canvasProjectId && (
+                      <button
+                        className="ws-canvas"
+                        onClick={() =>
+                          onOpenCanvas?.({ id: p.canvasProjectId as number, name: canvasName(p.canvasProjectId) })
+                        }
+                        title="打开这个项目绑定的画布"
+                      >
+                        <FolderOpen size={13} />
+                        <span>{canvasName(p.canvasProjectId)}</span>
+                      </button>
+                    )}
+                    {sessions.map((s) => (
+                      <button
+                        key={s.id}
+                        className="ws-task"
+                        onClick={() => onOpenAgentSession?.(s.id)}
+                        title={s.title}
+                      >
+                        <span className="ws-task-title">{s.title || "新任务"}</span>
+                        <span className="ws-task-time">{s.updatedAt.slice(5, 10)}</span>
+                      </button>
+                    ))}
+                    {sessions.length === 0 && <div className="ws-empty">还没有任务</div>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {unfiled.length > 0 && (
+            <div className="ws-project-wrap">
+              <button
+                className={`ws-project ${openWs === -1 ? "open" : ""}`}
+                onClick={() => setOpenWs(openWs === -1 ? null : -1)}
+                aria-expanded={openWs === -1}
+              >
+                <ChevronDown className={`ws-chevron ${openWs === -1 ? "open" : ""}`} />
+                <span className="ws-name">未归档</span>
+                <span className="ws-count">{unfiled.length}</span>
+              </button>
+              {openWs === -1 && (
+                <div className="ws-items">
+                  {unfiled.map((s) => (
+                    <button
+                      key={s.id}
+                      className="ws-task"
+                      onClick={() => onOpenAgentSession?.(s.id)}
+                      title={s.title}
+                    >
+                      <span className="ws-task-title">{s.title || "新任务"}</span>
+                      <span className="ws-task-time">{s.updatedAt.slice(5, 10)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       <div className="sidebar-footer">
-        <button className="nav-item" onClick={onToggleTheme} title="切换明暗主题">
-          {theme === "dark" ? <Sun /> : <Moon />}
-          {!collapsed && (theme === "dark" ? "浅色模式" : "深色模式")}
+        <button
+          className={`nav-item ${moreOpen ? "active" : ""}`}
+          onClick={() => setMoreOpen((v) => !v)}
+          aria-expanded={moreOpen}
+          title="更多设置"
+        >
+          <MoreHorizontal />
+          {!collapsed && "更多"}
         </button>
-        {authed && (
-          <button className="nav-item" onClick={onLogout} title="锁定">
-            <LogOut />
-            {!collapsed && "锁定"}
-          </button>
-        )}
       </div>
+
+      {moreOpen && (
+        <>
+          <div className="sidebar-more-backdrop" onClick={() => setMoreOpen(false)} />
+          <div className="sidebar-more-menu" role="menu">
+            {settingItems.map((item) => {
+              const Icon = getNavIcon(item.icon);
+              const badge = badgeRoutes?.includes(item.route) ?? false;
+              return (
+                <button
+                  key={item.key || item.route}
+                  className="sidebar-more-item"
+                  role="menuitem"
+                  onClick={() => {
+                    onNavigate(item.route);
+                    setMoreOpen(false);
+                  }}
+                >
+                  <Icon />
+                  <span>{item.label}</span>
+                  {badge && <span className="nav-dot" title="有新版本可更新" />}
+                </button>
+              );
+            })}
+            {settingItems.length > 0 && <div className="sidebar-more-sep" />}
+            <button
+              className="sidebar-more-item"
+              role="menuitem"
+              onClick={() => {
+                onToggleTheme();
+                setMoreOpen(false);
+              }}
+            >
+              {theme === "dark" ? <Sun /> : <Moon />}
+              <span>{theme === "dark" ? "浅色模式" : "深色模式"}</span>
+            </button>
+            {authed && (
+              <button
+                className="sidebar-more-item"
+                role="menuitem"
+                onClick={() => {
+                  onLogout();
+                  setMoreOpen(false);
+                }}
+              >
+                <LogOut />
+                <span>锁定</span>
+              </button>
+            )}
+          </div>
+        </>
+      )}
     </aside>
   );
 }

@@ -136,6 +136,30 @@ def test_the_system_prompt_scopes_the_context_to_the_agent_project():
     assert "未归档" in loose
 
 
+# ================================================================ 1c. 审批方式（手动 / 自动）
+
+
+def test_irreversible_tools_need_a_human_unless_auto_approved():
+    """默认手动：不可逆必须停下；自动审批才放行。只读/可撤销本来就不该拦。"""
+    assert agent_runner.needs_human_approval("irreversible", False) is True
+    assert agent_runner.needs_human_approval("irreversible", True) is False
+    assert agent_runner.needs_human_approval("write", False) is False
+    assert agent_runner.needs_human_approval("read", True) is False
+
+
+def test_the_system_prompt_matches_the_approval_mode():
+    """提示词必须与真实行为一致：自动审批时还说「让用户点确认」，模型会一直等一个不会出现的弹窗。"""
+    manual = agent_runner.build_system_prompt(
+        AgentSession(id=1, title="t", model_key="", auto_approve=False)
+    )
+    auto = agent_runner.build_system_prompt(
+        AgentSession(id=1, title="t", model_key="", auto_approve=True)
+    )
+    assert "让用户点确认" in manual
+    assert "自动审批" in auto and "直接执行" in auto
+    assert "让用户点确认" not in auto
+
+
 # ================================================================ 2. 上下文重建
 
 
@@ -274,6 +298,8 @@ def test_the_router_and_page_are_wired():
     assert "确认执行" in page, "缺少不可逆操作的确认入口"
     assert "新任务" in page, "缺任务入口"
     assert "技能（按需加载" in page, "能力面板里没有技能分组"
+    assert "自动审批" in page and "手动审批" in page, "缺少审批方式切换"
+    assert "auto_approve" in api and "autoApprove" in page, "审批方式没接进接口/类型"
 
     migration = BACKEND / "alembic" / "versions" / "0018_agent_tables.py"
     assert migration.exists(), "缺少会话/步骤两张表的迁移"
@@ -284,6 +310,10 @@ def test_the_router_and_page_are_wired():
     assert projects.exists(), "缺少 Agent 项目表的迁移"
     ptext = projects.read_text(encoding="utf-8")
     assert "agent_projects" in ptext and "agent_project_id" in ptext
+
+    approval = BACKEND / "alembic" / "versions" / "0020_agent_auto_approve.py"
+    assert approval.exists(), "缺少审批方式的迁移"
+    assert "auto_approve" in approval.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":

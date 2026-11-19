@@ -422,6 +422,9 @@ class AgentSession(Base):
     model_key: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     # 画布绑定的**兜底值**：正常情况下从项目继承；会话上留一份是为了未归档会话也能用
     canvas_project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # 审批方式：False = 手动（跑整图/跑节点前停下来等人点）；True = 自动（直接执行）。
+    # 默认手动：花钱的操作不该因为「上次开过自动」而悄悄继续自动。
+    auto_approve: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

@@ -99,6 +99,7 @@ function Shell() {
   const [nav, setNav] = useState<NavMeta[]>([]);
   const [authed, setAuthed] = useState(false);
   const [canvasProject, setCanvasProject] = useState<{ id: number; name: string } | null>(null);
+  const [agentSessionId, setAgentSessionId] = useState<number | null>(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
 
   useEffect(() => {
@@ -200,6 +201,12 @@ function Shell() {
     setRoute("canvas");
   };
 
+  /** 从侧栏或首页直达某条 Agent 任务：路由切过去，由 AgentPage 负责加载 */
+  const openAgentSession = (id: number) => {
+    setAgentSessionId(id);
+    setRoute("agent");
+  };
+
   const renderPage = () => {
     // 导航里注册了前端没有实现的模块：显示「尚未安装」占位，而不是崩溃
     if (!KNOWN_ROUTES.has(route)) {
@@ -228,6 +235,7 @@ function Shell() {
           <HomePage
             onNavigate={setRoute}
             onOpenCanvas={openCanvas}
+            onOpenAgentSession={openAgentSession}
             onGoProviders={() => setRoute("providers")}
             brandName={brandName}
             brandSub={brandSub}
@@ -241,7 +249,14 @@ function Shell() {
           />
         );
       case "agent":
-        return <AgentPage onNavigate={setRoute} onOpenCanvas={openCanvas} />;
+        return (
+          <AgentPage
+            onNavigate={setRoute}
+            onOpenCanvas={openCanvas}
+            openSessionId={agentSessionId}
+            onSessionOpened={() => setAgentSessionId(null)}
+          />
+        );
       case "canvas":
         return canvasProject ? (
           <CanvasPage
@@ -301,6 +316,8 @@ function Shell() {
         collapsed={collapsed}
         onToggleCollapsed={() => setCollapsed((c) => !c)}
         badgeRoutes={updateAvailable ? ["settings"] : undefined}
+        onOpenCanvas={openCanvas}
+        onOpenAgentSession={openAgentSession}
       />
       <main className="main">
         <SetupBanner route={route} onNavigate={setRoute} />

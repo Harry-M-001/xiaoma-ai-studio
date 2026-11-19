@@ -2,13 +2,11 @@
 
 运行：venv/Scripts/python tests/test_frontend_home.py
 
-首页这一版改的三件事，都容易被后来的改动悄悄退回去，所以各钉一条：
+这一版首页与 dsh 的空状态对齐：**一个输入框 + 往下挪的创作入口**。
 
-1. **点「最近项目」要直接进那个项目的画布**。以前它只跳到项目列表页——想接着做的人
-   还得多点一次；而组件本来就拿到了 `onOpenCanvas`，只是没用在这一处。
-2. **主行动按钮要随状态变化**（有作品 → 继续；没作品没模型 → 先接入；其余 → 从示例开始）。
-   固定成某个功能的入口（原来是"开始创作"直跳图片生成）对新手与老用户都不合适。
-3. **没有项目时要有空状态**，而不是整块区域消失（页面会缺一截，且没有任何引导）。
+1. **输入框提交后交给 Agent**：按所选画布建任务、发送、跳过去；不允许只跳到一个空页面。
+2. **首页不再有营销口号**（「探索未知之境」那类），也不再把某个功能写死成主按钮。
+3. **点「最近画布」要直接进那个画布**；没有画布时要有空状态与出口。
 """
 
 from __future__ import annotations
@@ -27,31 +25,57 @@ def _home() -> str:
 
 
 def test_recent_project_opens_the_canvas():
-    """最近项目卡片必须能一步进画布（拿不到回调时才退回项目列表）。"""
+    """最近画布卡片必须能一步进画布（拿不到回调时才退回画布列表）。"""
     src = _home()
     assert "onOpenCanvas(p)" in src, (
-        "首页的最近项目又没有直接打开画布——用户得多点一次才能接着做"
+        "首页的最近画布又没有直接打开——用户得多点一次才能接着做"
     )
     assert "onOpenCanvas ? onOpenCanvas(p) : onNavigate(\"projects\")" in src, (
         "没有对「拿不到 onOpenCanvas」的降级：那种情况下会点了没反应"
     )
 
 
-def test_primary_action_follows_state():
-    """主行动按钮必须按状态分三种，而不是写死一个入口。"""
+def test_home_submits_to_the_agent():
+    """输入框不是装饰：提交要建 Agent 任务、发出去、再跳到那个任务。"""
     src = _home()
-    assert "继续「" in src, "没有「继续上一件作品」这一态"
-    assert "先接入一个模型" in src, "没有「先去接入模型」这一态（新手会点什么都撞同一个错）"
-    assert "从示例开始" in src, "没有「从示例开始」这一态"
-    assert "setup.ready" in src, "主行动没有依据「有没有可用模型」来判断"
+    assert "createAgentSession" in src, "首页没有建 Agent 任务"
+    assert "agentSend" in src, "首页没有把这句话发给 Agent"
+    assert "onOpenAgentSession" in src, "发送完没有跳转到那条任务"
+    assert "agent_project_id: agentProjectId" in src, "没有把所选项目带进新任务"
+    assert "project_id: canvasId" not in src, "首页还在直接绑画布；任务应该挂项目"
+    # 没有可用模型时不许装作能发
+    assert "meta?.ready" in src and "去模型服务" in src, "缺少「没接模型」的拦截与出口"
+
+
+def test_home_offers_project_choice_and_creation():
+    """首页选的是**项目**：可选已有，也可就地新建（不再直接绑画布）。"""
+    src = _home()
+    assert "createAgentProject" in src, "首页不能就地新建项目"
+    assert "meta?.projects" in src, "项目下拉没有读 Agent 项目列表"
+    assert "＋ 新建项目" in src, "项目下拉里没有「新建项目」入口"
+    assert "home-new-project" in src, "新建项目的输入行没有样式钩子"
+
+
+def test_home_has_manual_and_auto_approval():
+    """审批方式要在首页就能选：手动 / 自动；旧提示语删掉。"""
+    src = _home()
+    assert "手动审批" in src and "自动审批" in src, "首页没有审批方式切换"
+    assert "auto_approve: autoApprove" in src, "审批方式没有带进新任务"
+    assert "花钱的操作会先停下来问你" not in src, "旧提示语还在"
+
+
+def test_home_has_no_marketing_slogan():
+    """首页不再用口号占位（用户明确要求去掉「探索未知之境」那类文案）。"""
+    src = _home()
+    for stale in ("探索未知之境", "探索未来之境", "一个人，一整个"):
+        assert stale not in src, f"首页还留着口号：{stale}"
 
 
 def test_empty_state_has_a_way_forward():
-    """没有项目时要有引导与出口，不能什么都不显示。"""
+    """没有画布时要有引导与出口，不能什么都不显示。"""
     src = _home()
-    assert "projects.length === 0" in src, "没有项目时首页缺少空状态"
+    assert "projects.length === 0" in src, "没有画布时首页缺少空状态"
     assert "home-empty" in src, "空状态没有样式钩子（会和普通卡片混在一起）"
-    # 空状态里必须至少有一个能往前走的按钮
     assert "铺一条示例" in src and "我要自己建" in src, "空状态没有给出下一步"
 
 

@@ -281,6 +281,7 @@ export const api = {
     model_key?: string;
     project_id?: number | null;
     agent_project_id?: number | null;
+    auto_approve?: boolean;
   }) => request<AgentPayload>("/api/agent/sessions", { method: "POST", body: json(payload) }),
   getAgentSession: (id: number) => request<AgentPayload>(`/api/agent/sessions/${id}`),
   patchAgentSession: (
@@ -290,6 +291,7 @@ export const api = {
       model_key?: string;
       project_id?: number | null;
       agent_project_id?: number | null;
+      auto_approve?: boolean;
     }
   ) => request<AgentPayload>(`/api/agent/sessions/${id}`, { method: "PATCH", body: json(payload) }),
   deleteAgentSession: (id: number) =>

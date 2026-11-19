@@ -163,6 +163,8 @@ export interface AgentSessionInfo {
   projectId: number | null;
   /** 归属的 Agent 项目；旧会话为空（界面列在「未归档」） */
   agentProjectId: number | null;
+  /** 审批方式：false = 手动（跑整图/跑节点前停下等人点）；true = 自动（直接执行） */
+  autoApprove: boolean;
   /** 实际生效的自由画布 id（项目绑定优先） */
   canvasId?: number | null;
   createdAt: string;

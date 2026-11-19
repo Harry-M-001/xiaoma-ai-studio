@@ -14,8 +14,10 @@
 
 ## 三条硬规矩
 
-1. **不可逆工具必须停下来等人点**（`run_canvas` / `run_node`）。停下来时先把代价算好，
+1. **不可逆工具默认停下来等人点**（`run_canvas` / `run_node`）。停下来时先把代价算好，
    确认弹窗直接用那份数——不让用户对着「要花钱」四个字做决定。
+   **自动审批**的会话（`session.auto_approve`）例外：用户已经授权，直接按预览的调用数放行，
+   但代价仍然记在那一步里。
 2. **工具失败不打断整轮**：一次失败变成一条 `{ok:false}` 的结果回到模型，由它决定换个做法。
 3. **轮数有上限**：8 轮。真正的死循环不是「模型笨」，而是 harness 没设上限。
 """
@@ -55,6 +57,29 @@ def _history_text(step: AgentStep) -> str:
     return text[:MAX_RESULT_CHARS] + "\n…（结果太长，已截断；完整内容在界面的这一步里）"
 
 
+def approval_rule(session: AgentSession) -> str:
+    """提示词里那条「不可逆要不要人点」的规矩，跟着审批方式变。
+
+    自动审批时如果还写着「系统会拦下来让用户确认」，模型会一直让用户去点一个
+    根本不会出现的弹窗——提示词必须与真实行为一致。
+    """
+    if session.auto_approve:
+        return (
+            "3. **run_canvas / run_node 会花钱且不可逆**：本会话已开启**自动审批**，"
+            "这两种调用会直接执行（用户已授权）。执行前仍要说清要做什么、大概几次调用；"
+            "执行后严格按工具返回如实报告，**不能**把「准备跑」说成「跑好了」。"
+        )
+    return (
+        "3. **run_canvas / run_node 会花钱且不可逆**：系统会把这次调用拦下来让用户点确认。"
+        "你**不能**声称已经跑完，也不要把「准备跑」说成「跑好了」。"
+    )
+
+
+def needs_human_approval(tier: str, auto_approve: bool) -> bool:
+    """这个工具这一步要不要停下来等人点（纯函数，便于单测）。"""
+    return tier == TIER_IRREVERSIBLE and not auto_approve
+
+
 def build_system_prompt(
     session: AgentSession, project: AgentProject | None = None
 ) -> str:
@@ -78,7 +103,7 @@ def build_system_prompt(
 规矩：
 1. **事实只信工具返回**：不要编造画布 id、节点 id、任务状态或产物；没查过就说没查。
 2. **改之前先读**：动某张画布前先 get_canvas；改完用返回的 id 回查一次（get_canvas 或 canvas_status）再说结论。
-3. **run_canvas / run_node 会花钱且不可逆**：系统会把这次调用拦下来让用户点确认。你**不能**声称已经跑完，也不要把「准备跑」说成「跑好了」。
+3. {approval_rule(session)}
 4. **每次只调一个工具**，看一眼结果再决定下一步。不要一口气连调五个。
 5. {bound}。用户没说是哪张时，先 list_projects；一张都没有就 create_project。
 6. 节点类型：{kinds}。
@@ -252,7 +277,7 @@ async def run_loop(db: AsyncSession, session: AgentSession) -> dict:
                     )
                     continue
 
-                if spec.tier == TIER_IRREVERSIBLE:
+                if needs_human_approval(spec.tier, bool(session.auto_approve)):
                     # 先把代价算好再停下来：确认弹窗不该只有「要花钱」四个字
                     preview: dict = {}
                     try:
@@ -289,8 +314,23 @@ async def run_loop(db: AsyncSession, session: AgentSession) -> dict:
                         "rounds": rounds,
                     }
 
+                # 自动审批的不可逆工具：仍然先算一遍代价——run_canvas 的预算闸要用它
+                # 放行（与手动确认同一口径），结果里也留一份，事后能回看这一步花了多少次调用。
+                auto_irreversible = spec.tier == TIER_IRREVERSIBLE
+                auto_preview: dict = {}
+                if auto_irreversible:
+                    try:
+                        if spec.preview is not None:
+                            auto_preview = await spec.preview(ctx, args)
+                    except agent_tools.ToolError as e:
+                        auto_preview = {"error": str(e), "hint": e.hint}
+                    if name == "run_canvas" and auto_preview.get("calls"):
+                        args = {**args, "ack_calls": int(auto_preview["calls"])}
+
                 started = time.monotonic()
                 outcome = await agent_tools.execute(ctx, name, args)
+                if auto_irreversible:
+                    outcome = {**outcome, "autoApproved": True, "preview": auto_preview}
                 await add_step(
                     db, session.id, role="tool", tool_name=name,
                     tool_args=json.dumps(args, ensure_ascii=False),

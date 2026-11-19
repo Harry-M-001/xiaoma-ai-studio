@@ -40,6 +40,7 @@ class SessionIn(BaseModel):
     model_key: str = ""
     project_id: int | None = None
     agent_project_id: int | None = None
+    auto_approve: bool = False
 
 
 class SessionPatch(BaseModel):
@@ -47,6 +48,7 @@ class SessionPatch(BaseModel):
     model_key: str | None = None
     project_id: int | None = None
     agent_project_id: int | None = None
+    auto_approve: bool | None = None
 
 
 class AgentProjectIn(BaseModel):
@@ -106,6 +108,7 @@ def _session_out(s: AgentSession) -> dict[str, Any]:
         "modelKey": s.model_key,
         "projectId": s.canvas_project_id,
         "agentProjectId": s.agent_project_id,
+        "autoApprove": bool(s.auto_approve),
         "createdAt": s.created_at.isoformat() if s.created_at else "",
         "updatedAt": s.updated_at.isoformat() if s.updated_at else "",
     }
@@ -292,6 +295,7 @@ async def create_session(payload: SessionIn, db: AsyncSession = Depends(get_db))
         model_key=payload.model_key.strip(),
         canvas_project_id=payload.project_id,
         agent_project_id=payload.agent_project_id,
+        auto_approve=bool(payload.auto_approve),
     )
     db.add(session)
     await db.commit()
@@ -332,6 +336,8 @@ async def patch_session(
         if payload.agent_project_id and await db.get(AgentProject, payload.agent_project_id) is None:
             raise HTTPException(status_code=400, detail="Agent 项目不存在")
         session.agent_project_id = payload.agent_project_id or None
+    if payload.auto_approve is not None:
+        session.auto_approve = bool(payload.auto_approve)
     await db.commit()
     await db.refresh(session)
     return await _payload(db, session)

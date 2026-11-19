@@ -114,6 +114,28 @@ def test_the_sidebar_can_scroll_to_its_last_item():
     assert "overflow-y: auto" in rule.group(1), "侧边栏不能滚动（底部入口会被裁掉）"
 
 
+def test_settings_are_folded_into_one_more_menu():
+    """设置不再各占一行：模型服务 / 本机引擎 / 系统设置都从底部「更多」弹出。
+
+    侧栏腾出来的位置给「工作区」；这条断言守的就是「别又把设置摊回列表」。
+    """
+    sidebar = _text(SRC / "components" / "Sidebar.tsx")
+    assert "sidebar-more-menu" in sidebar, "没有「更多」弹出菜单"
+    assert "settingItems.map" in sidebar, "设置项没有收进菜单"
+    assert "MoreHorizontal" in sidebar, "底部没有「更多」按钮"
+    # 设置项不能再在列表主体里逐个渲染
+    assert "nav.filter((item) => item.group === \"settings\")" in sidebar
+
+
+def test_workspace_tree_carries_tasks_and_canvas():
+    """工作区是「项目 → 任务 + 该项目用过的画布」，点任务要能直达那条会话。"""
+    sidebar = _text(SRC / "components" / "Sidebar.tsx")
+    assert "ws-project" in sidebar and "ws-task" in sidebar and "ws-canvas" in sidebar
+    assert "agentMeta" in sidebar, "工作区没有从 Agent 接口取项目与任务"
+    assert "onOpenAgentSession" in sidebar, "点任务不能直达那条 Agent 会话"
+    assert "onOpenCanvas" in sidebar, "点画布不能直接打开"
+
+
 def test_the_group_sits_right_under_home_and_is_collapsed_by_default():
     """折叠组固定在**首页下面**（用户 2026-09-25 指定），且**默认收起**。
 
@@ -169,7 +191,6 @@ def test_the_canvas_pages_no_longer_call_it_a_project():
         "项目列表加载失败",
         "请输入项目名称",
         "项目已创建",
-        "新建项目",
         "还没有项目",
         "项目名称",
         "重命名项目",
@@ -178,6 +199,8 @@ def test_the_canvas_pages_no_longer_call_it_a_project():
         '删除项目「',
         "每个项目内置一张可视化画布",
     ]
+    # 注意：首页现在有「＋ 新建项目…」，那指的是 **Agent 项目**（上下文容器），
+    # 不是自由画布。两个概念并存是刻意的，所以不把「新建项目」算作旧文案。
     for name in ("pages/ProjectsPage.tsx", "pages/HomePage.tsx"):
         text = _text(SRC / name)
         left = [s for s in stale if s in text]
@@ -235,7 +258,10 @@ def test_the_agent_entry_is_wired_everywhere():
     known = re.search(r"const KNOWN_ROUTES = new Set\(\[(.*?)\]\)", app, re.S)
     assert known and '"agent"' in known.group(1), "路由白名单里没有 agent（会被当成未知路由）"
     assert 'import AgentPage from "./pages/AgentPage"' in app, "没有引入 Agent 页"
-    assert re.search(r'case "agent":\s*\n\s*return <AgentPage', app), "路由没有分支到 Agent 页"
+    agent_case = app.find('case "agent":')
+    assert agent_case != -1 and "<AgentPage" in app[agent_case : agent_case + 300], (
+        "路由没有分支到 Agent 页"
+    )
 
     page = SRC / "pages" / "AgentPage.tsx"
     assert page.exists(), "AgentPage.tsx 不存在"

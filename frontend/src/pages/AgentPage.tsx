@@ -40,9 +40,14 @@ import { useToast } from "../components/Toast";
 export default function AgentPage({
   onNavigate,
   onOpenCanvas,
+  openSessionId,
+  onSessionOpened,
 }: {
   onNavigate?: (route: string) => void;
   onOpenCanvas?: (p: { id: number; name: string }) => void;
+  /** 从侧栏 / 首页指定要打开的任务；打开一次后由 App 清掉 */
+  openSessionId?: number | null;
+  onSessionOpened?: () => void;
 }) {
   const toast = useToast();
   const [meta, setMeta] = useState<AgentWorkspaceMeta | null>(null);
@@ -55,8 +60,11 @@ export default function AgentPage({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [showTools, setShowTools] = useState(false);
+  const [autoApprove, setAutoApprove] = useState(false);
   const [newProjectName, setNewProjectName] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  // 带「指定任务」进来时，默认选择（最近一条）不许覆盖它
+  const explicitOpenRef = useRef(openSessionId != null);
 
   const applyPayload = (payload: AgentPayload) => {
     setSession(payload.session);
@@ -64,6 +72,7 @@ export default function AgentPage({
     setSteps(payload.steps);
     setPending(payload.pending);
     setProjectId(payload.session.agentProjectId);
+    setAutoApprove(Boolean(payload.session.autoApprove));
   };
 
   const refreshMeta = useCallback(async () => {
@@ -90,13 +99,13 @@ export default function AgentPage({
       (firstProject && m.sessions.find((s) => s.agentProjectId === firstProject.id)) ||
       m.sessions[0] ||
       null;
-    if (target) {
+    if (target && !explicitOpenRef.current) {
       try {
         applyPayload(await api.getAgentSession(target.id));
       } catch {
         /* 会话读不出来就停在空状态 */
       }
-    } else if (firstProject) {
+    } else if (firstProject && !explicitOpenRef.current) {
       setProjectId(firstProject.id);
     }
   }, [refreshMeta]);
@@ -104,6 +113,27 @@ export default function AgentPage({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 从侧栏 / 首页点某条任务：直接加载那一条
+  useEffect(() => {
+    if (openSessionId == null) return;
+    explicitOpenRef.current = true;
+    let alive = true;
+    (async () => {
+      try {
+        const payload = await api.getAgentSession(openSessionId);
+        if (alive) applyPayload(payload);
+      } catch (e) {
+        if (alive) toast.error(`打开任务失败：${(e as Error).message}`);
+      } finally {
+        if (alive) onSessionOpened?.();
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openSessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -164,6 +194,7 @@ export default function AgentPage({
       const payload = await api.createAgentSession({
         model_key: session?.modelKey || meta?.models[0]?.key || "",
         agent_project_id: projectId,
+        auto_approve: autoApprove,
       });
       applyPayload(payload);
       await refreshMeta();
@@ -197,6 +228,7 @@ export default function AgentPage({
         const created = await api.createAgentSession({
           model_key: meta?.models[0]?.key || "",
           agent_project_id: projectId,
+          auto_approve: autoApprove,
         });
         applyPayload(created);
         sid = created.session.id;
@@ -235,6 +267,18 @@ export default function AgentPage({
       applyPayload(await api.patchAgentSession(session.id, { model_key: modelKey }));
     } catch (e) {
       toast.error((e as Error).message);
+    }
+  };
+
+  /** 切换审批方式：手动 = 花钱前停下等人点；自动 = 直接执行（代价仍记在时间线里）。 */
+  const setApproval = async (auto: boolean) => {
+    setAutoApprove(auto);
+    if (!session) return; // 还没建任务：把这个选择留给下一个新任务
+    try {
+      applyPayload(await api.patchAgentSession(session.id, { auto_approve: auto }));
+    } catch (e) {
+      setAutoApprove(!auto);
+      toast.error(`切换审批方式失败：${(e as Error).message}`);
     }
   };
 
@@ -286,10 +330,33 @@ export default function AgentPage({
           <div className="agent-model">
             <ModelSelect
               models={meta?.models || []}
-              value={session?.modelKey || meta?.models[0]?.key || ""}
+              value={session?.modelKey || meta?.models?.[0]?.key || ""}
               onChange={(key) => void setSessionModel(key)}
               placeholder="选一个文本模型"
             />
+          </div>
+          <div
+            className="agent-approval"
+            title={
+              autoApprove
+                ? "自动审批：跑整图 / 跑节点不再停下等确认，直接执行并记账"
+                : "手动审批：跑整图 / 跑节点前停下来，等你看过代价再点确认"
+            }
+          >
+            <button
+              type="button"
+              className={autoApprove ? "" : "on"}
+              onClick={() => void setApproval(false)}
+            >
+              手动审批
+            </button>
+            <button
+              type="button"
+              className={autoApprove ? "on risk" : ""}
+              onClick={() => void setApproval(true)}
+            >
+              自动审批
+            </button>
           </div>
           {agentProject && (
             <select
@@ -442,6 +509,11 @@ export default function AgentPage({
           <div className="agent-context">
             <span>{currentProject ? currentProject.name : "未归档"}</span>
             {session && <span className="agent-context-task">· {session.title}</span>}
+            {autoApprove && (
+              <span className="agent-auto-note" title="跑整图 / 跑节点会直接执行，不再停下来等确认">
+                自动审批
+              </span>
+            )}
             {canvasId && <span className="agent-context-canvas">画布 #{canvasId}</span>}
           </div>
           <div className="agent-timeline">
@@ -579,12 +651,16 @@ function ToolRow({ step }: { step: AgentStepInfo }) {
   const result = (step.toolResult || {}) as Record<string, unknown>;
   const hint = typeof result.hint === "string" ? result.hint : "";
   const error = typeof result.error === "string" ? result.error : "";
+  const autoApproved = Boolean(result.autoApproved);
   return (
     <details className={`agent-tool ${step.status === "error" ? "bad" : ""}`}>
       <summary>
         <span className={`agent-tool-dot ${step.status}`} />
         <code>{step.toolName}</code>
         <span className="agent-tool-tier">{step.tierLabel}</span>
+        {autoApproved && (
+          <span className="agent-tool-auto" title="自动审批：这一步没有停下来等你点">自动审批</span>
+        )}
         <span className="agent-tool-status">{STATUS_LABEL[step.status] || step.status}</span>
         {step.durationMs > 0 && <span className="agent-tool-ms">{step.durationMs} ms</span>}
         {hint && <span className="agent-tool-hint">{hint}</span>}
