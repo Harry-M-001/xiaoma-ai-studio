@@ -106,7 +106,8 @@ dsh → xms_run_canvas(project_id)
 ## 七、打包与许可
 
 - 可选组件包内容：Node 运行时（LTS）+ 固定版本 dsh + 启动脚本；下载后 sha256 校验。
-- 分发时附：dsh 的 MIT LICENSE、`THIRD_PARTY_NOTICES.md`、我们的集成说明；界面标注「由 DeepSeek Harness 提供」。
+- 分发时附：dsh 的 MIT LICENSE、[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)、我们的集成说明。
+  界面不额外做来源标注；声明随分发包与仓库一起提供。
 - 不暗示 DeepSeek 官方背书；不使用其商标做产品名。
 - 用户 Key 仍由用户自备（DeepSeek 或其它），我们不经手计费。
 

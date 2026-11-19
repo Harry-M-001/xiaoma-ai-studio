@@ -204,6 +204,10 @@ def test_frontend_has_the_optional_component_card():
     assert "<HarnessDirPicker" in page and "api.harnessDirs(" in picker
     assert "不装、不启动时，原 Agent 完全不受影响" in page, "界面要说清它与原 Agent 的边界"
 
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    assert "MIT License" in notices and "Copyright (c) 2026 DeepSeek" in notices
+    assert "Node.js" in notices
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
