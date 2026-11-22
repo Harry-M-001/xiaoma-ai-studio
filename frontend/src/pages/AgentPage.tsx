@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   ListTree,
   Loader2,
+  Paperclip,
   Plus,
   RefreshCw,
   ShieldCheck,
@@ -36,7 +37,7 @@ import type {
   Project,
   PromptItem,
 } from "../types";
-import { Empty, Spinner, ModelSelect } from "../components/common";
+import { Empty, Spinner, ModelSelect, formatSize } from "../components/common";
 import { useToast } from "../components/Toast";
 
 /**
@@ -104,6 +105,11 @@ export default function AgentPage({
   const [pending, setPending] = useState<AgentStepInfo | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  /** 随这条消息带上的本地文件：拖进输入框或点回形针上传，发送后才清空 */
+  const [files, setFiles] = useState<Asset[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** 这一轮用的斜杠命令（空 = 普通消息）；goal 会显示「持续监测中」与停止按钮 */
   const [runMode, setRunMode] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
@@ -276,8 +282,27 @@ export default function AgentPage({
     }
   };
 
+  /** 拖拽 / 回形针 / 粘贴进来的本地文件：先落资产库，发送时只传 asset id */
+  const uploadFiles = async (list: FileList | File[]) => {
+    const arr = Array.from(list);
+    if (arr.length === 0 || uploading) return;
+    setUploading(true);
+    let ok = 0;
+    for (const f of arr) {
+      try {
+        const asset = await api.uploadAgentFile(f);
+        setFiles((prev) => [...prev, asset]);
+        ok += 1;
+      } catch (e) {
+        toast.error(`${f.name}：${(e as Error).message}`);
+      }
+    }
+    setUploading(false);
+    if (ok) toast.success(`已添加 ${ok} 个文件`);
+  };
+
   const send = async () => {
-    const text = input.trim();
+    const text = input.trim() || (files.length ? "看看这些文件，按你的判断处理。" : "");
     if (!text || busy || goalRunning) return;
     // 斜杠命令只认开头；命令后面的正文不能为空（后端也会拦一次）
     const match = /^\/(spec|plan|goal)\b/i.exec(text);
@@ -302,8 +327,9 @@ export default function AgentPage({
         sid = created.session.id;
         await refreshMeta();
       }
-      const payload = await api.agentSend(sid, text);
+      const payload = await api.agentSend(sid, text, files.map((f) => f.id));
       setInput("");
+      setFiles([]);
       applyPayload(payload);
       if (payload.run?.status === "need_confirm") {
         toast.success("有一个不可逆的操作，等你确认");
@@ -659,7 +685,21 @@ export default function AgentPage({
             <div ref={bottomRef} />
           </div>
 
-          <div className="agent-composer">
+          <div
+            className={`agent-composer ${dragging ? "dragging" : ""}`}
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes("Files")) {
+                e.preventDefault();
+                setDragging(true);
+              }
+            }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragging(false);
+              if (e.dataTransfer.files.length) void uploadFiles(e.dataTransfer.files);
+            }}
+          >
             {slashItems.length > 0 && (
               <div className="agent-slash">
                 {slashItems.map((item, index) => (
@@ -754,6 +794,23 @@ export default function AgentPage({
             )}
 
             <div className="agent-composer-box">
+              {files.length > 0 && (
+                <div className="agent-files">
+                  {files.map((f) => (
+                    <span className="agent-file-chip" key={f.id} title={`${f.content_type} · ${formatSize(f.size)}`}>
+                      {f.kind === "image" ? <ImageIcon size={13} /> : <FileText size={13} />}
+                      <b>{f.original_name}</b>
+                      <button
+                        type="button"
+                        title="移除"
+                        onClick={() => setFiles((prev) => prev.filter((x) => x.id !== f.id))}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
               <textarea
                 ref={inputRef}
                 className="agent-input"
@@ -816,6 +873,28 @@ export default function AgentPage({
                 >
                   <Plus size={16} />
                 </button>
+
+                {/* 本地文件：点这里选，或直接把文件拖进输入框 */}
+                <button
+                  type="button"
+                  className="icon-btn agent-plus"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={uploading || busy || goalRunning}
+                  title="上传本地文件（图片 / 文本 / PDF / 音视频），也可以直接拖进来"
+                  aria-label="上传本地文件"
+                >
+                  {uploading ? <Loader2 size={16} className="spin-ic" /> : <Paperclip size={16} />}
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    if (e.target.files) void uploadFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
 
                 <div className="agent-approval-menu">
                   <button
@@ -893,7 +972,7 @@ export default function AgentPage({
                   type="button"
                   className="agent-send"
                   onClick={() => void send()}
-                  disabled={busy || goalRunning || !input.trim()}
+                  disabled={busy || goalRunning || (!input.trim() && files.length === 0)}
                   title="发送（Enter）"
                   aria-label="发送"
                 >
@@ -901,6 +980,11 @@ export default function AgentPage({
                 </button>
               </div>
             </div>
+            {dragging && (
+              <div className="agent-drop-hint">
+                松开即可添加文件（图片 / 文本 / PDF / 音视频）
+              </div>
+            )}
           </div>
 
           <div className="agent-toolbar">

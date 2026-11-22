@@ -66,7 +66,7 @@ VERSION_RE = re.compile(r"""__version__\s*=\s*['"]([^'"]+)['"]""")
 COPY_TREES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("backend/app", ()),
     ("backend/alembic", ()),
-    ("backend/tools", ("make_portable.py",)),  # 打包脚本自己不进包
+    ("backend/tools", ("make_portable.py", "mock_model_server.py", "mock_matrix.py")),  # 打包/测试脚本自己不进包
     ("frontend/webroot", ()),
     # 随包字体：烧字幕要用，约 32 MB（思源黑体 Regular + Bold）。**只有这一款进包**——
     # 另外三款（宋体 / 霞鹜文楷 / 得意黑）走「按需下载 + sha256 校验」，不进仓库也不进包：

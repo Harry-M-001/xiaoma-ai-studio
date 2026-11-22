@@ -33,16 +33,18 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AgentProject, AgentSession, AgentStep, Task
+from app.models import AgentProject, AgentSession, AgentStep, Asset, Task
 from app.providers.base import AdapterError
 from app.registry.canvas_nodes import NODE_SCHEMAS
-from app.services import agent_skills, agent_tools, provider_store
+from app.services import agent_skills, agent_tools, provider_store, storage
 from app.services.agent_tools import TIER_IRREVERSIBLE, TIER_LABELS, TIER_READ, ToolContext
 
 logger = logging.getLogger("xiaoma.agent")
 
 #: 一轮里最多几次模型往返。超过就停：这比「无限重试」诚实得多。
-MAX_ROUNDS = 8
+#: 8 轮不够一次标准流程（读画布 + 查模型 + 草稿 + 落定 + 回查 + 预览 + 派发 + 等结果），
+#: 实测 Agent 在「补一个默认就有的参数」上耗两轮后就会撞线，任务停在半路。
+MAX_ROUNDS = 12
 
 #: 单条工具结果进上下文的上限（完整的还在库里与界面上）
 MAX_RESULT_CHARS = 4000
@@ -59,7 +61,11 @@ NUDGE_TEXT = (
 
 #: 收尾话里出现这些词，说明它把「下一步」写成了结束语。
 _PLAN_MARKERS = (
-    "我现在", "我这就", "接下来", "下面我", "先做", "先跑", "先看", "先去",
+    "我现在", "我这就", "我这就去", "我马上", "我准备", "我接着", "我先", "我再",
+    "现在我", "现在运行", "现在整图", "现在开始", "现在跑", "现在回查", "现在落定",
+    "现在等", "等结果",
+    "接下来", "下面我", "先做", "先跑", "先看", "先去", "先确认",
+    "先预估", "先算", "再查一下", "再确认", "回查一遍",
     "开始做", "开始跑", "开始逐", "然后去", "再做一次",
 )
 
@@ -147,6 +153,85 @@ def parse_command(text: str) -> tuple[str, str]:
 # ============================================================ 历史重建
 
 
+_TEXT_SUFFIXES = {
+    ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".log", ".py", ".js", ".ts", ".tsx", ".jsx", ".html",
+    ".css", ".scss", ".sql", ".xml", ".srt", ".vtt", ".tex", ".bat", ".ps1", ".sh",
+}
+#: 单个文件最多塞进提示词的字符数；再多就截断并说明——上下文是有限的，
+#: 一份一百页的文档整段塞进去只会把这一轮后面的工具调用挤掉。
+_ATTACH_PER_FILE = 6000
+_ATTACH_TOTAL = 12000
+
+
+def _docx_text(data: bytes) -> str:
+    try:
+        import io
+
+        from docx import Document
+
+        doc = Document(io.BytesIO(data))
+        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _attachment_text(asset: Asset) -> str:
+    """从资产里尽量读出正文；读不出来就返回空串（由调用方说明原因）。"""
+    path = storage.abs_path(asset.filename)
+    if not path.is_file():
+        return ""
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".docx":
+            return _docx_text(path.read_bytes())
+        if suffix in _TEXT_SUFFIXES or (asset.content_type or "").startswith("text/"):
+            return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return ""
+
+
+async def describe_attachments(db: AsyncSession, asset_ids: list[int]) -> str:
+    """把用户随消息上传的文件整理成一段可读说明，拼在用户那句话后面。
+
+    - 文本类（txt / md / csv / json / 代码 / docx）直接把正文给模型；
+    - 图片 / 音视频只给资产 id 与规格——它们不是「读」的对象，而是后续工具
+      （参考图、首帧、配音）要引用的素材；
+    - PDF 这类读不出正文的格式如实说明，不假装读过。
+    """
+    if not asset_ids:
+        return ""
+    lines = ["【用户上传的文件】"]
+    used = 0
+    for raw_id in asset_ids[:20]:
+        try:
+            asset = await db.get(Asset, int(raw_id))
+        except (TypeError, ValueError):
+            asset = None
+        if asset is None:
+            lines.append(f"- 资产 #{raw_id} 已不存在（可能被删除了），忽略。")
+            continue
+        name = asset.original_name or asset.filename
+        head = f"- @资产#{asset.id}「{name}」（{asset.kind}，{asset.size or 0} 字节）"
+        if asset.kind == "image":
+            lines.append(head + f"\n  已存入资产库，需要时可作为参考图 / 首帧引用（id={asset.id}）。")
+            continue
+        if asset.kind in ("video", "audio"):
+            lines.append(head + f"\n  已存入资产库，可在画布节点或工具里引用（id={asset.id}）。")
+            continue
+        text = _attachment_text(asset)
+        if not text.strip():
+            lines.append(head + "\n  正文没有解析出来（可能是 PDF / 二进制文档）。需要内容的话，请让用户先导出成 txt 或 md。")
+            continue
+        room = min(_ATTACH_PER_FILE, max(0, _ATTACH_TOTAL - used))
+        snippet = text[:room]
+        used += len(snippet)
+        clipped = "（已截断）" if len(text) > len(snippet) else ""
+        lines.append(head + f"\n  正文{clipped}：\n```\n{snippet}\n```")
+    return "\n".join(lines)
+
+
 def _history_text(step: AgentStep) -> str:
     text = step.tool_result or ""
     if len(text) <= MAX_RESULT_CHARS:
@@ -200,7 +285,7 @@ def build_system_prompt(
 
 规矩：
 1. **事实只信工具返回**：不要编造画布 id、节点 id、任务状态或产物；没查过就说没查。
-2. **改之前先读**：动某张画布前先 get_canvas；改完用返回的 id 回查一次（get_canvas 或 canvas_status）再说结论。跑整图之后用 canvas_status 看节点级进度，**不要**凭感觉说「快好了」「已经完成」。
+2. **改之前先读**：动某张画布前先 get_canvas；改完用返回的 id 回查一次（get_canvas 或 canvas_status）再说结论。跑整图之后用 canvas_status 看节点级进度，**不要**凭感觉说「快好了」「已经完成」。确认模型是否存在时**只调一次** list_models（不传 modality 就返回全部），不要按能力分两三次查。
 3. {approval_rule(session)}
 4. **每次只调一个工具**，看一眼结果再决定下一步。不要一口气连调五个。**看任务进度用 wait_for_tasks 等**（一次最多等两分钟），不要连续调 get_task 轮询——同一个查询连叫三次会被系统挡回。
 5. {bound}。用户没说是哪张时，先 list_projects；一张都没有就 create_project。
@@ -209,7 +294,7 @@ def build_system_prompt(
 8. {where}
 9. 回答用中文、短句，说清「做了什么 / 对象 id / 下一步」。不要输出大段 JSON 或代码。
 10. **说了就要做**：不要在回复里写「我现在去…」「接下来…」「先做…」然后结束这一轮。真要调用工具就在这一轮直接调，拿到结果再汇报；只有已经查过 / 跑过，才能下结论。收尾前自查：最后一句如果是在宣布下一步，那就还没结束。
-11. 用户要「整条链跑完 / 做完直到成品」时，用 **run_canvas** 一次派发（执行顺序由画布按依赖决定），再用 **wait_for_tasks** 等结果；只有用户点名某个节点时才用 run_node。一个节点一个节点跑又慢又费轮数。**wait_for_tasks 会跟住整图**：还在后台派下游节点时会继续等（单次上限 2 分钟，超时再调一次即可）。preview_canvas 的 calls 只是**下界**，pendingNodes 要等上游跑完才知道。**中途某个节点失败时，用 run_node 只重跑那一个**，不要用 run_canvas 把已完成的节点全部重做一遍。{mode_block}
+11. 用户要「整条链跑完 / 做完直到成品」时，用 **run_canvas** 一次派发（执行顺序由画布按依赖决定），再用 **wait_for_tasks** 等结果；只有用户点名某个节点时才用 run_node。一个节点一个节点跑又慢又费轮数。**wait_for_tasks 会跟住整图**：还在后台派下游节点时会继续等（单次上限 2 分钟，超时再调一次即可）。**它返回 done=true 时，结果里的 tasks 就是最终状态——直接据此汇报，不要再调 canvas_status / get_task / list_assets 重复查同一件事**。preview_canvas 的 calls 只是**下界**，pendingNodes 要等上游跑完才知道。**中途某个节点失败时，用 run_node 只重跑那一个**，不要用 run_canvas 把已完成的节点全部重做一遍。{mode_block}
 {agent_skills.prompt_block()}
 """
 
@@ -584,8 +669,8 @@ async def run_loop(
                     "rounds": rounds, "toolCalls": tool_calls_seen,
                     "writeCalls": write_calls_seen}
         note = (
-            "这一轮调用次数到上限了，先停在这里。要我持续做完，"
-            "请在输入框用 /goal 重新发一次——目标模式会一路推进到完成。"
+            "这一轮调用次数到上限了，先停在这里。已经派出去的任务会在后台继续跑；"
+            "想看结果就发一句「继续」，或者用 /goal 让它一路推进到完成。"
         )
         await add_step(db, session.id, role="assistant", content=note)
         return {"status": "max_rounds", "reply": note, "model": label,
@@ -605,11 +690,19 @@ async def send(
     *,
     mode: str = "",
     cancel: asyncio.Event | None = None,
+    attachments: str = "",
 ) -> dict:
-    """用户说一句话：落库 → 跑一轮。`mode` 由斜杠命令决定（spec/plan/goal）。"""
+    """用户说一句话：落库 → 跑一轮。`mode` 由斜杠命令决定（spec/plan/goal）。
+
+    `attachments` 是随消息上传的文件说明（见 `describe_attachments`）。它拼在
+    用户原话后面一起落库：历史重建要靠库里的步骤，附件内容不能只活在这一次请求里，
+    否则下一轮模型就忘了自己刚读过什么。
+    """
     content = (text or "").strip()
     if not content:
         raise ValueError("消息为空")
+    if attachments.strip():
+        content = f"{content}\n\n{attachments.strip()}"
     await add_step(db, session.id, role="user", content=content)
     if session.title in ("", "新会话"):
         session.title = content.replace("\n", " ")[:24]

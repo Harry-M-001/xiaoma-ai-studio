@@ -560,6 +560,21 @@ def test_a_draft_with_unknown_kinds_is_dropped_not_crashing():
 # ================================================================ 4. 接线
 
 
+def test_agent_can_take_local_files_by_drop_or_picker():
+    """Agent 编辑区要能收本地文件：拖拽、回形针、随消息带 asset_ids。
+
+    只做前端不接后端等于没做——三条断言分别守入口、上传接口与发消息时的引用。
+    """
+    page = (BACKEND.parent / "frontend" / "src" / "pages" / "AgentPage.tsx").read_text(
+        encoding="utf-8"
+    )
+    api = (BACKEND.parent / "frontend" / "src" / "api.ts").read_text(encoding="utf-8")
+    assert "onDrop" in page and "uploadFiles" in page, "缺少拖拽入口"
+    assert "uploadAgentFile" in page and "/api/agent/files" in api, "缺少上传接口"
+    assert "agent-file-chip" in page, "上传后没有文件标记"
+    assert "asset_ids" in api, "发消息没有把文件 asset id 带上"
+
+
 def test_the_router_and_page_are_wired():
     main = (BACKEND / "app" / "main.py").read_text(encoding="utf-8")
     api = (BACKEND.parent / "frontend" / "src" / "api.ts").read_text(encoding="utf-8")
@@ -669,18 +684,42 @@ def test_agent_can_switch_a_nodes_model():
         got = await agent_tools.execute(ctx, "update_node", {
             "project_id": project.id, "node_id": "n6",
             "model_key": f"{kie.id}:bytedance/seedance-2-5",
-            "params": {"duration": 20},
+            "params": {"duration": 20, "resolution": "1080p"},
         })
         assert got["ok"] is True, got
         data = json.loads(project.canvas_json)["nodes"][0]["data"]
         assert data["model_key"] == f"{kie.id}:bytedance/seedance-2-5", data
         assert data["duration"] == 20, data
+        # 分辨率不是画布控件，但运行时会读 data.resolution：
+        # 白名单挡掉它，Agent 就会在「补 720p」上白耗两轮
+        assert data["resolution"] == "1080p", data
 
         missing = await agent_tools.execute(ctx, "update_node", {
             "project_id": project.id, "node_id": "n6", "model_key": "999:not-exist",
         })
         assert missing["ok"] is False, missing
         assert "list_models" in (missing.get("hint") or ""), missing
+
+    _agent_db_run(scenario)
+
+
+def test_get_canvas_reports_video_default_resolution():
+    """视频节点没写分辨率时，回查要显式告诉 Agent「默认 720p」。
+
+    不显示的话，模型会以为参数缺了，反复 update_node 去补一个本来就有默认值的字段。
+    """
+
+    async def scenario(db) -> None:  # noqa: ANN001
+        project = Project(name="p", canvas_json=_video_canvas("1:doubao-seedance-1-0-pro-250528"))
+        db.add(project)
+        await db.commit()
+        await db.refresh(project)
+        session = AgentSession(id=1, title="t", model_key="", canvas_project_id=project.id)
+        ctx = agent_tools.ToolContext(db=db, session=session)
+        got = await agent_tools.execute(ctx, "get_canvas", {"project_id": project.id})
+        assert got["ok"] is True, got
+        params = got["data"]["nodes"][0]["params"]
+        assert params["resolution"] == "720p", params
 
     _agent_db_run(scenario)
 

@@ -77,6 +77,15 @@ def _is_kling_v4(model: str) -> bool:
     return model.startswith("kling/") and "-v4-" in model
 
 
+def _task_status(output: dict) -> str:
+    """百炼任务状态在 `output.task_status`（文档口径），不是 `output.status`。
+
+    只读 `status` 会让轮询永远返回「处理中」——任务其实早就成功了，
+    界面上表现为视频一直转圈、超时后才报错。兼容两种写法，优先文档字段。
+    """
+    return str(output.get("task_status") or output.get("status") or "").upper()
+
+
 def _kling_ratio(ratio: str, *, v4: bool) -> str:
     """可灵 3.0 只认 16:9 / 9:16 / 1:1；4.0 多一个 21:9。其余一律回落到 16:9。"""
     allowed = {"16:9", "9:16", "1:1"} | ({"21:9"} if v4 else set())
@@ -147,6 +156,10 @@ class DashScopeAdapter(BaseAdapter):
     ) -> list[bytes]:
         if not self.base_url or not self.api_key:
             raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
+        if (model or "").strip().lower().startswith("qwen-image"):
+            return await self._generate_qwen_image(
+                model=model, prompt=prompt, n=n, size=size, ref_images=ref_images
+            )
         content: list[dict[str, Any]] = [{"text": prompt}]
         for img in ref_images or []:
             content.append({"image": _data_uri(img, _sniff_image_mime(img))})
@@ -181,13 +194,57 @@ class DashScopeAdapter(BaseAdapter):
             await asyncio.sleep(_POLL_INTERVAL)
             waited += _POLL_INTERVAL
             data = await self._get_task(client, str(task_id))
-            status = str(data.get("status") or "").upper()
+            status = _task_status(data)
             if status == "SUCCEEDED":
                 return await self._download_images(client, data)
             if status in ("FAILED", "CANCELED", "UNKNOWN"):
                 msg = (data.get("message") or data.get("code") or "图片生成失败")[:300]
                 raise AdapterError(str(msg))
         raise AdapterError("图片生成超时，请稍后在任务中心查看", log_detail="timeout image_generation")
+
+    async def _generate_qwen_image(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        n: int,
+        size: str,
+        ref_images: list[bytes] | None,
+    ) -> list[bytes]:
+        """Qwen-Image 走百炼的**同步多模态**端点，而不是万相那条异步任务。
+
+        官方文档里它是 `POST /services/aigc/multimodal-generation/generation`：
+        入参是 messages（文本 + 参考图 base64），出参直接给图片 URL，没有 task_id，
+        所以这里不需要轮询。请求头也要去掉 `X-DashScope-Async`——带上它会被当成
+        异步任务受理，响应形状就变了。
+        """
+        content: list[dict[str, Any]] = [{"text": prompt}]
+        for img in ref_images or []:
+            content.append({"image": _data_uri(img, _sniff_image_mime(img))})
+        body = {
+            "model": model,
+            "input": {"messages": [{"role": "user", "content": content}]},
+            "parameters": {
+                "n": max(1, min(int(n or 1), 4)),
+                "size": wan_size(size),
+                "watermark": False,
+            },
+        }
+        headers = self.headers()
+        headers.pop("X-DashScope-Async", None)
+        headers["Content-Type"] = "application/json"
+        client = await self.client()
+        try:
+            resp = await client.post(
+                f"{self.base_url}/services/aigc/multimodal-generation/generation",
+                headers=headers,
+                json=body,
+            )
+        except httpx.HTTPError as e:
+            raise AdapterError(network_error_message(e), log_detail=network_error_detail(e, self.base_url)) from e
+        if resp.status_code not in (200, 201):
+            raise_upstream_error(resp)
+        return await self._download_images(client, resp.json() or {})
 
     async def _download_images(self, client: httpx.AsyncClient, task: dict) -> list[bytes]:
         output = task.get("output") or {}
@@ -320,7 +377,7 @@ class DashScopeAdapter(BaseAdapter):
         except AdapterError as e:
             # 网络抖动按处理中处理，下轮再查
             return VideoStatus(status="processing", progress=0, error=str(e))
-        status = str(output.get("status") or "").upper()
+        status = _task_status(output)
         if status == "SUCCEEDED":
             video_url = output.get("video_url")
             if not video_url:

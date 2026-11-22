@@ -17,16 +17,16 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_db
-from app.models import AgentProject, AgentSession, AgentStep
+from app.models import AgentProject, AgentSession, AgentStep, Asset
 from app.providers.base import AdapterError
 from app.schemas import ModelOption
-from app.services import agent_runner, agent_skills, agent_tools, provider_store
+from app.services import agent_runner, agent_skills, agent_tools, provider_store, storage
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,8 @@ class AgentProjectPatch(BaseModel):
 
 class MessageIn(BaseModel):
     content: str
+    # 随消息一起带上的本地文件（先走 /api/agent/files 上传拿到 asset id）
+    asset_ids: list[int] = []
 
 
 class ConfirmIn(BaseModel):
@@ -381,6 +383,76 @@ def _fail(e: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+@router.post("/files")
+async def upload_agent_file(
+    file: UploadFile = File(...), db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Agent 的文件上传入口：任意本地文件先落资产库，再随消息引用给模型。
+
+    和图片页的上传不是同一条口径：那里只收图片（要当参考图），而 Agent 需要
+    读文本 / 表格 / PDF 这类「内容」。图片仍然收，存成 image 资产，模型可以在
+    后续工具里用资产 id 引用它。
+    """
+    from pathlib import Path
+
+    content = await file.read()
+    limit = _max_upload_bytes()
+    if len(content) > limit:
+        raise HTTPException(status_code=400, detail=f"文件过大（上限 {limit // 1024 // 1024}MB）")
+    if not content:
+        raise HTTPException(status_code=400, detail="文件是空的")
+
+    name = Path(file.filename or "上传文件").name
+    ct = (file.content_type or "").lower()
+    kind = storage.guess_kind(ct)
+    suffix = Path(name).suffix.lower()
+    if kind == "other":
+        # 文本 / PDF / Word 等统一归到 document：资产库里能筛出来，Agent 也能读
+        kind = "document"
+    rel = storage.save_bytes(
+        content, ct or "application/octet-stream", preferred_ext=suffix.lstrip(".") or None
+    )
+    asset = Asset(
+        kind=kind,
+        filename=rel,
+        original_name=name,
+        content_type=ct or "application/octet-stream",
+        size=len(content),
+        source="uploaded",
+        **storage.image_size_kwargs(content, ct),
+    )
+    db.add(asset)
+    await db.commit()
+    await db.refresh(asset)
+    return {
+        "id": asset.id,
+        "kind": asset.kind,
+        "url": f"/media/{asset.filename}",
+        "original_name": asset.original_name,
+        "content_type": asset.content_type,
+        "size": asset.size,
+        "source": "uploaded",
+        "name": "",
+        "category": "",
+        "prompt": None,
+        "width": getattr(asset, "width", None),
+        "height": getattr(asset, "height", None),
+        "duration": getattr(asset, "duration", None),
+        "task_id": None,
+        "created_at": asset.created_at.isoformat() if asset.created_at else "",
+    }
+
+
+def _max_upload_bytes() -> int:
+    from app.services.config_center_service import runtime_value
+
+    try:
+        mb = int(runtime_value("limits.upload_max_mb", 100) or 100)
+    except (TypeError, ValueError):
+        mb = 100
+    return max(1, mb) * 1024 * 1024
+
+
 @router.post("/sessions/{session_id}/messages")
 async def send_message(
     session_id: int, payload: MessageIn, db: AsyncSession = Depends(get_db)
@@ -407,6 +479,10 @@ async def send_message(
         raise HTTPException(
             status_code=400, detail="在 /spec、/plan、/goal 后面写一句要做什么。"
         )
+    attachments = (
+        await agent_runner.describe_attachments(db, payload.asset_ids)
+        if payload.asset_ids else ""
+    )
     if mode == "goal":
         if session_id in _GOAL_RUNS:
             raise HTTPException(
@@ -421,7 +497,7 @@ async def send_message(
     try:
         try:
             result = await agent_runner.send(
-                db, session, content, mode=mode, cancel=cancel
+                db, session, content, mode=mode, cancel=cancel, attachments=attachments
             )
             if (
                 mode == "goal"

@@ -269,6 +269,12 @@ export const api = {
     fd.append("file", file);
     return request<Asset>("/api/assets/upload", { method: "POST", body: fd });
   },
+  /** Agent 的附件上传：图片 / 文本 / PDF / 音视频都能收，落到资产库后再随消息引用 */
+  uploadAgentFile: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<Asset>("/api/agent/files", { method: "POST", body: fd });
+  },
   deleteAsset: (id: number) =>
     request<{ ok: boolean }>(`/api/assets/${id}`, { method: "DELETE" }),
 
@@ -309,10 +315,10 @@ export const api = {
   ) => request<AgentPayload>(`/api/agent/sessions/${id}`, { method: "PATCH", body: json(payload) }),
   deleteAgentSession: (id: number) =>
     request<{ ok: boolean }>(`/api/agent/sessions/${id}`, { method: "DELETE" }),
-  agentSend: (id: number, content: string) =>
+  agentSend: (id: number, content: string, assetIds: number[] = []) =>
     request<AgentPayload>(`/api/agent/sessions/${id}/messages`, {
       method: "POST",
-      body: json({ content }),
+      body: json({ content, asset_ids: assetIds }),
     }),
   agentConfirm: (id: number, stepId: number, approve: boolean) =>
     request<AgentPayload>(`/api/agent/sessions/${id}/confirm`, {

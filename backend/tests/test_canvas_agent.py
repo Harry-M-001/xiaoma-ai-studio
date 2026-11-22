@@ -602,6 +602,16 @@ def _install_fake(db, replies: list[str], error: str = ""):
     return lambda: adapter.calls
 
 
+def test_video_resolution_is_accepted_not_reported_as_unknown():
+    """视频分辨率虽然不是画布控件，但运行时认它；草稿里带 720p 不该被当垃圾丢掉。"""
+    from app.services.canvas_agent import _validate_param
+
+    value, reason = _validate_param("resolution", "720p", {}, set())
+    assert value == "720p" and not reason, (value, reason)
+    value, reason = _validate_param("resolution", "8k", {}, set())
+    assert value is None and "480p" in reason, (value, reason)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

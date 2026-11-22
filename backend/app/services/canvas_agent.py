@@ -92,6 +92,7 @@ PARAM_LABEL = {
     "n": "生成张数",
     "duration": "视频时长",
     "ratio": "画幅比例",
+    "resolution": "分辨率",
     "mode": "视频模式",
     "styleKey": "风格",
     "chapterCount": "章数",
@@ -228,6 +229,10 @@ def build_system_prompt(
         ]
         for modality, items in models.items():
             lines.append(f"- {MODALITY_LABEL.get(modality, modality)}：{'、'.join(items)}")
+        lines.append(
+            "需求里如果直接写了 `服务id:模型名` 形式的 model_key，**必须原样照抄**；"
+            "不要在其它服务里找同名模型替换——同一个名字可能挂在不同服务上，换掉就跑到别家去了。"
+        )
 
     lines += [
         "",
@@ -262,6 +267,11 @@ def _agent_params(kind: str) -> list[str]:
         param = FEATURE_TO_PARAM.get(feat)
         if param and param not in out:
             out.append(param)
+    # 分辨率在画布上没做成独立控件（视频节点默认 720p），但运行时确实会读
+    # `data.resolution`。Agent 按用户要求写 720p 时不该被白名单挡回去——
+    # 实测它会在「补 720p」上耗掉两轮，最后什么都没跑。
+    if kind == "video" and "resolution" not in out:
+        out.append("resolution")
     return out
 
 
@@ -391,6 +401,12 @@ def _validate_param(
         if value in VIDEO_MODES:
             return value, ""
         return None, f"{label} {value} 不是支持的取值"
+
+    if param == "resolution":
+        text = str(value).strip().lower()
+        if text in ("480p", "720p", "1080p", "4k"):
+            return text, ""
+        return None, f"{label} {value} 不是支持的取值（480p / 720p / 1080p / 4k）"
 
     if param == "styleKey":
         if not value:

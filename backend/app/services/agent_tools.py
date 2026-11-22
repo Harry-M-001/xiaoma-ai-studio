@@ -293,15 +293,20 @@ async def _get_canvas(ctx: ToolContext, args: dict) -> dict:
     for n in doc["nodes"]:
         data = n.get("data") or {}
         kind = normalize_type(str(n.get("type") or ""))
+        params = {
+            k: v for k, v in data.items()
+            if k not in ("prompt", "schema", "nodeType") and isinstance(v, (str, int, float, bool))
+        }
+        # 视频节点的分辨率没有独立控件，运行时空着就是 720p。回查时把它显式给出来，
+        # 否则 Agent 会以为「参数缺了」，反复 update_node 去补一个本来就有默认值的字段。
+        if kind == "video":
+            params.setdefault("resolution", "720p")
         nodes.append({
             "id": n.get("id"),
             "type": kind,
             "label": _node_label(kind),
             "prompt": _trim(data.get("prompt"), 120),
-            "params": {
-                k: v for k, v in data.items()
-                if k not in ("prompt", "schema", "nodeType") and isinstance(v, (str, int, float, bool))
-            },
+            "params": params,
         })
     return {
         "ok": True,
@@ -431,7 +436,10 @@ async def _list_tasks(ctx: ToolContext, args: dict) -> dict:
 
 async def _list_models(ctx: ToolContext, args: dict) -> dict:
     rows = await provider_store.list_services(ctx.db)
-    options = provider_store.list_model_options(rows, str(args.get("modality") or "text"))
+    # 不传 modality = 全部。以前默认只返回 text，Agent 只查一次就以为「没有图片/
+    # 视频模型」，直接放弃并把用户拦下来——这是实测里最常见的一次误判。
+    modality = str(args.get("modality") or "").strip() or None
+    options = provider_store.list_model_options(rows, modality)
     by_id = {row.id: row for row in rows}
 
     def _is_local(service_id: int) -> bool:
@@ -1087,7 +1095,10 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
     elif timed_out:
         hint = "等满这次上限还没跑完；再调一次 wait_for_tasks 继续等，不要连点 get_task。"
     else:
-        hint = "已经跑完就继续下一步；有 failed 就先修那个节点，别把整条链重跑一遍。"
+        hint = (
+            "已经跑完：直接按上面的 tasks 汇报结果即可。**不要再调 list_assets / get_asset / "
+            "canvas_status 重复查同一批产物**——产物卡片就在界面上；只有 failed 时才需要修那个节点。"
+        )
     return {
         "ok": True,
         "data": {
@@ -1187,7 +1198,7 @@ TOOLS: tuple[ToolSpec, ...] = (
         TIER_READ, _obj({"limit": {"type": "integer"}}), _list_prompt_templates,
     ),
     ToolSpec(
-        "list_models", "列模型", "列出当前可用的模型（默认文本）。模型不支持工具调用时要如实告诉用户。",
+        "list_models", "列模型", "列出当前可用的模型。不传 modality 返回全部（推荐一次查完）；要看某一类再传 text/image/video/audio。模型不支持工具调用时要如实告诉用户。",
         TIER_READ,
         _obj({"modality": {"type": "string", "enum": ["text", "image", "video", "audio"]}}),
         _list_models,

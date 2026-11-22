@@ -360,7 +360,11 @@ def test_repeated_read_calls_are_blocked_and_max_rounds_leaves_a_visible_note():
                 )).scalars().all()
                 tools = [s for s in steps if s.role == "tool"]
                 assert len([s for s in tools if s.status == "ok"]) == 2, "前两次应当真的执行"
-                assert len([s for s in tools if "同一个查询" in (s.tool_result or "")]) == 6
+                # 后 MAX_ROUNDS-2 轮都会被「同一个查询」挡回；别把轮数写死，
+                # 否则调上限时这条会莫名其妙地红
+                assert len([s for s in tools if "同一个查询" in (s.tool_result or "")]) == (
+                    agent_runner.MAX_ROUNDS - 2
+                )
                 note = [s for s in steps if s.role == "assistant" and "/goal" in s.content]
                 assert note, "轮数到顶后没有留下可见的说明"
         finally:
