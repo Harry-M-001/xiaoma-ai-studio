@@ -68,6 +68,7 @@ ORIGIN = (80.0, 140.0)
 
 # 「特征」→ 节点 data 里的参数名。契约用 features 声明能力，落库用这些键。
 FEATURE_TO_PARAM = {
+    "modelSelect": "model_key",
     "imageSize": "size",
     "sampleCount": "n",
     "duration": "duration",
@@ -86,6 +87,7 @@ FEATURE_TO_PARAM = {
 # 参数名 → 给用户看的中文标签。提示里说「画幅比例不在可选档位」，
 # 比说「ratio 不在可选档位」有用得多——用户界面上根本没有 "ratio" 这个词。
 PARAM_LABEL = {
+    "model_key": "模型",
     "size": "图片尺寸",
     "n": "生成张数",
     "duration": "视频时长",
@@ -105,12 +107,11 @@ PARAM_LABEL = {
 PARAM_OPTION_KIND = {
     "size": "image_size",
     "n": "image_count",
-    "duration": "video_duration",
     "ratio": "video_ratio",
 }
 
-# 只能由前端填、Agent 不许碰的键（模型需按当前可用模型解析，工作流要用户上传）
-AGENT_FORBIDDEN_PARAMS = ("model_key", "refImages", "workflowId", "docText", "schema", "status")
+# 只能由前端填、Agent 不许碰的键（工作流要用户上传；其余靠实时校验）
+AGENT_FORBIDDEN_PARAMS = ("refImages", "workflowId", "docText", "schema", "status")
 
 # 节点类别 → 需要哪种能力（用于「这条链要什么模型」的前置提示）
 CATEGORY_MODALITY = {"document": "text", "image": "image", "video": "video"}
@@ -168,6 +169,10 @@ def _value_hint(param: str, options: dict[str, list[str]]) -> str:
     kind = PARAM_OPTION_KIND.get(param)
     if kind and options.get(kind):
         return "，可选：" + " / ".join(options[kind])
+    if param == "duration":
+        return "，单位秒（2–30，按所选模型上限；不填用模型默认）"
+    if param == "model_key":
+        return "，填 list_models 返回的 key；不填用默认模型"
     if param == "mode":
         return "，可选：" + " / ".join(f"{k}（{v}）" for k, v in VIDEO_MODES.items())
     if param == "assetScope":
@@ -345,6 +350,13 @@ def _validate_param(
     调用方直接接在「节点「图片生成」：」后面就是人话。
     """
     label = PARAM_LABEL.get(param, param)
+    if param == "duration":
+        # 时长是连续值，不再走档位表；这里只挡明显不合法的值，
+        # 精确上限在 repair() 里按所选模型夹取（不同模型 5–10 / 4–30 / 2–30 不等）
+        num = _coerce_int(value)
+        if num is None or not (1 <= num <= 600):
+            return None, f"{label}需要一个正整数（秒），收到的是 {value!r}"
+        return num, ""
     kind = PARAM_OPTION_KIND.get(param)
     if kind:
         allowed = options.get(kind) or []
@@ -395,12 +407,20 @@ def _validate_param(
 
 
 def repair(
-    raw: dict, options: dict[str, list[str]], styles: list[style_service.StyleCard]
+    raw: dict,
+    options: dict[str, list[str]],
+    styles: list[style_service.StyleCard],
+    *,
+    model_catalog: dict[str, dict[str, tuple[int, int] | None]] | None = None,
+    default_models: dict[str, str] | None = None,
 ) -> tuple[str, list[dict], list[dict], list[str]]:
     """把模型输出修成一份可用的拓扑。返回 (summary, nodes, edges, notes)。
 
     每一步修复都留一条 note：用户看到的不该是「凭空少了一个节点」，
     而是「你说的是 A，但契约里没有 A，所以我按 B 处理了」。
+
+    `model_catalog` 是「能力 → {模型 key: (最短, 最长)}」，给了才校验 model_key
+    与时长；纯函数单测可以不传，行为与旧版一致。
     """
     notes: list[str] = []
     style_keys = {s.key for s in styles}
@@ -441,6 +461,7 @@ def repair(
 
         params: dict[str, Any] = {}
         allowed = _agent_params(kind)
+        modality = CATEGORY_MODALITY.get(str(NODE_SCHEMAS[kind].get("category") or ""))
         raw_params = item.get("params") if isinstance(item.get("params"), dict) else {}
         for key, value in raw_params.items():
             if key in AGENT_FORBIDDEN_PARAMS:
@@ -448,12 +469,38 @@ def repair(
             if key not in allowed:
                 notes.append(f"节点「{NODE_SCHEMAS[kind]['label']}」不支持参数 {key}，已忽略。")
                 continue
+            if key == "model_key":
+                text = str(value or "").strip()
+                if not text:
+                    continue
+                if model_catalog is not None and text not in (model_catalog.get(modality or "") or {}):
+                    notes.append(
+                        f"节点「{NODE_SCHEMAS[kind]['label']}」的模型 {text} 不可用，已改用默认模型。"
+                    )
+                    continue
+                params["model_key"] = text
+                continue
             cleaned, reason = _validate_param(key, value, options, style_keys)
             if reason:
                 notes.append(f"节点「{NODE_SCHEMAS[kind]['label']}」：{reason}，已改用默认值。")
                 continue
             if cleaned is not None and cleaned != "":
                 params[key] = cleaned
+
+        # 时长按**这个节点最终会用到的模型**再夹一次：草稿里没写就用默认模型
+        if kind == "video" and "duration" in params and model_catalog is not None:
+            chosen = params.get("model_key") or (default_models or {}).get("video", "")
+            limits = (model_catalog.get("video") or {}).get(chosen)
+            if limits:
+                low, high = limits
+                seconds = int(params["duration"])
+                fixed = min(high, max(low, seconds))
+                if fixed != seconds:
+                    notes.append(
+                        f"节点「{NODE_SCHEMAS[kind]['label']}」：时长 {seconds} 秒超出"
+                        f"模型 {chosen} 的 {low}–{high} 秒，已按 {fixed} 秒起稿。"
+                    )
+                    params["duration"] = fixed
 
         data: dict[str, Any] = {"prompt": str(item.get("prompt") or "").strip()}
         data.update(params)
@@ -646,6 +693,15 @@ async def plan(
         )
 
     options = await _option_values(db)
+    # 模型目录：草稿里允许模型自己指定 model_key，但要按「当前已接入的模型」校验；
+    # 时长也按这个模型的实际区间夹取。不把真实目录传给 repair，校验就只能靠猜。
+    rows = await provider_store.list_services(db)
+    model_catalog: dict[str, dict[str, tuple[int, int] | None]] = {}
+    default_models: dict[str, str] = {}
+    for opt in provider_store.list_model_options(rows):
+        limits = (opt.min_duration, opt.max_duration) if opt.modality == "video" else None
+        model_catalog.setdefault(opt.modality, {})[opt.key] = limits
+        default_models.setdefault(opt.modality, opt.key)
     styles = await style_service.load_cards(db)
     system = build_system_prompt(options, styles)
     messages = [
@@ -702,7 +758,13 @@ async def plan(
             next_action=_STATUS_NEXT_ACTION[STATUS_UNPARSABLE],
         )
 
-    summary, nodes, edges, notes = repair(raw, options, styles)
+    summary, nodes, edges, notes = repair(
+        raw,
+        options,
+        styles,
+        model_catalog=model_catalog,
+        default_models=default_models,
+    )
     if not nodes:
         return Draft(
             status=STATUS_UNPARSABLE,

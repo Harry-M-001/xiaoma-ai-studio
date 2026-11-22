@@ -226,7 +226,7 @@ register(
         group="system",
         fields=[
             FieldSpec("kind", "参数类型", "string", required=True,
-                      help="如 image_size / image_count / video_duration / video_ratio / video_resolution"),
+                      help="如 image_size / image_count / video_ratio / video_resolution"),
             FieldSpec("value", "值", "string", required=True, help="提交给接口的原始值"),
             FieldSpec("label", "显示名", "string", help="界面上展示的文字，留空则显示值"),
             FieldSpec("meta_json", "附加信息", "json", default={}, help="如 {\"ratio\":\"1:1\"}"),
@@ -246,9 +246,8 @@ register(
             {"kind": "image_count", "value": "3", "label": "3 张", "sort_order": 3},
             {"kind": "image_count", "value": "4", "label": "4 张", "sort_order": 4},
 
-            {"kind": "video_duration", "value": "5", "label": "5 秒", "sort_order": 1},
-            {"kind": "video_duration", "value": "10", "label": "10 秒", "sort_order": 2},
-            {"kind": "video_duration", "value": "15", "label": "15 秒", "sort_order": 3, "enabled": False},
+            # 视频时长是**连续值**，不再用档位：区间由模型能力决定（见
+            # provider_store.video_duration_limit），这里刻意不留 5 / 10 / 15。
 
             {"kind": "video_ratio", "value": "16:9", "label": "16:9", "sort_order": 1},
             {"kind": "video_ratio", "value": "9:16", "label": "9:16", "sort_order": 2},

@@ -685,6 +685,26 @@ def test_agent_can_switch_a_nodes_model():
     _agent_db_run(scenario)
 
 
+def test_applied_draft_keeps_an_explicit_model():
+    """草稿里指明模型就用它；没指明才回落到默认模型。"""
+    from app.services.agent_tools import _doc_from_draft
+
+    project = Project(id=1, name="p", canvas_json=None)
+    draft = {
+        "nodes": [
+            {"id": "n1", "kind": "video",
+             "data": {"prompt": "x", "model_key": "8:bytedance/seedance-2-5", "duration": 20}},
+            {"id": "n2", "kind": "video", "data": {"prompt": "y"}},
+        ],
+        "edges": [],
+    }
+    doc = _doc_from_draft(draft, project, {"video": "1:doubao-seedance-1-0-pro-250528"})
+    a, b = (n["data"] for n in doc["nodes"])
+    assert a["model_key"] == "8:bytedance/seedance-2-5", a
+    assert a["duration"] == 20, a
+    assert b["model_key"] == "1:doubao-seedance-1-0-pro-250528", b
+
+
 def test_update_node_exposes_model_key_in_its_schema():
     spec = agent_tools.by_name("update_node")
     assert spec is not None

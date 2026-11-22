@@ -114,8 +114,14 @@ def test_extract_json_returns_none_for_non_json():
 # ============================================================
 
 
-def _repair(raw, db_options=None, styles=None):
-    return canvas_agent.repair(raw, db_options or {}, styles or [])
+def _repair(raw, db_options=None, styles=None, catalog=None, defaults=None):
+    return canvas_agent.repair(
+        raw,
+        db_options or {},
+        styles or [],
+        model_catalog=catalog,
+        default_models=defaults,
+    )
 
 
 def test_unknown_node_kind_is_dropped_with_a_note():
@@ -196,14 +202,60 @@ def test_param_not_supported_by_the_node_kind_is_ignored():
 
 
 def test_agent_cannot_set_forbidden_params():
-    """model_key / refImages 这类必须由前端按真实可用的东西填，Agent 不许碰。"""
+    """refImages / workflowId 这类必须由前端按真实资源填，Agent 不许碰。"""
     _, nodes, _, _ = _repair({
         "nodes": [{"id": "n1", "kind": "image", "prompt": "x",
-                   "params": {"model_key": "9:whatever", "refImages": [{"id": 1}]}}],
+                   "params": {"refImages": [{"id": 1}], "workflowId": 3}}],
         "edges": [],
     })
-    assert "model_key" not in nodes[0]["data"]
     assert "refImages" not in nodes[0]["data"]
+    assert "workflowId" not in nodes[0]["data"]
+
+
+def test_agent_can_pick_a_model_that_exists_in_the_catalog():
+    """model_key 不再是黑名单：在已接入的模型里就能指定。"""
+    catalog = {"image": {"8:nano-banana-2": None}}
+    _, nodes, _, notes = _repair(
+        {"nodes": [{"id": "n1", "kind": "image", "prompt": "x",
+                    "params": {"model_key": "8:nano-banana-2"}}], "edges": []},
+        catalog=catalog,
+    )
+    assert nodes[0]["data"]["model_key"] == "8:nano-banana-2", nodes[0]
+    assert not any("不可用" in n for n in notes), notes
+
+
+def test_an_unknown_model_falls_back_instead_of_being_written():
+    catalog = {"image": {"8:nano-banana-2": None}}
+    _, nodes, _, notes = _repair(
+        {"nodes": [{"id": "n1", "kind": "image", "prompt": "x",
+                    "params": {"model_key": "9:gone"}}], "edges": []},
+        catalog=catalog,
+    )
+    assert "model_key" not in nodes[0]["data"], nodes[0]
+    assert any("9:gone" in n and "不可用" in n for n in notes), notes
+
+
+def test_draft_duration_is_clamped_to_the_chosen_model():
+    """草稿里的时长按模型区间夹：20 秒保留，45 秒落到 30 秒并说明。"""
+    catalog = {"video": {"8:seedance-2-5": (4, 30)}}
+    defaults = {"video": "8:seedance-2-5"}
+
+    _, nodes, _, notes = _repair(
+        {"nodes": [{"id": "n1", "kind": "video", "prompt": "x",
+                    "params": {"duration": 20}}], "edges": []},
+        catalog=catalog, defaults=defaults,
+    )
+    assert nodes[0]["data"]["duration"] == 20, nodes[0]
+    assert not any("超出" in n for n in notes), notes
+
+    _, nodes, _, notes = _repair(
+        {"nodes": [{"id": "n1", "kind": "video", "prompt": "x",
+                    "params": {"duration": 45}}], "edges": []},
+        catalog=catalog, defaults=defaults,
+    )
+    assert nodes[0]["data"]["duration"] == 30, nodes[0]
+    assert any("45" in n and "4–30" in n for n in notes), notes
+
 
 
 def test_video_mode_and_style_are_validated():

@@ -635,7 +635,12 @@ def _doc_from_draft(draft: dict, project: Project, model_keys: dict[str, str]) -
         nid = f"ag_{n.get('id')}_{stamp}"
         kind_of[str(n.get("id"))] = kind
         pos = n.get("position") or {}
-        data = {**(n.get("data") or {}), "model_key": model_keys.get(kind, ""), "nodeType": kind}
+        data = dict(n.get("data") or {})
+        # 草稿里明确指定了模型就用它（plan 阶段已按当前可用模型校验过）；
+        # 没指定才回落到该能力的默认模型。
+        if not str(data.get("model_key") or "").strip():
+            data["model_key"] = model_keys.get(kind, "")
+        data["nodeType"] = kind
         # 落库的形状与前端 `canvasChain.toCanvasDocNodes` 一致：
         # `type` 必须是**真实节点类型**（不是画布内部的 "contract"），`schema` 是运行时缓存不落库。
         data.pop("schema", None)
