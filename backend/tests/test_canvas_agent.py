@@ -413,6 +413,22 @@ def test_a_recipe_kind_in_a_draft_is_rewritten_to_its_host_node():
     assert any("并入" in n for n in notes), f"没有说明改写：{notes}"
 
 
+def test_system_prompt_lists_the_available_models():
+    """planner 没有工具循环，模型清单必须直接写进提示词，否则它只能编 key。"""
+    prompt = canvas_agent.build_system_prompt(
+        {},
+        [],
+        {
+            "video": ["1:doubao-seedance-2-5（Seedance 2.5） 4–30 秒"],
+            "image": ["8:nano-banana-2"],
+        },
+    )
+    assert "【可用模型】" in prompt
+    assert "1:doubao-seedance-2-5" in prompt and "4–30 秒" in prompt
+    assert "8:nano-banana-2" in prompt
+    assert "【可用模型】" not in canvas_agent.build_system_prompt({}, [])
+
+
 def test_system_prompt_lists_the_real_option_values():
     """把合法档位告诉模型，否则它会编一个用不了的尺寸出来。"""
     prompt = canvas_agent.build_system_prompt(

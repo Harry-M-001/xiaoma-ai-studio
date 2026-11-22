@@ -113,6 +113,8 @@ PARAM_OPTION_KIND = {
 # 只能由前端填、Agent 不许碰的键（工作流要用户上传；其余靠实时校验）
 AGENT_FORBIDDEN_PARAMS = ("refImages", "workflowId", "docText", "schema", "status")
 
+MODALITY_LABEL = {"text": "文本", "image": "图片", "video": "视频", "audio": "音频"}
+
 # 节点类别 → 需要哪种能力（用于「这条链要什么模型」的前置提示）
 CATEGORY_MODALITY = {"document": "text", "image": "image", "video": "video"}
 
@@ -172,7 +174,7 @@ def _value_hint(param: str, options: dict[str, list[str]]) -> str:
     if param == "duration":
         return "，单位秒（2–30，按所选模型上限；不填用模型默认）"
     if param == "model_key":
-        return "，填 list_models 返回的 key；不填用默认模型"
+        return "，从可用模型清单里选；不填用默认模型"
     if param == "mode":
         return "，可选：" + " / ".join(f"{k}（{v}）" for k, v in VIDEO_MODES.items())
     if param == "assetScope":
@@ -183,9 +185,15 @@ def _value_hint(param: str, options: dict[str, list[str]]) -> str:
 
 
 def build_system_prompt(
-    options: dict[str, list[str]], styles: list[style_service.StyleCard]
+    options: dict[str, list[str]],
+    styles: list[style_service.StyleCard],
+    models: dict[str, list[str]] | None = None,
 ) -> str:
-    """把「有哪些节点、能配什么、合法值是什么」讲给模型。"""
+    """把「有哪些节点、能配什么、合法值是什么」讲给模型。
+
+    `models` 是「能力 → 模型说明」，直接写进提示词：planner 是一次性调用，
+    没有工具循环，光说「去调 list_models」它没法真的去查，只会编一个 key。
+    """
     lines: list[str] = [
         "你是「小马AI工坊」的搭画布助手。用户说一句话需求，你把它翻译成一张**节点拓扑图**。",
         "",
@@ -212,6 +220,14 @@ def build_system_prompt(
                 f"{p}{_value_hint(p, options)}" for p in params
             )
         lines.append(line)
+
+    if models:
+        lines += [
+            "",
+            "【可用模型】params.model_key 只能从这里选；同一类不填就用第一个（默认）：",
+        ]
+        for modality, items in models.items():
+            lines.append(f"- {MODALITY_LABEL.get(modality, modality)}：{'、'.join(items)}")
 
     lines += [
         "",
@@ -698,12 +714,21 @@ async def plan(
     rows = await provider_store.list_services(db)
     model_catalog: dict[str, dict[str, tuple[int, int] | None]] = {}
     default_models: dict[str, str] = {}
+    models_for_prompt: dict[str, list[str]] = {}
     for opt in provider_store.list_model_options(rows):
         limits = (opt.min_duration, opt.max_duration) if opt.modality == "video" else None
         model_catalog.setdefault(opt.modality, {})[opt.key] = limits
         default_models.setdefault(opt.modality, opt.key)
+        desc = f"{opt.key}（{opt.label}）" if opt.label and opt.label != opt.name else opt.key
+        if limits:
+            desc += f" {limits[0]}–{limits[1]} 秒"
+        models_for_prompt.setdefault(opt.modality, []).append(desc)
+    for modality, items in list(models_for_prompt.items()):
+        if len(items) > 12:
+            models_for_prompt[modality] = items[:12] + [f"…等 {len(items)} 个"]
+
     styles = await style_service.load_cards(db)
-    system = build_system_prompt(options, styles)
+    system = build_system_prompt(options, styles, models_for_prompt)
     messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": build_user_message(text, style_mentioned(text, styles))},

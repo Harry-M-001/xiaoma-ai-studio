@@ -58,7 +58,7 @@ import {
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
-import { api } from "../api";
+import { api, thumbUrl } from "../api";
 import type {
   AgentMeta,
   Asset,
@@ -2105,7 +2105,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
                     return (
                       <span key={idx} className="canvas-refthumb canvas-flslot">
                         <span className="canvas-flslot-tag">{idx === 0 ? "首帧" : "尾帧"}</span>
-                        <img src={r.url} alt="" loading="lazy" />
+                        <img src={thumbUrl(r.url)} alt="" loading="lazy" />
                         <button
                           type="button"
                           className="canvas-refremove"
@@ -2154,7 +2154,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
                 <div className="canvas-refstrip">
                   {refImages.map((r) => (
                     <span key={r.id} className="canvas-refthumb">
-                      <img src={r.url} alt="" loading="lazy" />
+                      <img src={thumbUrl(r.url)} alt="" loading="lazy" />
                       <button type="button" className="canvas-refremove" onClick={() => removeRef(r.id)} title="移除参考">
                         <X size={9} />
                       </button>
@@ -2458,7 +2458,7 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
                     onClick={() => ctx.preview(a.url, a.title || a.name)}
                     title={a.title || a.name}
                   >
-                    <img src={a.url} alt={a.label || a.name} loading="lazy" />
+                    <img src={thumbUrl(a.url)} alt={a.label || a.name} loading="lazy" />
                     <span className="canvas-prodlabel">{a.label || `#${i + 1}`}</span>
                   </button>
                   {many && (
@@ -2593,7 +2593,7 @@ function ContractNode({ id, data, selected }: NodeProps) {
           <div className="canvas-node-thumbs">
             {nodeImages.slice(0, 3).map((a, i) => (
               <span key={a.id} className="canvas-node-thumbcell">
-                <img src={a.url} alt={a.label || a.name} title={a.title || a.name} loading="lazy" />
+                <img src={thumbUrl(a.url)} alt={a.label || a.name} title={a.title || a.name} loading="lazy" />
                 <em>{a.label || `#${i + 1}`}</em>
               </span>
             ))}
@@ -2724,7 +2724,7 @@ function AssetGrid({
                 <Video size={16} />
               </span>
             ) : (
-              <img className="canvas-asset-thumb" src={a.url} alt={a.original_name} loading="lazy" />
+              <img className="canvas-asset-thumb" src={thumbUrl(a.url)} alt={a.original_name} loading="lazy" />
             )}
             {active && <span className="canvas-asset-check" />}
             <span className="canvas-asset-name">{a.original_name.slice(0, 14)}</span>

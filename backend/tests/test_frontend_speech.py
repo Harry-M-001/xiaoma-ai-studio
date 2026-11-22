@@ -56,7 +56,10 @@ def test_the_new_nav_entry_exists_on_both_sides():
 
     app = _text(SRC / "App.tsx")
     assert 'route: "speech"' in app, "前端兜底导航里没有这一项"
-    assert 'import SpeechPage from "./pages/SpeechPage"' in app, "没引入这个页面"
+    assert (
+        'import SpeechPage from "./pages/SpeechPage"' in app
+        or 'lazy(() => import("./pages/SpeechPage"))' in app
+    ), "没引入这个页面"
     known = re.search(r"const KNOWN_ROUTES = new Set\(\[(.*?)\]\)", app, re.S)
     assert known and '"speech"' in known.group(1), "路由白名单里没有 speech（会被当成未知路由）"
     assert re.search(r'case "speech":\s*\n\s*return <SpeechPage', app), "路由没有分支到这个页面"

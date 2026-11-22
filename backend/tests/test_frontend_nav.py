@@ -122,6 +122,33 @@ def test_the_sidebar_can_scroll_to_its_last_item():
     assert "min-height: 0" in inner.group(1), "flex 子项没给 min-height: 0，滚动条不会出现"
 
 
+def test_pages_are_lazy_loaded_per_route():
+    """页面按路由分包：首屏不该把所有页面（含画布/导演台）一次下完。"""
+    app = _text(SRC / "App.tsx")
+    assert "Suspense" in app, "没有 Suspense 兜底"
+    assert 'lazy(() => import("./pages/CanvasPage"))' in app, "画布页没有懒加载"
+    assert 'lazy(() => import("./pages/AgentPage"))' in app, "Agent 页没有懒加载"
+    assert 'import CanvasPage from "./pages/CanvasPage"' not in app, "画布页仍是静态导入"
+
+
+def test_grids_use_thumbnails_instead_of_full_images():
+    """资产网格 / 任务卡 / 画布素材条都走缩略图；原图只留给查看与生成。"""
+    assert "thumbUrl(" in _text(SRC / "pages" / "AssetsPage.tsx")
+    assert "thumbUrl(" in _text(SRC / "components" / "TaskCard.tsx")
+    assert "thumbUrl(" in _text(SRC / "pages" / "CanvasPage.tsx")
+
+
+def test_asset_grid_video_uses_poster_instead_of_metadata_preload():
+    """视频卡片用封面图，不再 `preload="metadata"`。
+
+    网格里几十个视频各自去读元信息就是几十个 range 请求；封面走同一套缩略图接口，
+    还能顺带命中磁盘缓存。
+    """
+    page = _text(SRC / "pages" / "AssetsPage.tsx")
+    assert 'preload="none"' in page, "视频仍在预读元信息"
+    assert 'poster={thumbUrl(a.url)}' in page, "视频没有用封面图"
+
+
 def test_settings_are_folded_into_one_more_menu():
     """设置不再各占一行：模型服务 / 本机引擎 / 系统设置都从底部「更多」弹出。
 
@@ -265,7 +292,10 @@ def test_the_agent_entry_is_wired_everywhere():
     app = _text(SRC / "App.tsx")
     known = re.search(r"const KNOWN_ROUTES = new Set\(\[(.*?)\]\)", app, re.S)
     assert known and '"agent"' in known.group(1), "路由白名单里没有 agent（会被当成未知路由）"
-    assert 'import AgentPage from "./pages/AgentPage"' in app, "没有引入 Agent 页"
+    assert (
+        'import AgentPage from "./pages/AgentPage"' in app
+        or 'lazy(() => import("./pages/AgentPage"))' in app
+    ), "没有引入 Agent 页"
     agent_case = app.find('case "agent":')
     assert agent_case != -1 and "<AgentPage" in app[agent_case : agent_case + 300], (
         "路由没有分支到 Agent 页"

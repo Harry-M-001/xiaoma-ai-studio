@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AudioLines, Download, FileText, Gauge, Images, Library, Maximize2, Play, Trash2, Upload, Video as VideoIcon } from "lucide-react";
-import { api } from "../api";
+import { api, thumbUrl } from "../api";
 import type { Asset } from "../types";
 import { Empty, formatSize, formatTime, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
@@ -142,7 +142,9 @@ export default function AssetsPage({
                 <div className="asset-thumb" onClick={() => setPreview({ url: a.url, kind: a.kind, dl: downloadUrl(a.id) })}>
                   {a.kind === "video" ? (
                     <>
-                      <video src={a.url} muted preload="metadata" />
+                      {/* 用抽取的首帧当封面、`preload="none"`：网格里几十个视频各自发
+                          range 请求会把带宽和磁盘都拖住，这里只要一张图 */}
+                      <video src={a.url} muted preload="none" poster={thumbUrl(a.url)} />
                       <span className="play-ic">
                         <Play />
                       </span>
@@ -160,7 +162,7 @@ export default function AssetsPage({
                       <em>{a.duration ? `${a.duration} 秒` : "音频"}</em>
                     </span>
                   ) : (
-                    <img src={a.url} alt={a.original_name} loading="lazy" />
+                    <img src={thumbUrl(a.url)} alt={a.original_name} loading="lazy" />
                   )}
                 </div>
                 <div className="asset-meta">

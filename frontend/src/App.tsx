@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { Puzzle } from "lucide-react";
 import Sidebar, { type RouteKey } from "./components/Sidebar";
 import LoginGate from "./components/LoginGate";
@@ -8,21 +8,23 @@ import { Empty } from "./components/common";
 import { api, authToken, cfgBool, cfgString } from "./api";
 import { prefs } from "./prefs";
 import type { AppInfo, ConfigMap, NavMeta } from "./types";
-import ChatPage from "./pages/ChatPage";
-import ImagePage from "./pages/ImagePage";
-import VideoPage from "./pages/VideoPage";
-import SpeechPage from "./pages/SpeechPage";
-import EnginesPage from "./pages/EnginesPage";
-import AssetsPage from "./pages/AssetsPage";
-import PromptsPage from "./pages/PromptsPage";
-import TasksPage from "./pages/TasksPage";
-import DirectorPage from "./pages/DirectorPage";
+// 页面按路由懒加载：首屏只下当前页。首页保留静态引入（它是最常见的落点，
+// 懒加载会让第一次打开多闪一下）；画廊/画布/导演台这些重页面各自成 chunk。
 import HomePage from "./pages/HomePage";
-import ProjectsPage from "./pages/ProjectsPage";
-import AgentPage from "./pages/AgentPage";
-import CanvasPage from "./pages/CanvasPage";
-import ProvidersPage from "./pages/ProvidersPage";
-import SettingsPage from "./pages/SettingsPage";
+const ChatPage = lazy(() => import("./pages/ChatPage"));
+const ImagePage = lazy(() => import("./pages/ImagePage"));
+const VideoPage = lazy(() => import("./pages/VideoPage"));
+const SpeechPage = lazy(() => import("./pages/SpeechPage"));
+const EnginesPage = lazy(() => import("./pages/EnginesPage"));
+const AssetsPage = lazy(() => import("./pages/AssetsPage"));
+const PromptsPage = lazy(() => import("./pages/PromptsPage"));
+const TasksPage = lazy(() => import("./pages/TasksPage"));
+const DirectorPage = lazy(() => import("./pages/DirectorPage"));
+const ProjectsPage = lazy(() => import("./pages/ProjectsPage"));
+const AgentPage = lazy(() => import("./pages/AgentPage"));
+const CanvasPage = lazy(() => import("./pages/CanvasPage"));
+const ProvidersPage = lazy(() => import("./pages/ProvidersPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
 type Theme = "light" | "dark";
 
@@ -325,7 +327,7 @@ function Shell() {
       />
       <main className="main">
         <SetupBanner route={route} onNavigate={setRoute} />
-        {renderPage()}
+        <Suspense fallback={<div className="page-loading">加载中…</div>}>{renderPage()}</Suspense>
       </main>
     </div>
   );

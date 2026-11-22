@@ -389,6 +389,17 @@ def test_fractional_probe_duration_does_not_break_the_asset_list():
     assert asset_to_out(row).duration == 6
 
 
+def test_media_thumb_refuses_paths_outside_the_storage_root():
+    """缩略图接口不能变成任意文件读取入口。"""
+    import asyncio
+
+    from app.main import media_thumb
+
+    for bad in ("../../xiaoma.db", "../app/main.py"):
+        resp = asyncio.run(media_thumb(bad, 320))
+        assert getattr(resp, "status_code", None) == 404, bad
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

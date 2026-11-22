@@ -123,6 +123,15 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
 const json = (body: unknown) => JSON.stringify(body);
 
+/**
+ * 列表 / 网格里的缩略图地址（默认 320px）。只处理本机 `/media/` 资源，
+ * 外链或其它地址原样返回；原图与生成链路仍走 `a.url`。
+ */
+export function thumbUrl(url: string, w = 320): string {
+  if (!url.startsWith("/media/")) return url;
+  return `/media-thumb/${url.slice("/media/".length)}?w=${w}`;
+}
+
 // ---------- 系统 ----------
 export const api = {
   appInfo: () => request<AppInfo>("/api/app/info"),

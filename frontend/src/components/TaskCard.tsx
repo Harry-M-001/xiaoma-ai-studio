@@ -14,7 +14,7 @@ import {
 import type { Task, TaskRetryIn } from "../types";
 import { Modal, Spinner, StatusBadge, formatTime, isRunning } from "./common";
 import { useToast } from "./Toast";
-import { api, authToken } from "../api";
+import { api, authToken, thumbUrl } from "../api";
 
 /** 任务类型中文名（文档 = 自动链的 Markdown 产物） */
 const KIND_LABEL: Record<string, string> = {
@@ -159,7 +159,7 @@ export default function TaskCard({
         <div className="gen-grid">
           {task.assets.map((a) => (
             <div key={a.id} className="gen-item" onClick={() => onPreview?.(a.url, "image", downloadUrl(a.id))}>
-              <img src={a.url} alt={task.prompt} loading="lazy" />
+              <img src={thumbUrl(a.url)} alt={task.prompt} loading="lazy" />
               <div className="hover-bar" onClick={(e) => e.stopPropagation()}>
                 {onUseRef && (
                   <button title="用作参考图" onClick={() => onUseRef(a)}>

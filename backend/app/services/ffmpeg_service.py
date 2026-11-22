@@ -952,6 +952,35 @@ async def remove_subtitles(
     return out
 
 
+async def make_thumbnail(src: Path, dst: Path, width: int = 320) -> bool:
+    """把图片缩成缩略图，或给视频抽一帧当封面（JPEG）。
+
+    资产页一屏可能铺几十张原图（实测平均 757 KB），全量加载要几十 MB；
+    视频更重——每个 `<video preload="metadata">` 都会发一次 range 请求。
+    缩略图/封面只用于网格预览，原文件仍走 `/media/`，不影响生成链路。
+    """
+    ffmpeg, _ = await _resolve_binaries()
+    if not ffmpeg:
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".tmp.jpg")
+    size = max(64, min(width, 1024))
+    video = src.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v", ".mkv"}
+    # 视频取第 1 秒的一帧（片头常是黑场）；太短就退回第 0 帧
+    seeks = ["1", "0"] if video else [None]
+    for seek in seeks:
+        cmd = [ffmpeg, "-y", "-loglevel", "error"]
+        if seek is not None:
+            cmd += ["-ss", seek]
+        cmd += ["-i", str(src), "-vf", f"scale={size}:-2", "-frames:v", "1", "-q:v", "4", str(tmp)]
+        ok, _ = await _run(cmd, timeout=30)
+        if ok and tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(dst)
+            return True
+        tmp.unlink(missing_ok=True)
+    return False
+
+
 async def _run_in(cmd: list[str], timeout: int, *, cwd: Path) -> tuple[bool, str]:
     """在指定工作目录里跑命令。
 

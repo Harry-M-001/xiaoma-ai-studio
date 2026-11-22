@@ -142,6 +142,35 @@ async def adapter_error_handler(request: Request, exc: AdapterError) -> JSONResp
 
 # ---------- 静态资源：媒体文件 + 前端构建产物 ----------
 
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+_VIDEO_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v", ".mkv"}
+
+
+@app.get("/media-thumb/{rel:path}")
+async def media_thumb(rel: str, w: int = 320):
+    """列表用的缩略图（默认 320px）。图片缩放，视频抽第 1 秒的一帧当封面。
+
+    原文件仍走 `/media/`，生成链路不受影响。资产页一屏几十张原图（实测平均 757 KB），
+    视频还会各发一次 range 请求；缩略图/封面只有几十 KB。首次请求生成并落盘缓存。
+    """
+    root = settings.storage_dir.resolve()
+    src = (root / rel).resolve()
+    if (root != src and root not in src.parents) or not src.is_file():
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+    suffix = src.suffix.lower()
+    if suffix not in _IMAGE_SUFFIXES and suffix not in _VIDEO_SUFFIXES:
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+    width = max(64, min(int(w or 320), 1024))
+    cache = settings.data_dir / "thumbnails" / f"{rel}.{width}.jpg"
+    fresh = cache.is_file() and cache.stat().st_mtime >= src.stat().st_mtime
+    if not fresh and not await ffmpeg_service.make_thumbnail(src, cache, width):
+        # 缩不出来就退回原图：宁可多传一点，也不要给用户一堆碎图
+        return FileResponse(src)
+    return FileResponse(
+        cache, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"}
+    )
+
+
 app.mount("/media", StaticFiles(directory=settings.storage_dir), name="media")
 
 _dist: Path = settings.frontend_dist
