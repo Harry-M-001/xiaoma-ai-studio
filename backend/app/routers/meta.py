@@ -225,7 +225,7 @@ async def setup_status(db: AsyncSession = Depends(get_db)) -> dict:
     for o in options:
         counts[o.modality] = counts.get(o.modality, 0) + 1
 
-    ollama = await ollama_service.detect()
+    ollama = await ollama_service.detect(cached_only=True)
     connected = await provider_store.find_by_base_url(db, f"{ollama['baseUrl']}/v1")
 
     return {

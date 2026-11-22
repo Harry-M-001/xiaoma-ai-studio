@@ -159,21 +159,25 @@ function Shell() {
 
   // 启动时静默检查更新：只在「已配更新源仓库」且用户没关掉开关时查一次，
   // 失败不打扰用户（离线 / 上游 API 不通都属正常）。
+  // 延后几秒再查：它要打外部网络，抢在首屏前面只会让打开变慢，结果又不影响这一屏。
   useEffect(() => {
     if (!authed) return;
     if (!cfgBool(config, "update.check_on_start", true)) return;
     if (!cfgString(config, "update.repo", "")) return;
     let alive = true;
-    api
-      .getUpdateStatus()
-      .then((s) => {
-        if (alive) setUpdateAvailable(Boolean(s.hasUpdate));
-      })
-      .catch(() => {
-        /* 检查更新失败不提示 */
-      });
+    const timer = window.setTimeout(() => {
+      api
+        .getUpdateStatus()
+        .then((s) => {
+          if (alive) setUpdateAvailable(Boolean(s.hasUpdate));
+        })
+        .catch(() => {
+          /* 检查更新失败不提示 */
+        });
+    }, 4000);
     return () => {
       alive = false;
+      window.clearTimeout(timer);
     };
   }, [authed, config]);
 

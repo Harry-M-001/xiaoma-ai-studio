@@ -14,6 +14,7 @@ Ollama 是「已经装好、只是没人告诉应用它在哪」的那类服务�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -23,7 +24,9 @@ from app.providers.base import AdapterError
 from app.schemas import ModelSpec
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
-CACHE_TTL_SECONDS = 60
+# 缓存拉长到 10 分钟：这个结论只在「装没装 / 启动没启动」时变，
+# 而 60 秒一过期就意味着每分钟都可能有人撞上冷探测（实测 4 秒）。
+CACHE_TTL_SECONDS = 600
 # 实测本机 `/api/tags` 在 0.6–2.6 秒之间波动（Ollama 要现读盘上的模型清单）。
 # 第一版给了 1.5 秒，结果是**跑着的 Ollama 被偶尔判成「没装」**——
 # 而「本机有 Ollama」正是第一次打开应用时最有用的一条信息，不能靠运气。
@@ -34,6 +37,8 @@ logger = logging.getLogger("xiaoma.ollama")
 
 # (取到的时刻, host, 结果)
 _cache: tuple[float, str, dict] | None = None
+# 后台探测只允许有一个在跑：首屏、横幅、服务页可能同时来问
+_probing = False
 
 
 def _usable(name: str) -> bool:
@@ -46,14 +51,53 @@ def _usable(name: str) -> bool:
     return not any(bad in lowered for bad in ("embed", "rerank"))
 
 
-async def detect(*, host: str = "", force: bool = False) -> dict:
-    """探测本机 Ollama。返回 {running, baseUrl, models, error}，不抛异常。"""
+def _schedule_probe(base: str) -> None:
+    """后台补一次探测，不阻塞当前请求。
+
+    首屏的引导横幅、服务页、首页会同时来问，冷探测却要 0.6–4 秒。
+    没有缓存时先如实回「检测中」，探测结果落进缓存，下一次问就拿到了。
+    """
+    global _probing
+    if _probing:
+        return
+    _probing = True
+
+    async def _run() -> None:
+        global _probing
+        try:
+            await detect(host=base, force=True)
+        finally:
+            _probing = False
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        # 不在事件循环里（同步单测）：放弃后台探测，不制造线程
+        _probing = False
+
+
+async def detect(
+    *, host: str = "", force: bool = False, cached_only: bool = False
+) -> dict:
+    """探测本机 Ollama。返回 {running, baseUrl, models, error}，不抛异常。
+
+    `cached_only=True`：只读缓存，**绝不等网络**。没有缓存就回
+    `error="detecting"` 并顺手在后台探一次；缓存过期也先给旧值、后台刷新。
+    首屏要的是「立刻有东西可渲染」，不是「等 4 秒拿到最准确的那一份」。
+    """
     global _cache
     base = (host or DEFAULT_HOST).rstrip("/")
     if not force and _cache is not None:
         stamp, cached_host, cached = _cache
-        if cached_host == base and time.monotonic() - stamp < CACHE_TTL_SECONDS:
+        fresh = cached_host == base and time.monotonic() - stamp < CACHE_TTL_SECONDS
+        if fresh or cached_only:
+            if not fresh:
+                # stale-while-revalidate：旧结论先顶着，后台换成新的
+                _schedule_probe(base)
             return cached
+    if cached_only:
+        _schedule_probe(base)
+        return {"running": False, "baseUrl": base, "models": [], "error": "detecting"}
 
     result: dict = {"running": False, "baseUrl": base, "models": [], "error": ""}
     try:

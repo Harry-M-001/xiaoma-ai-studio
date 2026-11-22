@@ -62,11 +62,28 @@ export default function HomePage({
   const [sending, setSending] = useState(false);
 
   useEffect(() => {
+    let alive = true;
+    let timer = 0;
     api
       .listProjects()
       .then(setProjects)
       .catch(() => setProjects([]));
-    api.setupStatus().then(setSetup).catch(() => setSetup(null));
+    // Ollama 探测是后台做的：第一次问通常只拿到「检测中」，2.5 秒后再问一次
+    const loadSetup = (left: number) => {
+      api
+        .setupStatus()
+        .then((s) => {
+          if (!alive) return;
+          setSetup(s);
+          if (s.ollama?.error === "detecting" && left > 0) {
+            timer = window.setTimeout(() => loadSetup(left - 1), 2500);
+          }
+        })
+        .catch(() => {
+          if (alive) setSetup(null);
+        });
+    };
+    loadSetup(2);
     api
       .agentMeta()
       .then((m) => {
@@ -75,6 +92,10 @@ export default function HomePage({
         setAgentProjectId((prev) => prev ?? m.projects[0]?.id ?? null);
       })
       .catch(() => setMeta(null));
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
   }, []);
 
   const ready = Boolean(meta?.ready);

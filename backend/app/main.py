@@ -6,15 +6,18 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import logging
 import os
 from contextlib import asynccontextmanager
+from email.utils import formatdate
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.providers.base import AdapterError
@@ -174,6 +177,42 @@ async def media_thumb(rel: str, w: int = 320):
 app.mount("/media", StaticFiles(directory=settings.storage_dir), name="media")
 
 _dist: Path = settings.frontend_dist
+# 前端构建产物里这些后缀是文本，gzip 收益大；图片/字体/媒体不碰
+_TEXT_ASSET_SUFFIXES = {".js", ".mjs", ".css", ".html", ".json", ".svg", ".map"}
+# 压缩结果按「路径 + mtime」缓存：构建产物文件名带 hash，内容不会变；
+# 不缓存的话每次刷新都要重压 200 KB，本地也能感觉到十几毫秒的额外延迟。
+_GZIP_CACHE: dict[str, tuple[float, bytes]] = {}
+
+
+def _gzip_asset(rel: str, scope) -> tuple[bytes, float] | None:
+    """接受 gzip 且体积值得压时，返回 (压缩后的字节, mtime)。
+
+    只在 SPA 静态资源上用，**不挂全局中间件**：全局 GZip 会把 `/media/` 下的
+    mp4 也缓存进内存再压一遍，既浪费 CPU，又会破坏 Range 请求。
+    """
+    path = _dist / rel
+    try:
+        mtime = path.stat().st_mtime
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size < 1024:
+        return None
+    if "gzip" not in Headers(scope=scope).get("accept-encoding", "").lower():
+        return None
+    cached = _GZIP_CACHE.get(rel)
+    if cached is not None and cached[0] == mtime:
+        return cached[1], mtime
+    try:
+        packed = gzip.compress(path.read_bytes(), 6)
+    except OSError:
+        return None
+    if len(_GZIP_CACHE) > 200:  # 老 hash 文件越积越多时整体丢掉，别无限长
+        _GZIP_CACHE.clear()
+    _GZIP_CACHE[rel] = (mtime, packed)
+    return packed, mtime
+
+
 if _dist.exists():
     class SPAStaticFiles(StaticFiles):
         """找不到文件时回退 index.html，交给前端处理路由。"""
@@ -200,6 +239,29 @@ if _dist.exists():
             # index.html 永远不走缓存，保证发版后浏览器立即拿到新 bundle 引用
             if str(getattr(response, "path", "")).endswith("index.html"):
                 response.headers["Cache-Control"] = "no-cache"
+                return response
+            # 带 hash 的构建产物可以永久缓存；文件名一变就是新请求
+            if rel.startswith("assets/") and response.status_code == 200:
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            suffix = Path(rel).suffix.lower()
+            if response.status_code == 200 and suffix in _TEXT_ASSET_SUFFIXES:
+                packed = _gzip_asset(rel, scope)
+                if packed is not None:
+                    body, mtime = packed
+                    out = Response(
+                        body,
+                        headers={
+                            "Content-Encoding": "gzip",
+                            "Vary": "Accept-Encoding",
+                            "Cache-Control": response.headers.get("Cache-Control", ""),
+                        },
+                    )
+                    for key in ("Content-Type", "ETag", "Last-Modified"):
+                        if key in response.headers:
+                            out.headers[key] = response.headers[key]
+                    if "Last-Modified" not in out.headers and mtime:
+                        out.headers["Last-Modified"] = formatdate(mtime, usegmt=True)
+                    return out
             return response
 
     app.mount("/", SPAStaticFiles(directory=str(_dist), html=True), name="spa")

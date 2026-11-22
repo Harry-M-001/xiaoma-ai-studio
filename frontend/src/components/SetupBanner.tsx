@@ -44,9 +44,14 @@ export default function SetupBanner({
   const [dismissed, setDismissed] = useState<string>(() => prefs.setupDismissed.get());
   const [connecting, setConnecting] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (retries = 1): Promise<void> => {
     try {
-      setStatus(await api.setupStatus());
+      const status = await api.setupStatus();
+      setStatus(status);
+      // 服务端把 Ollama 探测放到了后台：第一次多半是「检测中」，稍后再问一次
+      if (status.ollama?.error === "detecting" && retries > 0) {
+        window.setTimeout(() => void load(retries - 1), 2500);
+      }
     } catch {
       // 后端没起来 / 接口挂了都不该在界面上再叠一层错误，安静地不显示
       setStatus(null);

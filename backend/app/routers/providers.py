@@ -115,7 +115,8 @@ async def quick_setup_route(payload: QuickSetupIn, db: AsyncSession = Depends(ge
 @router.get("/ollama")
 async def ollama_status(refresh: bool = False, db: AsyncSession = Depends(get_db)) -> dict:
     """检测本机 Ollama。已经接入过就一并告诉前端，免得重复点。"""
-    info = await ollama_service.detect(force=refresh)
+    # 不点「重新检测」时只读缓存，别让服务页的普通进入也等一次冷探测
+    info = await ollama_service.detect(force=refresh, cached_only=not refresh)
     connected = await provider_store.find_by_base_url(db, f"{info['baseUrl']}/v1")
     return {**info, "connected": connected is not None}
 
