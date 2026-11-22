@@ -25,7 +25,7 @@ export const ASSET_IMAGE_KIND = "assetImage";
 /** 分镜图节点：逐镜批量出图 */
 export const STORYBOARD_IMAGE_KIND = "storyboardImage";
 
-/** 图片组节点：通用的「一个节点 → N 张图」原语（分镜图是它的内置配方） */
+/** 图片组节点：内部通用原语（存量画布兼容用；新画布一律用分镜图） */
 export const IMAGE_GROUP_KIND = "imageGroup";
 
 /**
@@ -40,7 +40,7 @@ const L3_NODES: ChainLevel["nodes"] = [
   { type: "storyboard", col: 3, row: 0 },
   { type: "assetSheet", col: 4, row: 0 },
   { type: "assetImage", col: 5, row: 0 },
-  { type: IMAGE_GROUP_KIND, col: 4, row: 1 },
+  { type: STORYBOARD_IMAGE_KIND, col: 4, row: 1 },
 ];
 
 const L3_EDGES: ChainLevel["edges"] = [
@@ -49,9 +49,9 @@ const L3_EDGES: ChainLevel["edges"] = [
   ["script", "storyboard"],
   ["storyboard", "assetSheet"],
   ["assetSheet", "assetImage"],
-  // 图片组要两个上游：分镜（镜头表）+ 资产图（等它先跑完，提及注入才有图可挂）
-  ["storyboard", IMAGE_GROUP_KIND],
-  ["assetImage", IMAGE_GROUP_KIND],
+  // 分镜图要两个上游：分镜（镜头表）+ 资产图（等它先跑完，提及注入才有图可挂）
+  ["storyboard", STORYBOARD_IMAGE_KIND],
+  ["assetImage", STORYBOARD_IMAGE_KIND],
 ];
 
 export const CHAIN_LEVELS: ChainLevel[] = [
@@ -94,23 +94,26 @@ export const CHAIN_LEVELS: ChainLevel[] = [
   {
     key: "L3",
     label: "L3 +逐镜出图",
-    hint: "再加「图片组」：按镜头表逐镜出图，每镜自动挂它提到的角色设定图",
+    hint: "再加「分镜图」：按镜头表逐镜出图，每镜自动挂它提到的角色设定图",
     nodes: L3_NODES,
     edges: L3_EDGES,
   },
   {
     key: "L4",
     label: "L4 +逐镜视频",
-    hint: "全链打通：逐镜出图后再逐镜生视频，相邻两镜首尾相连。最贵的一档，建议先跑通 L3 再铺",
+    hint: "全链打通：逐镜出图后再逐镜生视频，相邻两镜首尾相连，最后用「成片」节点按顺序合成一条",
     nodes: [
       ...L3_NODES,
       { type: "video", col: 5, row: 1, data: { shotVideo: "chain", mode: "first_last" } },
+      { type: "film", col: 6, row: 1 },
     ],
     edges: [
       ...L3_EDGES,
-      // 视频同样要两个上游：分镜（每镜的动作与时长）+ 图片组（每镜的首帧图）
+      // 视频同样要两个上游：分镜（每镜的动作与时长）+ 分镜图（每镜的首帧图）
       ["storyboard", "video"],
-      [IMAGE_GROUP_KIND, "video"],
+      [STORYBOARD_IMAGE_KIND, "video"],
+      // 成片只接视频：按节点从左到右的顺序合并
+      ["video", "film"],
     ],
   },
 ];
@@ -128,8 +131,8 @@ export function modelKeyForNodeType(type: string, models: ModelOption[]): string
   if (type === "image" || type === ASSET_IMAGE_KIND || type === STORYBOARD_IMAGE_KIND || type === IMAGE_GROUP_KIND) {
     return pick("image");
   }
-  // ComfyUI 工作流不需要选模型（它按上传的工作流跑）
-  if (type === "workflow") return "";
+  // ComfyUI 工作流不需要选模型（它按上传的工作流跑）；成片只走本地 ffmpeg
+  if (type === "workflow" || type === "film") return "";
   return pick("text");
 }
 

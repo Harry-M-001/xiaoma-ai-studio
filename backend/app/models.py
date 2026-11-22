@@ -425,6 +425,10 @@ class AgentSession(Base):
     # 审批方式：False = 手动（跑整图/跑节点前停下来等人点）；True = 自动（直接执行）。
     # 默认手动：花钱的操作不该因为「上次开过自动」而悄悄继续自动。
     auto_approve: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 思考模式：True = 先出思维链再回答（DeepSeek V4 默认就是开着）；False = 直接答。
+    # 默认开：Agent 每轮都要决定「调哪个工具、参数对不对」，思考带来的质量差很明显；
+    # 嫌慢/嫌贵可以在会话上关掉（关掉时对 DeepSeek 显式下发 disabled，不靠上游默认值）。
+    thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -457,5 +461,9 @@ class AgentStep(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 模型这一步用的 token（上游给了才记，没给就是 0）
     tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 这一步的思维链（思考模式下上游返回的 reasoning_content）。
+    # **必须落库**：带 tools 的请求要求把历史 reasoning_content 原样回传，否则上游直接 400
+    # （实测 DeepSeek：round 2 报 "`reasoning_content` ... must be passed back to the API"）。
+    reasoning: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
 

@@ -185,6 +185,14 @@
   min-height: 0;
 }
 
+/* 视口 + 浮层的定位容器：浮层只覆盖画面，不盖到下面的出图工具条 */
+.d3d-canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
 /**
  * 画布必须**撑满容器**。
  *
@@ -261,6 +269,81 @@
   background: rgba(20, 22, 28, 0.6);
   border-radius: 6px;
   padding: 3px 8px;
+}
+
+/* 构图线：纯 DOM，pointer-events 关了；不进截图 */
+.d3d-guide {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.d3d-guide i {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.d3d-guide .gv {
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.d3d-guide .gv1 {
+  left: 33.333%;
+}
+
+.d3d-guide .gv2 {
+  left: 66.666%;
+}
+
+.d3d-guide .gh {
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.d3d-guide .gh1 {
+  top: 33.333%;
+}
+
+.d3d-guide .gh2 {
+  top: 66.666%;
+}
+
+/* 机位视角下的镜头信息（景别 / 焦段 / 构图） */
+.d3d-shotinfo {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 3;
+  pointer-events: none;
+  font-size: 11px;
+  color: #e8ebf2;
+  background: rgba(20, 22, 28, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+/* 空场景提示：只在没有任何角色/元素时出现 */
+.d3d-emptyhint {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  z-index: 3;
+  pointer-events: none;
+  font-size: 12px;
+  color: #cbd5e1;
+  background: rgba(20, 22, 28, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 8px 14px;
+  white-space: nowrap;
 }
 
 .d3d-shotbar {
@@ -510,4 +593,39 @@
 
 .d3d-foot-right {
   margin-left: auto;
+}
+
+/* ---------------- 画布里的浮层入口 ---------------- */
+
+/**
+ * 画布「3D 导演台」：整屏浮层。
+ * 导演台自身按 100% 高度布局，所以这里必须给它一个**有确定高度**的容器，
+ * 否则 .d3d 的 height:100% 退化成 0，视口又变成一片空白。
+ */
+.canvas-3d-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 140;
+  background: rgba(8, 10, 14, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.canvas-3d-modal {
+  width: min(1480px, 96vw);
+  height: min(900px, 92vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.canvas-3d-modal > * {
+  flex: 1;
+  min-height: 0;
 }

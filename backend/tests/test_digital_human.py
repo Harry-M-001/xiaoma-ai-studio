@@ -379,6 +379,7 @@ def test_runner_refuses_loudly_when_the_audio_is_unusable():
 def _stub_video_model():
     class _Service:
         id = 9
+        kind = "ark"
 
     class _Resolved:
         service = _Service()

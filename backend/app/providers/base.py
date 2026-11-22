@@ -178,6 +178,15 @@ class BaseAdapter(ABC):
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
+    def supports_thinking(self, model: str) -> bool:
+        """这个适配器 + 模型认不认「思考模式」的入参与回传要求。默认：不认。
+
+        Agent 靠它决定两件事：要不要下发 thinking 开关，以及重建历史时要不要
+        在每个 assistant 消息里带 `reasoning_content`（DeepSeek 在思考模式下
+        **要求带**，带空串也行；不带直接 400）。
+        """
+        return False
+
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
             await self._client.aclose()
@@ -211,10 +220,15 @@ class BaseAdapter(ABC):
         tools: list[dict] | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        thinking: bool | None = None,
     ) -> dict:
         """非流式对话，**支持工具调用**。返回归一化后的结果：
 
-            {"content": str, "tool_calls": [{"id","name","arguments"}], "usage": dict}
+            {"content": str, "tool_calls": [{"id","name","arguments"}], "reasoning": str, "usage": dict}
+
+        `thinking`：True / False = 显式开关思考模式；None = 不表达（交给上游默认）。
+        支持它的适配器还会把思维链放进 `reasoning`（DeepSeek 的 `reasoning_content`）；
+        不支持的适配器忽略这个参数——**判不出来就别装作能**。
 
         Agent 的运行循环只能走这条路——流式状态下拼装 tool_calls 各家的增量格式并不统一，
         而 Agent 每一步本来就等得起一次完整响应。默认实现直接拒绝：不是所有服务都支持工具调用，

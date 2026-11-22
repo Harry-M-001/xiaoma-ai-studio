@@ -11,6 +11,8 @@ export interface ModelSpec {
   name: string;
   modality: Modality;
   label: string;
+  /** 兼容别名：解析仍认，但不出现在模型下拉里（老会话 / 老画布用得上） */
+  hidden?: boolean;
 }
 
 export interface Provider {
@@ -43,6 +45,11 @@ export interface ModelOption {
   name: string;
   label: string;
   modality: Modality;
+  /** 这个模型能不能开「思考模式」（后端给判据，前端不自己猜模型名） */
+  thinking?: boolean;
+  /** 视频模型可选的时长区间（秒）；非视频模型为空 */
+  min_duration?: number | null;
+  max_duration?: number | null;
 }
 
 export interface ChatSession {
@@ -165,8 +172,15 @@ export interface AgentSessionInfo {
   agentProjectId: number | null;
   /** 审批方式：false = 手动（跑整图/跑节点前停下等人点）；true = 自动（直接执行） */
   autoApprove: boolean;
+  /**
+   * 思考模式：true = 先出思维链再回答（DeepSeek V4 默认如此）；false = 直接答。
+   * 关掉时后端会显式下发 thinking=disabled，不依赖上游默认值。
+   */
+  thinking: boolean;
   /** 实际生效的自由画布 id（项目绑定优先） */
   canvasId?: number | null;
+  /** `/goal` 正在服务端持续监测；刷新或换标签页后靠它恢复「监测中」与停止按钮 */
+  goalRunning?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -201,6 +215,8 @@ export interface AgentStepInfo {
   status: "ok" | "error" | "pending" | "rejected" | "skipped";
   durationMs: number;
   tokens: number;
+  /** 思考模式下的思维链（上游的 reasoning_content）；没开或上游没给就是空串 */
+  reasoning: string;
   createdAt: string;
 }
 
@@ -241,47 +257,6 @@ export interface AgentWorkspaceMeta {
  * 它不是在聊天里回的 `need_confirm`，而是 MCP 工具调用挂起后由界面轮询到的；
  * `remaining` 是后端算好的剩余等待秒数，到 0 就按「没执行」返回给 dsh。
  */
-export interface McpConfirmation {
-  stepId: number;
-  sessionId: number;
-  projectId: number | null;
-  projectName: string;
-  calls: number;
-  rerun: number;
-  blocked: number;
-  createdAt: string;
-  remaining: number;
-}
-
-/** dsh sidecar 的可选组件状态（下载 / 安装 / 启动都在后台任务里推进） */
-export interface HarnessStatus {
-  job: { state: string; detail: string; error: string };
-  node: { ready: boolean; text: string };
-  dsh: { installed: boolean; version: string; pinned: string };
-  /** dsh 的唯一写入边界：用户显式选的普通目录，不能是仓库根/数据目录 */
-  workspace: { path: string; ready: boolean; reason: string };
-  /** 生效的权限口径（只写工作区 + Shell 逐条确认） */
-  permission: string;
-  running: boolean;
-  /** 是不是本组件启动的（端口上可能是别处起的 dsh，那就不给「停止」） */
-  owned: boolean;
-  url: string;
-  /** 有没有可用的 DeepSeek 官方 Key（没有就不让启动，避免起来也调不了模型） */
-  modelReady: boolean;
-  log: string;
-  home: string;
-}
-
-/** 工作区选择器的一次目录浏览（只列子目录） */
-export interface HarnessDirs {
-  path: string;
-  parent: string;
-  entries: { name: string; path: string }[];
-  /** true = 盘符/根列表，此时 path 还有没意义 */
-  roots: boolean;
-}
-
-
 // ---------- 导演台：转场与转场音效 ----------
 
 /**
@@ -621,7 +596,9 @@ export interface CanvasNodeSchema {
   promptPlaceholder?: string;
   /** 已收成配方的旧节点：不再出现在新建入口，只为存量画布兼容 */
   hidden?: boolean;
-  /** 配方现在由哪个节点承载（如 storyboardImage → imageGroup） */
+  /** 只是不在「添加节点」里出现，Agent / 自动链仍可使用（如资产表、创意策划） */
+  menuHidden?: boolean;
+  /** 内部原语由哪个对外节点承载（如 imageGroup → storyboardImage） */
   presetOf?: string;
 }
 
@@ -706,6 +683,42 @@ export interface CanvasNodeData {
   /** 是否自动挂载提示词里提到的资产设定图（false = 关闭，默认开） */
   mentionRefs?: boolean;
   [k: string]: unknown;
+}
+
+/* ---------------- 一句话搭画布（草稿） ---------------- */
+
+/**
+ * 一句话搭画布：一份**未落库**的草稿。
+ *
+ * `status` 是机器可读的结果（不是给人看的文案），前端据此决定给什么下一步：
+ * ok 有草稿可落 / need_input 需求太短 / need_credentials 没有可用的文本模型 /
+ * unparsable 模型没给合法 JSON / upstream_error 上游调用失败。
+ *
+ * 这份类型与 Agent 的 `draft_canvas` 工具共用同一个后端 planner，
+ * 前端只是多了一个「就在画布上说一句话」的快捷入口，**不许另写一套拓扑逻辑**。
+ */
+export interface CanvasAgentNode {
+  id: string;
+  kind: string;
+  data: CanvasNodeData;
+  /** 后端按拓扑算好的落位（不问模型要坐标，所以它一定是整齐的） */
+  position: { x: number; y: number };
+}
+
+export interface CanvasAgentDraft {
+  status: "ok" | "need_input" | "need_credentials" | "unparsable" | "upstream_error";
+  summary: string;
+  nodes: CanvasAgentNode[];
+  edges: { from: string; to: string }[];
+  /** 后端在修复模型输出时做的改动（丢掉的节点/连线、被改回默认的参数） */
+  notes: string[];
+  /** 下手之前就该知道的事（缺模型、批量节点的花费、视频慢且贵） */
+  warnings: string[];
+  /** 这份草稿需要哪些能力 */
+  requires: string[];
+  /** requires 里本机没有的 */
+  missing: string[];
+  nextAction: string;
 }
 
 /* ---------------- 社区分享 ---------------- */
@@ -1442,6 +1455,18 @@ export interface ComfyWorkflow {
   paramMap: ComfyParamDef[];
   nodeCount: number;
   createdAt: string | null;
+}
+
+/** 扫描 ComfyUI 根目录得到的一个已保存工作流（只描述，尚未导入） */
+export interface ComfyScanItem {
+  path: string;
+  name: string;
+  format: "api" | "ui" | string;
+  ok: boolean;
+  reason: string;
+  outputKind: string;
+  paramCount: number;
+  warnings: string[];
 }
 
 /** 提示词模板（公开接口只返回启用项） */

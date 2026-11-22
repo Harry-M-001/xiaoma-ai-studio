@@ -107,11 +107,19 @@ def test_the_sidebar_can_scroll_to_its_last_item():
     实测：658px 高的窗口里，侧边栏内容高 811px，而 `overflow-y` 是 `visible`、
     外层 `.app-shell` 是 `hidden`，于是「系统设置」的顶边落在 721px、**点都点不到**。
     折叠组只是让这件事少发生几次，真正要治的是不给滚。
+
+    现在滚动收在中间那一段（`.sidebar-scroll`），底部「更多」固定不动——
+    所以这里同时要求外层不滚、内层能滚。
     """
     css = _text(SRC / "styles.css")
-    rule = re.search(r"^\.sidebar \{(.*?)^\}", css, re.S | re.M)
-    assert rule, "styles.css 里找不到 .sidebar 规则"
-    assert "overflow-y: auto" in rule.group(1), "侧边栏不能滚动（底部入口会被裁掉）"
+    outer = re.search(r"^\.sidebar \{(.*?)^\}", css, re.S | re.M)
+    assert outer, "styles.css 里找不到 .sidebar 规则"
+    assert "overflow: hidden" in outer.group(1), "外层不该自己滚（会把底部「更多」一起滚走）"
+
+    inner = re.search(r"^\.sidebar-scroll \{(.*?)^\}", css, re.S | re.M)
+    assert inner, "styles.css 里找不到 .sidebar-scroll 规则"
+    assert "overflow-y: auto" in inner.group(1), "中间那段不能滚动（底部入口会被裁掉）"
+    assert "min-height: 0" in inner.group(1), "flex 子项没给 min-height: 0，滚动条不会出现"
 
 
 def test_settings_are_folded_into_one_more_menu():

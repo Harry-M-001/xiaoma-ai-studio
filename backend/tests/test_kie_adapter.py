@@ -1,6 +1,7 @@
-"""KIE 适配器（图片）的离线测试：画幅映射、协议注册、未接能力的报错。
+"""KIE 适配器（图片/视频）的离线测试：画幅映射、两代入参形状、协议注册、未接能力的报错。
 
-真生成要花钱，所以真跑验证不在单测里做（已用 1 张图验证过：Seedream 4.0 文生图）。
+真生成要花钱，所以真跑验证不在单测里做（2026-11 已用最小额度实测：
+Seedream 5 Flash 文生图/参考图、Nano Banana 2、Seedance 2.5 文生视频、Wan 3.0 首帧生视频）。
 """
 
 from __future__ import annotations
@@ -12,11 +13,16 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
-from app.providers.base import AdapterError  # noqa: E402
+from app.providers.base import AdapterError, AudioRef  # noqa: E402
 from app.providers.kie import (  # noqa: E402
     KieAdapter,
+    accepts_image_refs,
+    audio_upload_mime,
+    image_aspect_ratio,
+    image_family,
     image_input_payload,
     image_size_enum,
+    video_family,
     video_input_payload,
 )
 from app.registry import adapters  # noqa: E402
@@ -112,16 +118,259 @@ def test_video_input_payload_routes_by_model_name():
             pass
 
 
+# ================================================================ 新一代模型（2026-11）
+
+
+def test_new_image_families_are_recognized():
+    assert image_family("seedream/5-flash-text-to-image") == "seedream_new"
+    assert image_family("seedream/4.5-edit") == "seedream_new"
+    assert image_family("nano-banana-2") == "nano_banana_2"
+    assert image_family("gpt-image-2-text-to-image") == "gpt_image_2"
+    assert image_family("bytedance/seedream-v4-edit") == "legacy"
+
+
+def test_aspect_ratio_mapping_matches_new_image_models():
+    assert image_aspect_ratio("1024x1024") == "1:1"
+    assert image_aspect_ratio("1024x1536") == "3:4"
+    assert image_aspect_ratio("1152x864") == "4:3"
+    assert image_aspect_ratio("1280x720") == "16:9"
+    assert image_aspect_ratio("720x1280") == "9:16"
+    assert image_aspect_ratio("abc") == "1:1"
+
+
+def test_seedream5_payload_uses_ratio_and_tier():
+    flash = image_input_payload(
+        "seedream/5-flash-text-to-image", "猫", "1024x1536", 1, []
+    )
+    assert flash == {
+        "prompt": "猫",
+        "aspect_ratio": "3:4",
+        "size": "1K",
+        "output_format": "png",
+        "nsfw_checker": False,
+    }
+    assert "image_size" not in flash and "max_images" not in flash
+
+    pro = image_input_payload(
+        "seedream/5-pro-image-to-image", "改成水彩", "1024x1024", 1, ["https://x/a.png"]
+    )
+    assert pro["quality"] == "basic"
+    assert pro["image_urls"] == ["https://x/a.png"]
+    assert pro["output_format"] == "png"
+
+    # 4.5 的输出格式不固定，不能硬塞 output_format
+    old45 = image_input_payload("seedream/4.5-text-to-image", "猫", "1024x1024", 1, [])
+    assert "output_format" not in old45
+    assert old45["quality"] == "basic"
+
+
+def test_nano_banana_and_gpt_image_field_names_differ():
+    nb = image_input_payload("nano-banana-2", "猫", "1024x1024", 1, ["https://x/a.png"])
+    assert nb["image_input"] == ["https://x/a.png"]
+    assert nb["resolution"] == "1K"
+
+    lite = image_input_payload(
+        "nano-banana-2-lite", "猫", "1024x1024", 1, ["https://x/a.png"]
+    )
+    assert lite["image_urls"] == ["https://x/a.png"]
+    assert "resolution" not in lite
+
+    gpt = image_input_payload(
+        "gpt-image-2-image-to-image", "合影", "1024x1024", 1, ["https://x/a.png"]
+    )
+    assert gpt["input_urls"] == ["https://x/a.png"]
+
+
+def test_ref_support_is_per_model_not_per_generation_name():
+    assert accepts_image_refs("seedream/5-flash-image-to-image") is True
+    assert accepts_image_refs("seedream/4.5-edit") is True
+    assert accepts_image_refs("nano-banana-2") is True
+    assert accepts_image_refs("gpt-image-2-image-to-image") is True
+    # GPT Image 2 的 text 版不收参考图
+    assert accepts_image_refs("gpt-image-2-text-to-image") is False
+    assert accepts_image_refs("seedream/5-flash-text-to-image") is False
+
+
+def test_new_video_families_use_first_frame_url_and_integer_duration():
+    assert video_family("bytedance/seedance-2-5") == "seedance2"
+    assert video_family("kling-4.0/keyframe-to-video") == "kling4_keyframe"
+    assert video_family("wan/3-0-video") == "wan3"
+    assert video_family("kling/v2-5-turbo-image-to-video-pro") == "legacy"
+
+    t2v = video_input_payload("bytedance/seedance-2-5", "海边", 15, "16:9", "")
+    assert t2v == {"prompt": "海边", "resolution": "720p", "duration": 15, "aspect_ratio": "16:9"}
+
+    i2v = video_input_payload(
+        "bytedance/seedance-2-5", "海边", 5, "16:9", "https://x/f.png"
+    )
+    assert i2v["first_frame_url"] == "https://x/f.png"
+    assert "aspect_ratio" not in i2v
+
+    kling = video_input_payload(
+        "kling-4.0/keyframe-to-video", "走", 5, "16:9", "https://x/f.png", "480p"
+    )
+    assert kling["resolution"] == "720p", "Kling 4.0 没有 480p 档，抬到 720p"
+    assert kling["first_frame_url"] == "https://x/f.png"
+
+    # 纯文生视频不能塞给 Kling（它只有关键帧生视频）
+    try:
+        video_input_payload("kling-4.0/keyframe-to-video", "走", 5, "16:9", "")
+        raise AssertionError("Kling 4.0 没首帧却没报错")
+    except AdapterError as e:
+        assert "必须给首帧" in str(e), e
+
+    wan = video_input_payload("wan/3-0-video", "猫", 5, "16:9", "", "480p")
+    assert wan["resolution"] == "480P", "Wan 3.0 的分辨率是大写枚举"
+    assert wan["duration"] == 5
+
+    wan_i2v = video_input_payload("wan/3-0-video", "猫", 5, "16:9", "https://x/f.png")
+    assert wan_i2v["first_frame_url"] == "https://x/f.png"
+
+
 def test_reference_on_a_non_edit_model_is_rejected_before_uploading():
     """文生图模型给参考图要当场拒绝（还没走到上传，所以不联网也能测）。"""
     a = KieAdapter("https://api.kie.ai", "x")
     try:
         asyncio.run(a.generate_image(
-            model="bytedance/seedream-v4-text-to-image", prompt="x", ref_images=[b"png"]
-        ))
+            model="bytedance/seedream-v4-text-to-image", prompt="x", ref_images=[b"png"]))
         raise AssertionError("文生图模型收了参考图")
     except AdapterError as e:
         assert "edit" in str(e), e
+
+
+# ================================================================ 视频参考（2026-11 适配）
+
+
+def test_seedance_accepts_first_and_last_frames():
+    p = video_input_payload(
+        "bytedance/seedance-2", "走两步", 5, "9:16", "https://x/f.png",
+        last_frame_url="https://x/l.png",
+    )
+    assert p["first_frame_url"] == "https://x/f.png"
+    assert p["last_frame_url"] == "https://x/l.png"
+    assert "reference_image_urls" not in p
+    assert "aspect_ratio" not in p, "有首帧时画幅由画面决定，不该再传"
+
+
+def test_last_frame_alone_is_rejected():
+    for model in ("bytedance/seedance-2", "wan/3-0-video"):
+        try:
+            video_input_payload(model, "x", 5, "16:9", "", last_frame_url="https://x/l.png")
+            raise AssertionError(f"{model} 收了没有首帧的尾帧")
+        except AdapterError as e:
+            assert "尾帧不能单独" in str(e), e
+
+
+def test_frames_and_references_are_mutually_exclusive():
+    for model in ("bytedance/seedance-2", "wan/3-0-video"):
+        try:
+            video_input_payload(
+                model, "x", 5, "16:9", "https://x/f.png",
+                last_frame_url="https://x/l.png",
+                ref_image_urls=["https://x/r.png"],
+            )
+            raise AssertionError(f"{model} 把首尾帧和参考图同时收了")
+        except AdapterError as e:
+            assert "不能同时用" in str(e), e
+
+
+def test_seedance_reference_mode_uses_reference_fields():
+    p = video_input_payload(
+        "bytedance/seedance-2", "两只猫", 5, "9:16", "",
+        ref_image_urls=["https://x/a.png", "https://x/b.png"],
+        ref_video_urls=["https://x/v.mp4"],
+    )
+    assert p["reference_image_urls"] == ["https://x/a.png", "https://x/b.png"]
+    assert p["reference_video_urls"] == ["https://x/v.mp4"]
+    assert p["aspect_ratio"] == "9:16"
+    assert "first_frame_url" not in p
+
+
+def test_first_frame_plus_audio_becomes_reference_mode_with_a_hint():
+    """数字人那条路：一张图 + 一条配音。两种模式互斥，所以图要并进参考图并说明用途。"""
+    p = video_input_payload(
+        "bytedance/seedance-2", "她在说话", 5, "9:16", "https://x/f.png",
+        ref_audio_urls=["https://x/a.mp3"],
+    )
+    assert p["reference_image_urls"] == ["https://x/f.png"]
+    assert p["reference_audio_urls"] == ["https://x/a.mp3"]
+    assert "首帧" in p["prompt"] and "参考音频" in p["prompt"]
+    assert "first_frame_url" not in p
+
+
+def test_video_duration_is_clamped_per_family():
+    assert video_input_payload("bytedance/seedance-2", "x", 20, "16:9", "")["duration"] == 15
+    assert video_input_payload("bytedance/seedance-2-5", "x", 20, "16:9", "")["duration"] == 20
+    assert video_input_payload("wan/3-0-video", "x", 45, "16:9", "")["duration"] == 30
+    assert video_input_payload("kling-4.0/keyframe-to-video", "x", 2, "16:9", "https://x/f")["duration"] == 3
+
+
+def test_reference_counts_are_capped_before_uploading():
+    try:
+        video_input_payload(
+            "bytedance/seedance-2", "x", 5, "16:9", "",
+            ref_image_urls=[f"https://x/{i}.png" for i in range(10)],
+        )
+        raise AssertionError("超过 9 张参考图居然通过了")
+    except AdapterError as e:
+        assert "最多收 9 个参考图" in str(e), e
+
+
+def test_kling4_accepts_last_frame_but_refuses_reference_material():
+    p = video_input_payload(
+        "kling-4.0/keyframe-to-video", "走", 5, "16:9", "https://x/f.png",
+        last_frame_url="https://x/l.png",
+    )
+    assert p["last_frame_url"] == "https://x/l.png"
+    assert p["resolution"] == "720p"
+
+    for kwargs in (
+        {"ref_image_urls": ["https://x/r.png"]},
+        {"ref_audio_urls": ["https://x/a.mp3"]},
+    ):
+        try:
+            video_input_payload(
+                "kling-4.0/keyframe-to-video", "走", 5, "16:9", "https://x/f.png", **kwargs
+            )
+            raise AssertionError("Kling 4 关键帧收了参考素材")
+        except AdapterError as e:
+            assert "不收参考" in str(e), e
+
+
+def test_legacy_models_still_refuse_references():
+    try:
+        video_input_payload(
+            "kling/v2-5-turbo-image-to-video-pro", "x", 5, "16:9", "https://x/f.png",
+            ref_image_urls=["https://x/r.png"],
+        )
+        raise AssertionError("老模型收了参考图")
+    except AdapterError as e:
+        assert "只吃首帧" in str(e), e
+
+
+def test_audio_container_sniffing_matches_what_upstream_accepts():
+    wav = b"RIFF" + bytes(4) + b"WAVEfmt "
+    mp3 = b"ID3" + bytes(8)
+    assert audio_upload_mime(AudioRef(data=wav, content_type="application/octet-stream")) == ("audio/wav", "wav")
+    assert audio_upload_mime(AudioRef(data=mp3, content_type="")) == ("audio/mpeg", "mp3")
+    try:
+        audio_upload_mime(AudioRef(data=b"\x00\x01\x02", content_type="audio/flac"))
+        raise AssertionError("flac 居然被当成参考音频")
+    except AdapterError as e:
+        assert "只认 wav / mp3" in str(e), e
+
+
+def test_submit_video_rejects_invalid_combination_before_uploading():
+    """组合不合法时不许先上传几 MB：预检在第一个网络请求之前。"""
+    a = KieAdapter("https://api.kie.ai", "x")
+    try:
+        asyncio.run(a.submit_video(
+            model="kling-4.0/keyframe-to-video", prompt="x", first_frame=b"png",
+            ref_images=[b"ref"],
+        ))
+        raise AssertionError("Kling 4 参考图组合没有被拦住")
+    except AdapterError as e:
+        assert "不收参考" in str(e), e
 
 
 def test_presets_mention_both_kie_entries():
@@ -130,6 +379,16 @@ def test_presets_mention_both_kie_entries():
     assert '"key": "kie"' in registry
     assert '"key": "kie_image"' in registry
     assert "api.kie.ai" in registry
+    # 新模型要真的进预设，否则界面上选不到（只有适配器支持等于没接）
+    for name in (
+        "seedream/5-flash-text-to-image",
+        "nano-banana-2",
+        "gpt-image-2-text-to-image",
+        "bytedance/seedance-2-5",
+        "kling-4.0/keyframe-to-video",
+        "wan/3-0-video",
+    ):
+        assert name in registry, name
 
 
 if __name__ == "__main__":

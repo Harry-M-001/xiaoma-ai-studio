@@ -32,6 +32,8 @@ class ModelSpec(BaseModel):
     name: str = Field(..., description="模型名，如 gpt-4o / doubao-seedream-4-0-250828")
     modality: Modality
     label: str = ""
+    # 兼容别名：仍可用于解析（老会话 / 老画布 / 重跑任务），但不出现在模型下拉里
+    hidden: bool = False
 
 
 class ProviderIn(BaseModel):
@@ -80,6 +82,13 @@ class ModelOption(BaseModel):
     name: str
     label: str
     modality: Modality
+    # 这个模型能不能开「思考模式」（目前只对 DeepSeek 的 OpenAI 兼容端点成立）。
+    # 界面据此决定开关能不能点，不让人对着一个不生效的开关点来点去。
+    thinking: bool = False
+    # 视频模型可选的时长区间（秒）。前端据此限制输入范围，不自己猜模型名；
+    # 非视频模型为 None。
+    min_duration: int | None = None
+    max_duration: int | None = None
 
 
 # ---------- 对话 ----------
@@ -157,6 +166,7 @@ class VideoPreflightIn(BaseModel):
     first_frame_asset_id: int | None = None
     ratio: str = ""
     resolution: str = ""
+    audio_ref_asset_id: int | None = None
 
 
 class PreflightWarningOut(BaseModel):
@@ -408,7 +418,9 @@ def asset_to_out(a: Any) -> AssetOut:
         prompt=a.prompt,
         width=a.width,
         height=a.height,
-        duration=a.duration,
+        # ffprobe 给的是浮点秒（6.1875）；对外统一成整数秒。
+        # 这里兜一下历史数据：列是整数列，但 SQLite 不拦浮点，旧行里真有 6.1875。
+        duration=int(round(float(a.duration))) if a.duration is not None else None,
         task_id=a.task_id,
         created_at=a.created_at,
     )

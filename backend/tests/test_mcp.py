@@ -297,14 +297,17 @@ def test_mcp_refuses_non_loopback_clients():
 # ---------- 前端静态检查 ----------
 
 
-def test_frontend_polls_confirmations_globally():
+def test_frontend_no_longer_ships_the_confirm_gate():
+    """高级模式已从界面撤掉：普通用户看不到确认卡，接口也要由环境变量才能挂载。"""
     app = (SRC / "App.tsx").read_text(encoding="utf-8")
-    gate = (SRC / "components" / "McpGate.tsx").read_text(encoding="utf-8")
     api = (SRC / "api.ts").read_text(encoding="utf-8")
-    assert "McpGate" in app and "<McpGate />" in app, "确认卡没有挂到应用外壳上"
-    assert "mcpConfirmations:" in api and "mcpConfirm:" in api
-    assert "api.mcpConfirmations()" in gate and "api.mcpConfirm(" in gate
-    assert "setTimeout" in gate, "没有轮询"
+    main = (BACKEND / "app" / "main.py").read_text(encoding="utf-8")
+    assert "McpGate" not in app and "<McpGate />" not in app
+    assert not (SRC / "components" / "McpGate.tsx").exists()
+    assert "mcpConfirmations:" not in api and "mcpConfirm:" not in api
+    # 后端仍保留能力，但默认不挂载：极客用 XMS_HARNESS=1 才打开
+    assert "if settings.XMS_HARNESS:" in main
+    assert "app.include_router(mcp.router)" in main
 
 
 if __name__ == "__main__":

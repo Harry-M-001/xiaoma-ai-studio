@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -15,7 +16,10 @@ from pathlib import Path
 BACKEND = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND))
 
-from app.models import AgentSession, AgentStep  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
+
+from app.database import Base  # noqa: E402
+from app.models import AgentSession, AgentStep, Project, ProviderService  # noqa: E402
 from app.registry.canvas_nodes import NODE_SCHEMAS, validate_document  # noqa: E402
 from app.services import agent_runner, agent_tools  # noqa: E402
 
@@ -44,23 +48,23 @@ def test_the_tool_set_covers_the_canvas_loop():
         "list_agent_projects", "create_agent_project",
         "list_projects", "get_canvas", "summarize_canvas", "preview_canvas", "lint_canvas",
         "create_project", "draft_canvas", "apply_canvas_draft", "update_node", "connect_nodes",
-        "add_image_group",
-        "run_canvas", "run_node", "canvas_status",
+        "add_storyboard_image",
+        "run_canvas", "run_node", "canvas_status", "wait_for_tasks",
         "list_skills", "load_skill", "get_task", "get_asset", "list_engines",
         "list_prompt_templates",
     ):
         assert required in names, f"缺少工具 {required}"
 
 
-def test_image_group_tool_is_reversible_and_needs_a_source():
-    """铺图片组是可撤销工具（不是花钱操作），但必须指明接在哪个上游后面。"""
-    spec = agent_tools.by_name("add_image_group")
-    assert spec is not None, "没有「铺图片组」这个工具"
+def test_storyboard_image_tool_is_reversible_and_needs_a_source():
+    """铺分镜图是可撤销工具（不是花钱操作），但必须指明接在哪个上游后面。"""
+    spec = agent_tools.by_name("add_storyboard_image")
+    assert spec is not None, "没有「铺分镜图」这个工具"
     assert spec.tier == agent_tools.TIER_WRITE, "铺节点不该是不可逆操作"
     assert spec.parameters["required"] == ["source_node_id"]
-    assert "imageGroup" in (agent_runner.build_system_prompt(
+    assert "storyboardImage" in (agent_runner.build_system_prompt(
         AgentSession(id=1, title="t", model_key="")
-    )), "系统提示词的节点类型表里没有图片组"
+    )), "系统提示词的节点类型表里没有分镜图"
 
 
 # ================================================================ 1b. 技能（渐进披露）
@@ -126,9 +130,269 @@ def test_the_system_prompt_says_the_hard_rules():
     assert "run_canvas" in text and "确认" in text
     assert "只信工具返回" in text
     assert "每次只调一个工具" in text
+    assert "wait_for_tasks" in text, "提示词没教它用等待工具，它会退回连点 get_task"
     assert "id=7" in text, "绑定画布必须写在提示词里，否则模型每次都要先猜"
     # 技能的第一层（名字 + 描述）必须常驻，否则模型不知道有 load_skill 可调
     assert "可用技能" in text and "load_skill" in text
+
+
+def test_a_reply_that_announces_the_next_step_is_treated_as_unfinished():
+    """「我现在去做体检。」然后收尾 = 最像暂停的一种失败，得能认出来并替它续跑。
+
+    认的范围要窄：把下一步交给用户（「你可以…」）或征求意见（「要不要…？」）不算。
+    """
+    assert agent_runner.looks_like_unfinished_plan(
+        "画布已经落定好了（id=22，8 节点 / 7 连线），还没跑任何东西。我现在做零成本体检。"
+    )
+    assert agent_runner.looks_like_unfinished_plan("落定了：8 节点、7 连线。先做零成本体检。")
+    assert agent_runner.looks_like_unfinished_plan("草稿没问题，我现在开始逐镜补跑。")
+
+    assert not agent_runner.looks_like_unfinished_plan("接下来你可以点运行整图。")
+    assert not agent_runner.looks_like_unfinished_plan("要不要我继续跑？")
+    assert not agent_runner.looks_like_unfinished_plan("已经跑完了，结果在任务中心。")
+    assert not agent_runner.looks_like_unfinished_plan("")
+    # 续跑有上限，不能变成死循环
+    assert 1 <= agent_runner.MAX_NUDGES <= 3
+    assert "不要只说明计划" in agent_runner.NUDGE_TEXT
+
+
+def test_wait_for_tasks_returns_as_soon_as_the_task_finishes():
+    """等任务工具必须看到别的连接写进去的新状态（SQLite 读快照不能一直不更新）。"""
+    import asyncio
+    import tempfile
+    import time
+    from pathlib import Path as _Path
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.database import Base
+    from app.models import Task
+    from app.services.agent_tools import ToolContext, _wait_for_tasks
+
+    async def case():
+        url = f"sqlite+aiosqlite:///{_Path(tempfile.mkdtemp(), 'wait.db').as_posix()}"
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with maker() as reader, maker() as writer:
+                task = Task(kind="text", status="processing", model="2:x", prompt="x",
+                            progress=10, canvas_project_id=22)
+                sess = AgentSession(title="t", model_key="", canvas_project_id=22)
+                reader.add_all([task, sess])
+                await reader.commit()
+                await reader.refresh(task)
+                await reader.refresh(sess)
+                task_id = task.id  # 后面 reader 会结束事务，先把 id 拿住
+
+                async def finish():
+                    await asyncio.sleep(1.2)
+                    row = await writer.get(Task, task_id)
+                    row.status = "completed"
+                    row.progress = 100
+                    await writer.commit()
+
+                finisher = asyncio.create_task(finish())
+                ctx = ToolContext(db=reader, session=sess)
+                started = time.monotonic()
+                out = await _wait_for_tasks(ctx, {"task_ids": [task_id], "timeout_seconds": 10})
+                elapsed = time.monotonic() - started
+                await finisher
+
+                assert out["data"]["done"] is True
+                assert out["data"]["tasks"][0]["status"] == "completed"
+                assert elapsed >= 2, "没等到就返回了：读事务没结束，看到的是旧快照"
+                # 等完之后调用方还要接着用 session（add_step 会读 session.id）：
+                # 结束事务不能用 rollback，否则对象被 expire，下一句就是 MissingGreenlet
+                assert sess.canvas_project_id == 22
+        finally:
+            await engine.dispose()
+
+    asyncio.run(case())
+
+
+def test_wait_for_tasks_follows_a_graph_run_that_is_still_dispatching():
+    """整图是边跑边派下游的：任务表暂时空了，不代表这一跑结束。
+
+    实测（2026-11-21 真机全流程）：第一个节点跑完的瞬间任务表是空的，
+    wait_for_tasks 立刻回报 done，模型就以为整条链跑完了。项目级等待必须跟着
+    这一跑的活跃状态走；只是一直活跃时，到点要如实回 still_dispatching。
+    """
+    import asyncio
+    import tempfile
+    from pathlib import Path as _Path
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.database import Base
+    from app.models import AgentSession
+    from app.services import canvas_runner
+    from app.services.agent_tools import ToolContext, _wait_for_tasks
+
+    async def case():
+        url = f"sqlite+aiosqlite:///{_Path(tempfile.mkdtemp(), 'wait_run.db').as_posix()}"
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        original = canvas_runner.active_run_for
+        try:
+            async with maker() as db:
+                sess = AgentSession(title="t", model_key="", canvas_project_id=22)
+                db.add(sess)
+                await db.commit()
+                await db.refresh(sess)
+
+                # 一跑还在派下游（任务表为空）→ 必须继续等，而不是立刻 done
+                calls = {"n": 0}
+
+                def active_then_done(pid: int) -> str:
+                    calls["n"] += 1
+                    return "run-x" if calls["n"] <= 2 else ""
+
+                canvas_runner.active_run_for = active_then_done
+                out = await _wait_for_tasks(
+                    ToolContext(db=db, session=sess),
+                    {"project_id": 22, "timeout_seconds": 8},
+                )
+                assert out["data"]["done"] is True
+                assert out["data"]["still_dispatching"] is False
+                assert out["data"]["waited_ms"] >= 3000, "没跟着整图等，提前回报了"
+
+                # 一直活跃：到点要如实说还在派，而不是假装跑完
+                canvas_runner.active_run_for = lambda pid: "run-x"
+                timed = await _wait_for_tasks(
+                    ToolContext(db=db, session=sess),
+                    {"project_id": 22, "timeout_seconds": 5},
+                )
+                assert timed["data"]["timed_out"] is True
+                assert timed["data"]["still_dispatching"] is True
+                assert timed["data"]["done"] is False
+        finally:
+            canvas_runner.active_run_for = original
+            await engine.dispose()
+
+    asyncio.run(case())
+
+
+def test_goal_mode_does_not_tell_the_user_to_use_goal_again_on_round_limit():
+    """轮数上限那句「请用 /goal 重发一次」只在普通模式成立。
+
+    /goal 已经会持续推进，用户在监测中看到这句话会以为它停了（真机对照测试里就出现了）。
+    """
+    import asyncio
+    import tempfile
+    from pathlib import Path as _Path
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.database import Base
+    from app.models import AgentSession, AgentStep
+    from app.services import agent_runner
+
+    class FakeAdapter:
+        def supports_thinking(self, model: str) -> bool:
+            return False
+
+        async def chat_once(self, model, messages, tools=None, thinking=None):
+            # 一直调只读工具：刚好把 MAX_ROUNDS 走满
+            return {
+                "content": "",
+                "reasoning": "",
+                "tool_calls": [{"name": "list_projects", "arguments": "{}"}],
+            }
+
+        async def close(self):
+            pass
+
+    adapter = FakeAdapter()
+
+    async def fake_resolve(db, session):
+        return adapter, "fake-model", "Fake"
+
+    async def case():
+        url = f"sqlite+aiosqlite:///{_Path(tempfile.mkdtemp(), 'goal_rounds.db').as_posix()}"
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        original = agent_runner.resolve_brain
+        agent_runner.resolve_brain = fake_resolve
+        try:
+            async with maker() as db:
+                session = AgentSession(title="t", model_key="2:x", thinking=False,
+                                       canvas_project_id=22, agent_project_id=None)
+                db.add(session)
+                await db.commit()
+                await db.refresh(session)
+
+                out = await agent_runner.run_loop(db, session, mode="goal")
+                assert out["status"] == "max_rounds"
+
+                rows = (await db.execute(
+                    select(AgentStep).where(AgentStep.session_id == session.id)
+                )).scalars().all()
+                notes = [r.content for r in rows if r.role == "assistant" and r.content]
+                assert all("/goal" not in text for text in notes), (
+                    f"目标模式到头还在让用户重发 /goal：{notes}"
+                )
+        finally:
+            agent_runner.resolve_brain = original
+            await engine.dispose()
+
+    asyncio.run(case())
+
+
+def test_goal_monitor_count_check_does_not_expire_the_session():
+    """/goal 的「还有几个任务在跑」也不能把调用方的 session 过期，否则下一句就炸。"""
+    import asyncio
+    import tempfile
+    from pathlib import Path as _Path
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.database import Base
+
+    async def case():
+        url = f"sqlite+aiosqlite:///{_Path(tempfile.mkdtemp(), 'goal.db').as_posix()}"
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with maker() as db:
+                sess = AgentSession(title="t", model_key="", canvas_project_id=22)
+                db.add(sess)
+                await db.commit()
+                await db.refresh(sess)
+
+                count = await agent_runner._running_tasks(db, 22)
+                assert count == 0
+                # 模拟监测循环结束后的下一步：读 session.id 不能触发 IO
+                assert sess.id and sess.canvas_project_id == 22
+        finally:
+            await engine.dispose()
+
+    asyncio.run(case())
+
+
+def test_slash_commands_are_parsed_from_the_message_head():
+    """`/spec` `/plan` `/goal` 只认开头；不认识的斜杠原样当普通消息。"""
+    assert agent_runner.parse_command("/goal 做一条 10 秒视频") == ("goal", "做一条 10 秒视频")
+    assert agent_runner.parse_command("  /Spec 先写规范") == ("spec", "先写规范")
+    assert agent_runner.parse_command("/plan") == ("plan", "")
+    assert agent_runner.parse_command("/unknown x") == ("", "/unknown x")
+    assert agent_runner.parse_command("普通消息") == ("", "普通消息")
+
+
+def test_each_mode_writes_its_own_rule_into_the_system_prompt():
+    base = AgentSession(id=1, title="t", model_key="")
+    assert "/spec 模式" in agent_runner.build_system_prompt(base, mode="spec")
+    assert "/plan 模式" in agent_runner.build_system_prompt(base, mode="plan")
+    assert "/goal 模式" in agent_runner.build_system_prompt(base, mode="goal")
+    assert "当前模式" not in agent_runner.build_system_prompt(base, mode="")
 
 
 def test_the_system_prompt_scopes_the_context_to_the_agent_project():
@@ -326,6 +590,106 @@ def test_the_router_and_page_are_wired():
     approval = BACKEND / "alembic" / "versions" / "0020_agent_auto_approve.py"
     assert approval.exists(), "缺少审批方式的迁移"
     assert "auto_approve" in approval.read_text(encoding="utf-8")
+
+
+# ================================================================ 12. 换模型
+
+
+def _agent_db_run(scenario) -> None:  # noqa: ANN001
+    async def go() -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        try:
+            async with maker() as db:
+                await scenario(db)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
+
+
+def _video_canvas(ark_key: str) -> str:
+    return json.dumps(
+        {
+            "schemaVersion": 1,
+            "nodes": [
+                {
+                    "id": "n6",
+                    "type": "video",
+                    "position": {"x": 0, "y": 0},
+                    "data": {"prompt": "一个人在说话", "model_key": ark_key, "duration": 5},
+                }
+            ],
+            "edges": [],
+            "viewport": {},
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_agent_can_switch_a_nodes_model():
+    """`update_node` 必须能换模型——不然 Agent 只能让用户回画布面板手点。
+
+    顺带守住时长：3 秒写进只认 5/10 的 Seedance 1.0 要被拦住，不能悄悄落库。
+    """
+
+    async def scenario(db) -> None:  # noqa: ANN001
+        ark = ProviderService(
+            name="方舟", kind="ark", base_url="https://ark.cn-beijing.volces.com/api/v3",
+            models_json=json.dumps([
+                {"name": "doubao-seedance-1-0-pro-250528", "modality": "video", "label": "Seedance 1.0"},
+            ]),
+        )
+        kie = ProviderService(
+            name="KIE", kind="kie", base_url="https://api.kie.ai",
+            models_json=json.dumps([
+                {"name": "bytedance/seedance-2-5", "modality": "video", "label": "Seedance 2.5"},
+            ]),
+        )
+        db.add_all([ark, kie])
+        await db.commit()
+        await db.refresh(ark)
+        await db.refresh(kie)
+
+        project = Project(name="p", canvas_json=_video_canvas(f"{ark.id}:doubao-seedance-1-0-pro-250528"))
+        db.add(project)
+        await db.commit()
+        await db.refresh(project)
+        session = AgentSession(id=1, title="t", model_key="", canvas_project_id=project.id)
+        ctx = agent_tools.ToolContext(db=db, session=session)
+
+        bad = await agent_tools.execute(ctx, "update_node", {
+            "project_id": project.id, "node_id": "n6", "params": {"duration": 3},
+        })
+        assert bad["ok"] is False, bad
+        assert "5–10" in bad["error"], bad
+
+        got = await agent_tools.execute(ctx, "update_node", {
+            "project_id": project.id, "node_id": "n6",
+            "model_key": f"{kie.id}:bytedance/seedance-2-5",
+            "params": {"duration": 20},
+        })
+        assert got["ok"] is True, got
+        data = json.loads(project.canvas_json)["nodes"][0]["data"]
+        assert data["model_key"] == f"{kie.id}:bytedance/seedance-2-5", data
+        assert data["duration"] == 20, data
+
+        missing = await agent_tools.execute(ctx, "update_node", {
+            "project_id": project.id, "node_id": "n6", "model_key": "999:not-exist",
+        })
+        assert missing["ok"] is False, missing
+        assert "list_models" in (missing.get("hint") or ""), missing
+
+    _agent_db_run(scenario)
+
+
+def test_update_node_exposes_model_key_in_its_schema():
+    spec = agent_tools.by_name("update_node")
+    assert spec is not None
+    assert "model_key" in spec.parameters["properties"], spec.parameters
+    assert "model_key" in spec.description, "工具描述里不写，模型就不会用"
 
 
 if __name__ == "__main__":

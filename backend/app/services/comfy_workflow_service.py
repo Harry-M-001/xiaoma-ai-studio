@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import random
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -105,6 +106,228 @@ def _node_label(i: int, class_type: str) -> str:
     return f"{class_type}" if i == 0 else f"{class_type}·{i + 1}"
 
 
+# ============================================================
+# UI 格式 → API 格式
+# ============================================================
+#
+# ComfyUI「保存」出来的是 UI 格式（nodes + links + widgets_values），而 /prompt 只认
+# API 格式（{id: {class_type, inputs}}）。这两种格式字段名不一样，不能直接提交。
+# 这里有两条映射依据：
+#   1. 新版本 UI 会把 widget 名写进 inputs[].widget.name —— 优先用它；
+#   2. 老版本没有这个元数据，只能按常见节点的固定顺序兜底。
+# 认不出来的节点只保留连线，不硬猜 widgets_values 的对应关系；扫描结果里会提示。
+
+_VIRTUAL_TYPES = {"Reroute", "Note", "MarkdownNote", "PrimitiveNode"}
+_UI_ONLY_FIELDS = {"control_after_generate", "upload", "imageUI", "videopreview"}
+
+_WIDGET_ORDER: dict[str, list[str]] = {
+    "CheckpointLoaderSimple": ["ckpt_name"],
+    "CheckpointLoader": ["config_name", "ckpt_name"],
+    "VAELoader": ["vae_name"],
+    "UNETLoader": ["unet_name", "weight_dtype"],
+    "CLIPLoader": ["clip_name", "type"],
+    "LoraLoader": ["lora_name", "strength_model", "strength_clip"],
+    "CLIPTextEncode": ["text"],
+    "CLIPSetLastLayer": ["stop_at_clip_layer"],
+    "KSampler": ["seed", "control_after_generate", "steps", "cfg", "sampler_name", "scheduler", "denoise"],
+    "KSamplerAdvanced": [
+        "add_noise", "noise_seed", "control_after_generate", "steps", "cfg",
+        "sampler_name", "scheduler", "start_at_step", "end_at_step", "return_with_leftover_noise",
+    ],
+    "EmptyLatentImage": ["width", "height", "batch_size"],
+    "EmptySD3LatentImage": ["width", "height", "batch_size"],
+    "VAEDecode": [],
+    "SaveImage": ["filename_prefix"],
+    "PreviewImage": [],
+    "LoadImage": ["image", "upload"],
+    "ImageScale": ["upscale_method", "width", "height", "crop"],
+    "LatentUpscale": ["upscale_method", "width", "height", "crop"],
+    "VHS_VideoCombine": [
+        "frame_rate", "loop_count", "filename_prefix", "format", "pingpong", "save_output",
+    ],
+    "SaveVideo": ["filename_prefix", "format", "codec"],
+    "SaveWEBM": ["filename_prefix", "codec", "fps", "quality"],
+}
+
+
+def _is_ui_format(graph: Any) -> bool:
+    return isinstance(graph, dict) and isinstance(graph.get("nodes"), list)
+
+
+def _link_rows(graph: dict[str, Any]) -> dict[Any, tuple[str, int]]:
+    """把 links 统一成 {link_id: (源节点 id, 源槽位)}。"""
+    rows: dict[Any, tuple[str, int]] = {}
+    for row in graph.get("links") or []:
+        if isinstance(row, dict):
+            lid = row.get("id")
+            origin = row.get("origin_id")
+            slot = row.get("origin_slot", 0)
+        elif isinstance(row, (list, tuple)) and len(row) >= 3:
+            lid, origin, slot = row[0], row[1], row[2]
+        else:
+            continue
+        if lid is None or origin is None:
+            continue
+        rows[lid] = (str(origin), int(slot or 0))
+    return rows
+
+
+def _widget_names(node: dict[str, Any]) -> list[str]:
+    """节点上带 widget 元数据的输入名；没有就回落到常见节点表。"""
+    names = [
+        str((slot.get("widget") or {}).get("name"))
+        for slot in (node.get("inputs") or [])
+        if isinstance(slot, dict) and isinstance(slot.get("widget"), dict)
+        and (slot.get("widget") or {}).get("name")
+    ]
+    if names:
+        return names
+    return list(_WIDGET_ORDER.get(str(node.get("type") or ""), []))
+
+
+def _unmapped_classes(graph: dict[str, Any]) -> list[str]:
+    """有 widgets_values 但我们没有映射依据的节点类型（用于扫描提示）。"""
+    out: list[str] = []
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        ctype = str(node.get("type") or "")
+        if not ctype or ctype in _VIRTUAL_TYPES:
+            continue
+        widgets = node.get("widgets_values")
+        if not widgets:
+            continue
+        if not _widget_names(node):
+            out.append(ctype)
+    return out
+
+
+def convert_ui_to_api(graph: dict[str, Any]) -> dict[str, Any]:
+    """把 ComfyUI 保存的 UI 格式转成可提交的 API 格式。
+
+    转换不了时抛 `ValueError`，由调用方给出「请在 ComfyUI 里导出 API 格式」的提示。
+    """
+    if _is_api_format(graph):
+        return graph
+    if not _is_ui_format(graph):
+        raise ValueError("这不是 ComfyUI 工作流（既不是 API 格式，也没有 nodes 列表）")
+
+    links = _link_rows(graph)
+    converted: dict[str, Any] = {}
+    for node in graph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        ctype = str(node.get("type") or "")
+        if not ctype or ctype in _VIRTUAL_TYPES:
+            continue
+        node_id = str(node.get("id"))
+        inputs: dict[str, Any] = {}
+
+        # 连线优先：API 格式里连线是 [源节点 id, 源槽位]
+        for slot in node.get("inputs") or []:
+            if not isinstance(slot, dict):
+                continue
+            name = str(slot.get("name") or "")
+            link_id = slot.get("link")
+            if name and link_id is not None and link_id in links:
+                src, src_slot = links[link_id]
+                inputs[name] = [src, src_slot]
+
+        # 控件值：按 widget 名对齐，跳过纯 UI 字段
+        widgets = node.get("widgets_values")
+        if isinstance(widgets, dict):
+            for key, value in widgets.items():
+                if key not in _UI_ONLY_FIELDS:
+                    inputs.setdefault(str(key), value)
+        elif isinstance(widgets, (list, tuple)) and widgets:
+            for key, value in zip(_widget_names(node), widgets):
+                if key and key not in _UI_ONLY_FIELDS:
+                    inputs.setdefault(key, value)
+
+        converted[node_id] = {"class_type": ctype, "inputs": inputs}
+
+    if not converted:
+        raise ValueError("工作流里没有可执行的节点")
+    return converted
+
+
+# ============================================================
+# 扫描 ComfyUI 根目录下保存的工作流
+# ============================================================
+
+_MAX_SCAN_FILES = 300
+_MAX_WORKFLOW_BYTES = 5 * 1024 * 1024
+
+
+def scan_workflows(root: str) -> list[dict[str, Any]]:
+    """扫描 `<root>/user/default/workflows`（没有就扫 root 本身）。
+
+    只读、不导入；返回每个 JSON 的格式、能否转换、产物类型与参数数量，
+    让界面一次看清「哪些能直接用、哪些需要导出 API 格式」。
+    """
+    base = Path(root or "").expanduser()
+    if not base.is_dir():
+        raise ValueError(f"目录不存在或不是文件夹：{root}")
+    preferred = base / "user" / "default" / "workflows"
+    search_root = preferred if preferred.is_dir() else base
+
+    files = sorted(
+        [p for p in search_root.rglob("*.json") if p.is_file()],
+        key=lambda p: str(p).lower(),
+    )[:_MAX_SCAN_FILES]
+
+    results: list[dict[str, Any]] = []
+    for path in files:
+        item: dict[str, Any] = {
+            "path": str(path),
+            "name": path.stem,
+            "format": "ui",
+            "ok": False,
+            "reason": "",
+            "outputKind": "",
+            "paramCount": 0,
+            "warnings": [],
+        }
+        try:
+            if path.stat().st_size > _MAX_WORKFLOW_BYTES:
+                raise ValueError("文件超过 5MB")
+            graph = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            item["reason"] = f"读不了这个文件：{exc}"
+            results.append(item)
+            continue
+
+        item["format"] = "api" if _is_api_format(graph) else "ui"
+        try:
+            api_graph = convert_ui_to_api(graph)
+        except ValueError as exc:
+            item["reason"] = str(exc)
+            results.append(item)
+            continue
+
+        try:
+            parsed = parse_workflow(api_graph, None)
+        except Exception as exc:  # noqa: BLE001 —— 单个文件解析失败不该拖垮整次扫描
+            item["reason"] = f"解析失败：{exc}"
+            results.append(item)
+            continue
+
+        unmapped = _unmapped_classes(graph) if item["format"] == "ui" else []
+        item.update(
+            {
+                "ok": True,
+                "reason": "",
+                "outputKind": parsed["outputKind"],
+                "paramCount": len(parsed["paramMap"]),
+                "warnings": [f"这些节点没认出来，参数可能没映射全：{', '.join(sorted(set(unmapped)))}"]
+                if unmapped
+                else [],
+            }
+        )
+        results.append(item)
+    return results
+
+
 def parse_workflow(graph: dict[str, Any], object_info: dict | None = None) -> dict:
     """解析图，生成参数映射表与输出类型预判。
 
@@ -127,11 +350,17 @@ def parse_workflow(graph: dict[str, Any], object_info: dict | None = None) -> di
         inputs = node_def.get("input") or {}
         for group in ("required", "optional"):
             spec = (inputs.get(group) or {}).get(field)
-            if spec and isinstance(spec, list):
-                cfg = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
-                opts = cfg.get("options")
-                if isinstance(opts, list) and opts:
-                    return [str(o) for o in opts]
+            if not isinstance(spec, list) or not spec:
+                continue
+            # 标准下拉：ComfyUI 把可选项直接放在 spec[0]，形如 [["euler","uni_pc"], {...}]
+            first = spec[0]
+            if isinstance(first, list) and first and all(isinstance(x, str) for x in first):
+                return [str(x) for x in first]
+            # 动态组合（ComfyUI 新版 SaveVideo 的 format/codec）：选项在 spec[1].options，元素是 {key,...}
+            cfg = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            opts = cfg.get("options")
+            if isinstance(opts, list) and opts:
+                return [str(o.get("key") if isinstance(o, dict) else o) for o in opts]
         return []
 
     # 按节点 id 排序保证稳定

@@ -26,7 +26,7 @@ from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
 from app.providers.base import AdapterError, AudioRef
 from app.providers.comfyui import ComfyUIAdapter, ComfyOutputFile
-from app.services import doc_service, log_service, patrol, provider_store, storage, style_service
+from app.services import doc_service, ffmpeg_service, log_service, patrol, provider_store, storage, style_service
 from app.services.comfy_workflow_service import apply_params
 
 logger = logging.getLogger("xiaoma.runner")
@@ -115,6 +115,12 @@ def _asset_url(rel: str) -> str:
     return f"/media/{rel}"
 
 
+def _probe_seconds(meta: dict) -> int | None:
+    """ffprobe 的时长是浮点秒（6.1875）；`Asset.duration` 是整数列，落库前先取整。"""
+    value = meta.get("duration")
+    return int(round(float(value))) if value else None
+
+
 async def _load_audio_ref(db: AsyncSession, params: dict) -> AudioRef | None:
     """把任务上的「对白音轨」读成 `AudioRef`；没有就返回 None。
 
@@ -179,6 +185,9 @@ class TaskRunner:
     def start_interpolate(self, task_id: int) -> bool:
         return self._spawn(task_id, lambda: self._run_interpolate(task_id))
 
+    def start_film(self, task_id: int) -> bool:
+        return self._spawn(task_id, lambda: self._run_film(task_id))
+
     def upscale_busy(self) -> int:
         """正在跑的那条本机重活（超分或补帧）的任务 id（0 = 没有）。
 
@@ -199,6 +208,8 @@ class TaskRunner:
             return self.start_upscale(task_id)
         if kind == "interpolate":
             return self.start_interpolate(task_id)
+        if kind == "film":
+            return self.start_film(task_id)
         return self.start_image(task_id)
 
     async def start_or_fail(self, kind: str, task_id: int) -> bool:
@@ -484,6 +495,10 @@ class TaskRunner:
                             continue
                         blob = resp.content
                     rel = storage.save_bytes(blob, "video/mp4", preferred_ext="mp4")
+                    # 时长/宽高以**文件实际值**为准：ComfyUI 工作流是按固定帧数出的片，
+                    # 节点上写的「6 秒」只是请求值（实测 33 帧 @16fps 实际 2.06 秒）。
+                    # 记成请求值会让导演台合并、成片时长和「这一跑出了多少秒」全部算错。
+                    meta = await ffmpeg_service.probe(storage.abs_path(rel))
                     db.add(
                         Asset(
                             kind="video",
@@ -494,7 +509,10 @@ class TaskRunner:
                             source="generated",
                             task_id=task_id,
                             prompt=task.prompt,
-                            duration=json.loads(task.params_json or "{}").get("duration"),
+                            duration=_probe_seconds(meta)
+                            or json.loads(task.params_json or "{}").get("duration"),
+                            width=meta.get("width"),
+                            height=meta.get("height"),
                         )
                     )
                     task.status = "completed"
@@ -645,6 +663,11 @@ class TaskRunner:
                             blob = await adapter.download_output(f)
                             ct, ext = self._comfy_content_type(f)
                             rel = storage.save_bytes(blob, ct, preferred_ext=ext)
+                            meta: dict = {}
+                            if f.kind == "video":
+                                # 工作流节点出的视频以前只记「有文件」，时长/宽高是空的；
+                                # 资产库与导演台都要用它，这里补一次 ffprobe（读不出就留空）
+                                meta = await ffmpeg_service.probe(storage.abs_path(rel))
                             db.add(
                                 Asset(
                                     kind=f.kind,
@@ -655,8 +678,17 @@ class TaskRunner:
                                     source="generated",
                                     task_id=task_id,
                                     prompt=task.prompt,
-                                    # 图片能读出宽高就记下来；视频这里读不出（归 ffprobe 管）
+                                    # 图片能读出宽高就记下来；视频走上面的 ffprobe
                                     **storage.image_size_kwargs(blob, ct),
+                                    **(
+                                        {
+                                            "duration": _probe_seconds(meta),
+                                            "width": meta.get("width"),
+                                            "height": meta.get("height"),
+                                        }
+                                        if f.kind == "video"
+                                        else {}
+                                    ),
                                 )
                             )
                         task.status = "completed"
@@ -991,6 +1023,70 @@ class TaskRunner:
                 await self._do_interpolate(task_id)
             finally:
                 _upscale_current["task_id"] = 0
+
+    async def _run_film(self, task_id: int) -> None:
+        """成片：本地 ffmpeg 顺序拼接上游视频。
+
+        不占生成闸机：它不是一次模型调用，几秒钟就完；排队等信息生成没有意义。
+        """
+        try:
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is None or task.status in ("cancelled", "failed", "completed"):
+                    return
+                params = json.loads(task.params_json or "{}")
+                ids = [int(x) for x in (params.get("asset_ids") or [])]
+                if len(ids) < 2:
+                    raise RuntimeError("成片至少要两段视频")
+                rows = (await db.execute(select(Asset).where(Asset.id.in_(ids)))).scalars().all()
+                by_id = {a.id: a for a in rows}
+                assets = [by_id[i] for i in ids if i in by_id]
+                if len(assets) < 2:
+                    raise RuntimeError("有视频资产已被删除，无法合成成片")
+                paths = [storage.abs_path(a.filename) for a in assets]
+                task.status = "processing"
+                task.progress = 5
+                await db.commit()
+
+            out = await ffmpeg_service.merge_videos(paths, transition="cut")
+            rel = ffmpeg_service._save_asset_file(out, "mp4")
+            meta = await ffmpeg_service.probe(storage.abs_path(rel))
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is None:
+                    return
+                if task.status == "cancelled":
+                    storage.delete(rel)
+                    return
+                db.add(
+                    Asset(
+                        kind="video",
+                        filename=rel,
+                        original_name="成片.mp4",
+                        content_type="video/mp4",
+                        size=storage.abs_path(rel).stat().st_size,
+                        source="merged",
+                        task_id=task_id,
+                        prompt=f"{len(assets)} 段 · 按顺序合并",
+                        duration=_probe_seconds(meta),
+                        width=meta.get("width"),
+                        height=meta.get("height"),
+                    )
+                )
+                task.status = "completed"
+                task.progress = 100
+                task.completed_at = utcnow()
+                task.error = None
+                await db.commit()
+        except Exception as e:  # noqa: BLE001 - 单条成片失败不该打崩 runner
+            logger.exception("film task %s failed", task_id)
+            async with SessionLocal() as db:
+                task = await db.get(Task, task_id)
+                if task is not None and task.status not in ("completed", "cancelled"):
+                    task.status = "failed"
+                    task.error = str(e) or "成片合成失败"
+                    task.completed_at = utcnow()
+                    await db.commit()
 
     @staticmethod
     def _progress_beat(task_id: int):

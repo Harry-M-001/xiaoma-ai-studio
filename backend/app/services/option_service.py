@@ -42,3 +42,18 @@ async def validate_int_option(db: AsyncSession, kind: str, value: int, label: st
         return int(text)
     except ValueError as e:
         raise AdapterError(f"{label}需要是整数") from e
+
+
+def validate_duration(value: object, low: int, high: int, label: str = "视频时长") -> int:
+    """视频时长是**连续值**，按模型能接受的区间校验（不再走参数档位表）。
+
+    只认 5/10 会让 Seedance 2.5 / Wan 3.0 的 30 秒形同虚设；而完全不校验
+    又会把「3 秒」这种低于所有模型下限的值发上去，白等一轮 400。
+    """
+    try:
+        seconds = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as e:
+        raise AdapterError(f"{label}需要是整数") from e
+    if seconds < low or seconds > high:
+        raise AdapterError(f"{label}需在 {low}–{high} 秒之间（当前模型的上限）")
+    return seconds

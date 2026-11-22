@@ -192,17 +192,19 @@ def test_dir_browser_lists_only_visible_subdirectories():
         assert all(e["path"].endswith(":\\") for e in roots["entries"])
 
 
-def test_frontend_has_the_optional_component_card():
+def test_harness_is_not_shipped_in_the_ui():
+    """高级模式从界面撤掉：本机引擎页不再有卡片，前端也不再带工作区选择器。
+
+    代码保留在 backend（MCP 工具面 + 确认门以后接外部 Agent 还用得上），
+    但要靠 `XMS_HARNESS=1` 显式开启，默认用户看不见。
+    """
     page = (SRC / "pages" / "EnginesPage.tsx").read_text(encoding="utf-8")
     api = (SRC / "api.ts").read_text(encoding="utf-8")
-    picker = (SRC / "components" / "HarnessDirPicker.tsx").read_text(encoding="utf-8")
-    assert "function HarnessCard" in page and "<HarnessCard />" in page
-    assert "harnessStatus:" in api and "harnessStart:" in api and "harnessStop:" in api
-    assert "harnessSetWorkspace:" in api and "harnessDirs:" in api
-    assert "工作区（dsh 只能写这个目录）" in page, "界面没有让用户选工作区"
-    assert "浏览…" in page, "工作区没有浏览入口"
-    assert "<HarnessDirPicker" in page and "api.harnessDirs(" in picker
-    assert "不装、不启动时，原 Agent 完全不受影响" in page, "界面要说清它与原 Agent 的边界"
+    main = (BACKEND / "app" / "main.py").read_text(encoding="utf-8")
+    assert "HarnessCard" not in page and "harnessStatus" not in page
+    assert not (SRC / "components" / "HarnessDirPicker.tsx").exists()
+    assert "harnessStatus:" not in api and "harnessStart:" not in api
+    assert "if settings.XMS_HARNESS:" in main
 
     notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     assert "MIT License" in notices and "Copyright (c) 2026 DeepSeek" in notices

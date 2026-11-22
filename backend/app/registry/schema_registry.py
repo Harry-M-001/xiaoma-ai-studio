@@ -389,12 +389,17 @@ register(
             {
                 "key": "deepseek", "name": "DeepSeek", "kind": "openai",
                 "base_url": "https://api.deepseek.com/v1", "sort_order": 2,
-                "hint": "性价比高的中文文本模型",
+                # 2026-11 官方文档：最新模型是 V4.1 Flash（API 名 `deepseek-flash`，
+                # 原生多模态、1M 上下文、支持工具调用与思考模式）。
+                # 旧名 deepseek-v4-flash / deepseek-v4-pro / deepseek-chat / deepseek-reasoner
+                # 都只是「兼容别名」：V4 Pro 官方已计划下线，v4-flash 会被路由到 V4.1 Flash。
+                # 新装的人只该看到一个当前模型。
+                "hint": "最新是 DeepSeek V4.1 Flash（`deepseek-flash`）：原生多模态、1M 上下文、"
+                        "支持工具调用与思考模式；旧名 v4-flash / v4-pro 已被官方路由到它。",
                 # 与通义千问同为 sk-+32 位十六进制，形状上分不开，两个都会进候选
                 "key_pattern": r"^sk-[0-9a-f]{32}$",
                 "models_json": [
-                    {"name": "deepseek-chat", "modality": "text", "label": "DeepSeek Chat"},
-                    {"name": "deepseek-reasoner", "modality": "text", "label": "DeepSeek R1"},
+                    {"name": "deepseek-flash", "modality": "text", "label": "DeepSeek V4.1 Flash"},
                 ],
             },
             {
@@ -411,12 +416,15 @@ register(
             {
                 "key": "qwen", "name": "通义千问", "kind": "openai",
                 "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "sort_order": 4,
-                "hint": "阿里云百炼的 OpenAI 兼容模式",
+                # 2026-11 官方文档：Chat Completions 最新是 qwen4-max / qwen3.8-max /
+                # qwen3.8-flash；qwen-plus / qwen-max 仍在，但已是上一代。
+                "hint": "阿里云百炼的 OpenAI 兼容模式；最新文本模型 qwen4-max / qwen3.8-max / qwen3.8-flash",
                 "key_pattern": r"^sk-[0-9a-f]{32}$",
                 "models_json": [
-                    {"name": "qwen-plus", "modality": "text", "label": "Qwen Plus"},
-                    {"name": "qwen-turbo", "modality": "text", "label": "Qwen Turbo"},
-                    {"name": "qwen-max", "modality": "text", "label": "Qwen Max"},
+                    {"name": "qwen4-max", "modality": "text", "label": "Qwen4 Max"},
+                    {"name": "qwen3.8-max", "modality": "text", "label": "Qwen3.8 Max"},
+                    {"name": "qwen3.8-flash", "modality": "text", "label": "Qwen3.8 Flash"},
+                    {"name": "qwen3.7-plus", "modality": "text", "label": "Qwen3.7 Plus"},
                 ],
             },
             {
@@ -434,7 +442,11 @@ register(
             {
                 "key": "ark", "name": "火山方舟 Ark", "kind": "ark",
                 "base_url": "https://ark.cn-beijing.volces.com/api/v3", "sort_order": 6,
-                "hint": "豆包 Seedream 图片 / Seedance 视频，模型名填具体版本 ID",
+                # 2026-11 官方模型列表：文本 Seed 2.1（doubao-seed-2-1-*），
+                # 图片 Seedream 5.5 / 5.0，视频 Seedance 2.5 / 2.0。
+                # 模型名必须填**具体版本 ID**，预设里给的是当前可用的版本号。
+                "hint": "豆包 Seed 2.1 文本 / Seedream 5.5 图片 / Seedance 2.5 视频；"
+                        "模型名填具体版本 ID，版本过期后到方舟控制台复制新的。",
                 # 方舟现在的 Key 是 `ark-<uuid>-<尾码>`，老版本发的是裸 UUID，两种都认。
                 # 这条规则是拿真实 Key 试出来的：第一版只认裸 UUID，结果用户粘进来
                 # 认不出来，还白拿他的 Key 去试了 OpenAI / DeepSeek / Kimi 三家。
@@ -443,13 +455,46 @@ register(
                     r"|^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
                 ),
                 "models_json": [
-                    {"name": "doubao-seedream-4-0-250828", "modality": "image", "label": "豆包 Seedream 4.0"},
-                    {"name": "doubao-seedance-1-0-pro-250528", "modality": "video", "label": "豆包 Seedance 1.0 Pro"},
+                    {"name": "doubao-seed-2-1-pro-260915", "modality": "text", "label": "豆包 Seed 2.1 Pro"},
+                    {"name": "doubao-seed-2-1-lite-260915", "modality": "text", "label": "豆包 Seed 2.1 Lite"},
+                    {"name": "doubao-seedream-5-5-261028", "modality": "image", "label": "豆包 Seedream 5.5"},
+                    {"name": "doubao-seedream-5-0-pro-260628", "modality": "image", "label": "豆包 Seedream 5.0 Pro"},
+                    {"name": "doubao-seedream-5-0-lite-260128", "modality": "image", "label": "豆包 Seedream 5.0 Lite"},
+                    {"name": "doubao-seedance-2-5-260628", "modality": "video", "label": "豆包 Seedance 2.5"},
+                    {"name": "doubao-seedance-2-5-flash-261115", "modality": "video", "label": "豆包 Seedance 2.5 Flash"},
+                    {"name": "doubao-seedance-2-0-260128", "modality": "video", "label": "豆包 Seedance 2.0"},
+                    {"name": "doubao-seedance-1-0-pro-250528", "modality": "video", "label": "豆包 Seedance 1.0 Pro（旧版）"},
+                ],
+            },
+            {
+                "key": "bailian", "name": "阿里百炼（图片/视频）", "kind": "dashscope",
+                # 百炼的图片/视频是异步任务接口（创建任务 → /tasks/{id} 轮询），
+                # 和 OpenAI 兼容的文本接口不是同一条路，所以单独一条预设。
+                # 老域名仍可用；新业务空间域名形如
+                # https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1
+                "base_url": "https://dashscope.aliyuncs.com/api/v1", "sort_order": 7,
+                "hint": "图片 wan2.7-image / wan2.7-image-pro；视频 wan3.0-video、wan2.7、"
+                        "kling/kling-v4-*。可灵只在华北2（北京）提供，且要先用北京地域的 Key。"
+                        "文本请另建一条「通义千问」OpenAI 兼容服务。",
+                "key_pattern": r"^sk-[0-9a-f]{32}$",
+                "models_json": [
+                    {"name": "wan2.7-image-pro", "modality": "image", "label": "万相 2.7 图像 Pro"},
+                    {"name": "wan2.7-image", "modality": "image", "label": "万相 2.7 图像"},
+                    {"name": "wan3.0-video", "modality": "video", "label": "万相 3.0 视频"},
+                    {"name": "wan3.0-video-prime", "modality": "video", "label": "万相 3.0 视频 Prime"},
+                    {"name": "wan2.7-t2v", "modality": "video", "label": "万相 2.7 文生视频"},
+                    {"name": "wan2.7-i2v", "modality": "video", "label": "万相 2.7 图生视频"},
+                    {"name": "wan2.7-r2v-2026-06-12", "modality": "video", "label": "万相 2.7 参考生视频"},
+                    {"name": "kling/kling-v4-video-generation", "modality": "video", "label": "可灵 4.0 关键帧"},
+                    {"name": "kling/kling-v4-omni-reference-video-generation", "modality": "video",
+                     "label": "可灵 4.0 全能参考"},
+                    {"name": "kling/kling-v3-video-generation", "modality": "video", "label": "可灵 3.0"},
+                    {"name": "kling/kling-v3-omni-video-generation", "modality": "video", "label": "可灵 3.0 Omni"},
                 ],
             },
             {
                 "key": "openrouter", "name": "OpenRouter", "kind": "openai",
-                "base_url": "https://openrouter.ai/api/v1", "sort_order": 7,
+                "base_url": "https://openrouter.ai/api/v1", "sort_order": 8,
                 "hint": "聚合网关，模型名如 anthropic/claude-3.5-sonnet",
                 "key_pattern": r"^sk-or-v1-[A-Za-z0-9]{16,}$",
                 "models_json": [],
@@ -458,7 +503,7 @@ register(
                 "key": "kie", "name": "KIE（聚合）", "kind": "openai",
                 # **Base URL 里带模型段**：KIE 的聊天接口是 /<模型>/v1/chat/completions，
                 # 所以一个聊天模型要建一条服务；换模型就换 Base URL（见 hint）。
-                "base_url": "https://api.kie.ai/gemini-3-8-flash-openai/v1", "sort_order": 9,
+                "base_url": "https://api.kie.ai/gemini-3-8-flash-openai/v1", "sort_order": 10,
                 "hint": "聚合接口：一个 Key 覆盖聊天/图片/视频/音频。聊天走 /<模型>/v1/chat/completions，"
                         "所以每个聊天模型单独建一条（Base URL 带上模型段）；已实测支持工具调用。",
                 # 32 位十六进制、没有前缀。形状与少数平台撞车，但「粘贴 Key 自动接入」会真发一次
@@ -466,30 +511,48 @@ register(
                 "key_pattern": r"^[0-9a-f]{32}$",
                 "models_json": [
                     {"name": "gemini-3-8-flash-openai", "modality": "text",
-                     "label": "Gemini 3.8 Flash（KIE）"},
+                     "label": "Gemini 3.8 Flash"},
                 ],
             },
             {
                 "key": "kie_image", "name": "KIE（图片/视频·异步）", "kind": "kie",
-                "base_url": "https://api.kie.ai", "sort_order": 10,
+                "base_url": "https://api.kie.ai", "sort_order": 11,
                 "hint": "图片/视频走统一异步任务接口（createTask → recordInfo），参考图与首帧会先上传成 URL。"
-                        "文生图：*-text-to-image；参考图编辑：*-edit（如 bytedance/seedream-v4-edit）；"
-                        "视频：kling/v2-5-turbo-image-to-video-pro 或 *-text-to-video-pro。",
+                        "图片：seedream/5-flash-text-to-image、seedream/5-flash-image-to-image、"
+                        "nano-banana-2、gpt-image-2-text-to-image；"
+                        "视频：bytedance/seedance-2-5（最长 30 秒）、bytedance/seedance-2、"
+                        "kling-4.0/keyframe-to-video（必须给首帧）、wan/3-0-video。",
                 "key_pattern": r"^[0-9a-f]{32}$",
                 "models_json": [
-                    {"name": "bytedance/seedream-v4-text-to-image", "modality": "image",
-                     "label": "Seedream 4.0 文生图（KIE）"},
-                    {"name": "bytedance/seedream-v4-edit", "modality": "image",
-                     "label": "Seedream 4.0 参考图编辑（KIE）"},
-                    {"name": "kling/v2-5-turbo-image-to-video-pro", "modality": "video",
-                     "label": "Kling 2.5 Turbo 首帧生视频（KIE）"},
-                    {"name": "kling/v2-5-turbo-text-to-video-pro", "modality": "video",
-                     "label": "Kling 2.5 Turbo 文生视频（KIE）"},
+                    {"name": "seedream/5-flash-text-to-image", "modality": "image",
+                     "label": "Seedream 5.0 Flash 文生图"},
+                    {"name": "seedream/5-flash-image-to-image", "modality": "image",
+                     "label": "Seedream 5.0 Flash 参考图"},
+                    {"name": "seedream/5-pro-text-to-image", "modality": "image",
+                     "label": "Seedream 5.0 Pro 文生图"},
+                    {"name": "seedream/5-lite-text-to-image", "modality": "image",
+                     "label": "Seedream 5.0 Lite 文生图"},
+                    {"name": "seedream/4.5-text-to-image", "modality": "image",
+                     "label": "Seedream 4.5 文生图"},
+                    {"name": "nano-banana-2", "modality": "image",
+                     "label": "Nano Banana 2"},
+                    {"name": "gpt-image-2-text-to-image", "modality": "image",
+                     "label": "GPT Image 2 文生图"},
+                    {"name": "gpt-image-2-image-to-image", "modality": "image",
+                     "label": "GPT Image 2 参考图"},
+                    {"name": "bytedance/seedance-2-5", "modality": "video",
+                     "label": "Seedance 2.5"},
+                    {"name": "bytedance/seedance-2", "modality": "video",
+                     "label": "Seedance 2.0"},
+                    {"name": "kling-4.0/keyframe-to-video", "modality": "video",
+                     "label": "Kling 4.0 首帧生视频"},
+                    {"name": "wan/3-0-video", "modality": "video",
+                     "label": "Wan 3.0"},
                 ],
             },
             {
                 "key": "ollama", "name": "本地 Ollama", "kind": "openai",
-                "base_url": "http://127.0.0.1:11434/v1", "sort_order": 8,
+                "base_url": "http://127.0.0.1:11434/v1", "sort_order": 9,
                 "hint": "完全本地运行，API Key 可任意填写",
                 # 不需要 Key，所以不从 Key 形状上认：它走「检测到本机 Ollama 就一键接入」
                 "key_pattern": "",

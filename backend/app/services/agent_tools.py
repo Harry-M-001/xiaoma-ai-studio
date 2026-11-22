@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -23,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentProject, AgentSession, AgentStep, Asset, Project, Prompt, Task
+from app.providers.base import AdapterError
 from app.registry.canvas_nodes import (
     CANVAS_SCHEMA_VERSION,
     NODE_SCHEMAS,
@@ -61,6 +63,8 @@ class ToolContext:
     model_key: str = ""
     #: 会话所属的 Agent 项目（可为空：v2.0.0 之前的历史会话没有项目）
     agent_project: AgentProject | None = None
+    #: `/goal` 的停止信号：等任务这类会阻塞的工具要能提前退出，否则点停止要等满超时
+    cancel: asyncio.Event | None = None
 
     @property
     def project_id(self) -> int | None:
@@ -349,7 +353,11 @@ async def _preview_canvas(ctx: ToolContext, args: dict) -> dict:
     return {
         "ok": True,
         "data": {"project_id": project.id, "totals": totals, "gate": preview.get("gate") or {}, "nodes": nodes},
-        "hint": "这些是**预估**：真跑之前用户还要点一次确认。",
+        "hint": (
+            "这些是**预估，且是下界**：`calls` 只算已经知道次数的节点，"
+            "`pendingNodes` 是「要等上游跑完才知道几次」的节点数——总数通常大于 calls。"
+            "真跑之前用户还要点一次确认；跑起来之后用 wait_for_tasks / canvas_status 看实际进度。"
+        ),
     }
 
 
@@ -424,15 +432,30 @@ async def _list_tasks(ctx: ToolContext, args: dict) -> dict:
 async def _list_models(ctx: ToolContext, args: dict) -> dict:
     rows = await provider_store.list_services(ctx.db)
     options = provider_store.list_model_options(rows, str(args.get("modality") or "text"))
+    by_id = {row.id: row for row in rows}
+
+    def _is_local(service_id: int) -> bool:
+        row = by_id.get(service_id)
+        url = str(row.base_url if row is not None else "").lower()
+        return any(word in url for word in ("127.0.0.1", "localhost", "local://"))
+
     return {
         "ok": True,
         "data": {
             "models": [
-                {"key": o.key, "name": o.name, "service": o.service_name, "label": o.label}
+                {
+                    "key": o.key,
+                    "name": o.name,
+                    "service": o.service_name,
+                    "label": o.label,
+                    # 服务类型与是否本机：模型名看着像云端的，未必真在花钱
+                    "kind": by_id[o.service_id].kind if o.service_id in by_id else "",
+                    "local": _is_local(o.service_id),
+                }
                 for o in options
             ]
         },
-        "hint": "没有模型时可让用户到「模型服务」接入；这一步不要替用户决定花钱。",
+        "hint": "local=true 的是本机服务（ComfyUI / Ollama），不产生云端调用费；需要更多信息再看 list_engines。",
     }
 
 
@@ -681,6 +704,18 @@ async def _apply_canvas_draft(ctx: ToolContext, args: dict) -> dict:
     }
 
 
+async def _video_duration_range(ctx: ToolContext, data: dict) -> tuple[int, int]:
+    """按节点当前模型给出时长区间；模型解析不出来时退回通用区间。"""
+    key = str(data.get("model_key") or "").strip()
+    if not key:
+        return 3, 15
+    try:
+        resolved = await provider_store.resolve_model(ctx.db, key, "video")
+    except AdapterError:
+        return 3, 15
+    return provider_store.video_duration_limit(resolved.service.kind, resolved.model_name)
+
+
 async def _update_node(ctx: ToolContext, args: dict) -> dict:
     project = await _get_project(ctx, args)
     node_id = str(args.get("node_id") or "").strip()
@@ -697,11 +732,54 @@ async def _update_node(ctx: ToolContext, args: dict) -> dict:
     params = args.get("params") or {}
     if not isinstance(params, dict):
         raise ToolError("params 必须是对象。", hint="例如 {\"size\":\"1024x1024\"}。")
+
+    # 换模型：以前 model_key 被整类禁掉，Agent 只能让用户去面板里手点。
+    # 现在按节点能力解析一次——必须是**已接入且同能力**的模型，通过才写规范化后的 key。
+    wanted = str(args.get("model_key") or params.get("model_key") or "").strip()
+    if wanted:
+        schema = NODE_SCHEMAS.get(kind) or {}
+        if "modelSelect" not in (schema.get("features") or []):
+            raise ToolError(
+                f"节点「{schema.get('label', kind)}」没有可切换的模型。",
+                hint="只有图片 / 视频 / 文本生成类节点能换模型。",
+            )
+        modality = canvas_agent.CATEGORY_MODALITY.get(str(schema.get("category") or ""))
+        if not modality:
+            raise ToolError(
+                f"节点「{schema.get('label', kind)}」没有可切换的模型。",
+                hint="只有图片 / 视频 / 文本生成类节点能换模型。",
+            )
+        try:
+            resolved = await provider_store.resolve_model(ctx.db, wanted, modality)
+        except AdapterError as e:
+            raise ToolError(
+                f"换模型失败：{e}",
+                hint=f"先 list_models(modality={modality})，用返回的 key 原样传 model_key。",
+            ) from e
+        data["model_key"] = f"{resolved.service.id}:{resolved.model_name}"
+
     allowed = canvas_agent._agent_params(kind)  # 与画布 Agent 共用同一份白名单
+    duration_range = await _video_duration_range(ctx, data) if kind == "video" else None
     ignored = []
     for key, value in params.items():
+        if key == "model_key":
+            continue  # 已按上面的解析结果写入
         if key not in allowed or isinstance(value, (dict, list)):
             ignored.append(key)
+            continue
+        if key == "duration" and duration_range is not None:
+            # 时长是连续值：按**这个模型**的区间校验，别把 3 秒写进只认 5/10 的模型
+            try:
+                seconds = int(value)
+            except (TypeError, ValueError):
+                seconds = None
+            low, high = duration_range
+            if seconds is None or not (low <= seconds <= high):
+                raise ToolError(
+                    f"时长 {value} 不在当前模型的 {low}–{high} 秒区间。",
+                    hint="换一个时长，或先用 model_key 把节点模型换成支持该时长的模型。",
+                )
+            data[key] = seconds
             continue
         data[key] = value
     node["data"] = data
@@ -713,13 +791,18 @@ async def _update_node(ctx: ToolContext, args: dict) -> dict:
     await ctx.db.commit()
     return {
         "ok": True,
-        "data": {"project_id": project.id, "node_id": node_id, "ignored_params": ignored},
-        "hint": "只有白名单里的参数会被写进去；被忽略的键在 ignored_params 里。",
+        "data": {
+            "project_id": project.id,
+            "node_id": node_id,
+            "model_key": data.get("model_key", ""),
+            "ignored_params": ignored,
+        },
+        "hint": "只有白名单里的参数会被写进去；换模型看 model_key；被忽略的键在 ignored_params 里。",
     }
 
 
-async def _add_image_group(ctx: ToolContext, args: dict) -> dict:
-    """在上游节点后面接一个图片组（1→N 出图），可撤销。"""
+async def _add_storyboard_image(ctx: ToolContext, args: dict) -> dict:
+    """在上游节点后面接一个分镜图（1→N 出图），可撤销。"""
     project = await _get_project(ctx, args)
     source = str(args.get("source_node_id") or "").strip()
     doc = _doc(project)
@@ -740,7 +823,7 @@ async def _add_image_group(ctx: ToolContext, args: dict) -> dict:
         model_key = option.key
 
     stamp = int(time.time() * 1000)
-    node_id = f"ag_ig_{stamp}"
+    node_id = f"ag_si_{stamp}"
     pos = src.get("position") or {}
     data: dict = {"model_key": model_key}
     for key, arg in (("prompt", "prompt"), ("styleKey", "style_key"), ("shotLimit", "shot_limit")):
@@ -749,7 +832,7 @@ async def _add_image_group(ctx: ToolContext, args: dict) -> dict:
             data[key] = value
     doc["nodes"].append({
         "id": node_id,
-        "type": "imageGroup",
+        "type": "storyboardImage",
         "position": {"x": float(pos.get("x") or 0) + 380, "y": float(pos.get("y") or 0)},
         "data": data,
     })
@@ -764,7 +847,7 @@ async def _add_image_group(ctx: ToolContext, args: dict) -> dict:
         nodes, edges = validate_document(doc)
     except ValueError as e:
         raise ToolError(
-            f"加上图片组之后文档不合法：{e}",
+            f"加上分镜图之后文档不合法：{e}",
             hint="确认上游节点的输出端口类型（文本或图片都能接）。",
         ) from e
     project.canvas_json = json.dumps({**doc, "nodes": nodes, "edges": edges}, ensure_ascii=False)
@@ -772,7 +855,7 @@ async def _add_image_group(ctx: ToolContext, args: dict) -> dict:
     return {
         "ok": True,
         "data": {"project_id": project.id, "node_id": node_id, "source": source, "model_key": model_key},
-        "hint": "图片组已接在上游后面；跑之前用 preview_canvas 看要几次调用。",
+        "hint": "分镜图已接在上游后面；跑之前用 preview_canvas 看要几次调用。",
     }
 
 
@@ -904,6 +987,116 @@ async def _canvas_status(ctx: ToolContext, args: dict) -> dict:
     return {"ok": True, "data": {"project_id": project.id, "nodes": out}}
 
 
+async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
+    """等一批任务跑完再返回（最多 120 秒）。
+
+    为什么需要它：模型想看进度时会连着调 `get_task`，一秒查五次，任务还是
+    processing——既烧轮数又什么都看不到。这里把「等」做成一个工具，每次等
+    两分钟，期间服务端自己轮询数据库，模型只需要看一眼结果。
+    """
+    timeout = min(120, max(5, int(args.get("timeout_seconds") or 60)))
+    explicit_ids: list[int] = []
+    for value in args.get("task_ids") or []:
+        try:
+            explicit_ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    raw_pid = args.get("project_id")
+    pid = int(raw_pid) if raw_pid not in (None, "") else ctx.project_id
+    node_id = str(args.get("node_id") or "").strip()
+    if not explicit_ids and not pid:
+        raise ToolError(
+            "要等哪些任务？给 task_ids，或给 project_id（可再加 node_id）。",
+            hint='例如 {"task_ids": [120]} 或 {"project_id": 22, "node_id": "ag_n2_133825"}。',
+        )
+
+    async def _scope_ids() -> list[int]:
+        """这个范围里「现在在跑的」任务；没有就退回最近几条，方便一次看全。"""
+        stmt = select(Task.id).where(Task.canvas_project_id == pid)
+        if node_id:
+            stmt = stmt.where(Task.canvas_node_id == node_id)
+        running = list((await ctx.db.execute(
+            stmt.where(Task.status.in_(("pending", "processing")))
+            .order_by(Task.id.desc()).limit(20)
+        )).scalars().all())
+        if running:
+            return running
+        return list((await ctx.db.execute(
+            stmt.order_by(Task.id.desc()).limit(5)
+        )).scalars().all())
+
+    started = time.monotonic()
+    rows = []
+    cancelled = False
+    waiting_for_run = False
+    while True:
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            cancelled = True
+            break
+        ids = explicit_ids or await _scope_ids()
+        if ids:
+            # 列查询绕过 identity map：同一个会话对象不会把旧状态缓存住
+            rows = (await ctx.db.execute(
+                select(Task.id, Task.kind, Task.status, Task.progress, Task.error)
+                .where(Task.id.in_(ids))
+            )).all()
+            # **必须结束读事务**，否则 SQLite 的读快照不会更新，等的就是自己。
+            # 这里用 commit 而不是 rollback：rollback 会 expire 调用方持有的 ORM 对象
+            # （session / project），紧接着访问 session.id 就会 MissingGreenlet。
+            await ctx.db.commit()
+            busy = any(r.status in ("pending", "processing") for r in rows)
+        else:
+            busy = False
+
+        # 「已有的任务都停了」不等于「这一跑结束了」：整图是边跑边派下游的。
+        # 项目级等待要跟着 run 的活跃状态走，否则第一个节点跑完就回报「完事了」，
+        # 模型会以为整条链跑完了（实测就是这么误判的）。
+        waiting_for_run = bool(
+            pid and not node_id and canvas_runner.active_run_for(pid)
+        )
+        if not busy and not waiting_for_run:
+            break
+        if time.monotonic() - started >= timeout:
+            break
+        await asyncio.sleep(2)
+
+    done = (not waiting_for_run) and not any(
+        r.status in ("pending", "processing") for r in rows
+    )
+    timed_out = not done and not cancelled
+    tasks = [
+        {
+            "id": r.id,
+            "kind": r.kind,
+            "status": r.status,
+            "progress": r.progress,
+            "error": r.error or "",
+        }
+        for r in rows
+    ]
+    if cancelled:
+        hint = "已按用户要求停止等待。"
+    elif timed_out and waiting_for_run:
+        hint = "整图还在后台派后续节点，任务表这会儿是空的；继续等，不要连点 get_task。"
+    elif timed_out:
+        hint = "等满这次上限还没跑完；再调一次 wait_for_tasks 继续等，不要连点 get_task。"
+    else:
+        hint = "已经跑完就继续下一步；有 failed 就先修那个节点，别把整条链重跑一遍。"
+    return {
+        "ok": True,
+        "data": {
+            "done": done and not cancelled,
+            "timed_out": timed_out,
+            "cancelled": cancelled,
+            "still_dispatching": waiting_for_run,
+            "waited_ms": int((time.monotonic() - started) * 1000),
+            "tasks": tasks,
+        },
+        "hint": hint,
+    }
+
+
 # ============================================================ 注册表
 
 
@@ -1013,12 +1206,15 @@ TOOLS: tuple[ToolSpec, ...] = (
         _apply_canvas_draft,
     ),
     ToolSpec(
-        "update_node", "改节点", "改单个节点的提示词或参数（参数只接受契约里允许的键）。",
+        "update_node", "改节点",
+        "改单个节点的提示词或参数（参数只接受契约里允许的键）。"
+        "换模型直接传 model_key（必须是已接入、同能力的模型；先 list_models 拿 key）。",
         TIER_WRITE,
         _obj({
             "project_id": {"type": "integer"},
             "node_id": {"type": "string"},
             "prompt": {"type": "string"},
+            "model_key": {"type": "string"},
             "params": {"type": "object"},
         }, ["node_id"]),
         _update_node,
@@ -1031,8 +1227,8 @@ TOOLS: tuple[ToolSpec, ...] = (
         _connect_nodes,
     ),
     ToolSpec(
-        "add_image_group", "铺图片组",
-        "在上游节点后面接一个图片组：按上游表格逐行出图（一个节点产出 N 张、按行号保序、"
+        "add_storyboard_image", "铺分镜图",
+        "在上游节点后面接一个分镜图：按上游表格逐行出图（一个节点产出 N 张、按行号保序、"
         "每行只挂它提到的资产设定图）。比让模型现场铺 N 个并列图片节点更省、更稳。",
         TIER_WRITE,
         _obj(
@@ -1046,13 +1242,26 @@ TOOLS: tuple[ToolSpec, ...] = (
             },
             ["source_node_id"],
         ),
-        _add_image_group,
+        _add_storyboard_image,
     ),
     ToolSpec(
         "canvas_status", "画布进度", "看每个节点最近一次任务的状态与错误。跑完用它核对，别凭记忆说结果。",
         TIER_READ,
         _obj({"project_id": {"type": "integer"}}),
         _canvas_status,
+    ),
+    ToolSpec(
+        "wait_for_tasks", "等任务完成",
+        "等一批任务跑完再返回（最多 120 秒）。想看进度 / 等结果就用它，"
+        "**不要**连续调 get_task 轮询。可以给 task_ids，也可以给 project_id（可再加 node_id）。",
+        TIER_READ,
+        _obj({
+            "task_ids": {"type": "array", "items": {"type": "integer"}},
+            "project_id": {"type": "integer"},
+            "node_id": {"type": "string"},
+            "timeout_seconds": {"type": "integer", "description": "最多等多少秒，5–120，默认 60"},
+        }),
+        _wait_for_tasks,
     ),
     ToolSpec(
         "run_canvas", "执行整图", "执行整张画布。**不可逆、会花钱**，系统会先让用户确认。",

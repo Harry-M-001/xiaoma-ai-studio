@@ -367,6 +367,28 @@ def test_mention_injection_empty_text_is_noop():
     asyncio.run(_with_db(run))
 
 
+# ---------- 时长落库 ----------
+
+
+def test_fractional_probe_duration_does_not_break_the_asset_list():
+    """ffprobe 给 6.1875 秒；`Asset.duration` 是整数列，接口不能因此 500。"""
+    from datetime import datetime
+
+    from app.schemas import asset_to_out
+    from app.services.runner import _probe_seconds
+
+    assert _probe_seconds({"duration": 6.1875}) == 6
+    assert _probe_seconds({"duration": None}) is None
+
+    row = Asset(
+        id=1, kind="video", filename="2026-11/film.mp4", original_name="成片.mp4",
+        content_type="video/mp4", size=1024, source="merged",
+        duration=6.1875, created_at=datetime.now(),
+    )
+    # 历史数据里就是浮点：序列化时要兜住，不能抛 ValidationError
+    assert asset_to_out(row).duration == 6
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

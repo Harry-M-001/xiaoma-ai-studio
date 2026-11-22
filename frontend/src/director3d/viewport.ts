@@ -236,12 +236,33 @@ function buildPropGeometry(shape: PropShape, size: Vec3): THREE.BufferGeometry {
   }
 }
 
-/** 机位可视化：机身 + 视锥线 + 注视点连线 */
-function buildCameraRig(cam: CameraObject): { root: THREE.Group; update: (c: CameraObject) => void } {
+/**
+ * 机位可视化：机身 + 视锥线 + 注视点连线。
+ *
+ * 三个曾经踩过的坑，写清楚免得再犯：
+ *  1. **位置只由外层 entry.group 负责**。机位对象也有 `pos`，外层 group 已经按它摆好，
+ *     这里再 `root.position.set(pos)` 就等于走了两倍距离——机身会跑到世界外面去。
+ *  2. `Group.lookAt` 让本地 **+Z** 指向目标，而相机约定是 -Z 朝前。这里直接用
+ *     `Matrix4.lookAt` 算四元数（-Z 朝目标），视锥也就按 -Z 建，方向和真实取景一致。
+ *  3. 注视点连线必须是**本地坐标**：世界坐标的点塞进已被平移/旋转的 root 里，会被再叠加一次。
+ */
+function buildCameraRig(cam: CameraObject): {
+  root: THREE.Group;
+  lines: THREE.Object3D[];
+  update: (c: CameraObject) => void;
+} {
   const root = new THREE.Group();
   const bodyMat = new THREE.MeshStandardMaterial({ color: "#cbd5e1", roughness: 0.6 });
   const body = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.2, 0.36), bodyMat);
   root.add(body);
+  // 镜头圈：机身本身前后对称，不加这个看不出「朝哪拍」
+  const lens = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.085, 0.085, 0.12, 14),
+    new THREE.MeshStandardMaterial({ color: "#5b8def", roughness: 0.35 }),
+  );
+  lens.rotation.x = Math.PI / 2;
+  lens.position.z = 0.2;
+  root.add(lens);
 
   const frustumMat = new THREE.LineBasicMaterial({ color: "#38bdf8", transparent: true, opacity: 0.85 });
   const gazeMat = new THREE.LineDashedMaterial({ color: "#38bdf8", transparent: true, opacity: 0.5, dashSize: 0.18, gapSize: 0.12 });
@@ -250,13 +271,22 @@ function buildCameraRig(cam: CameraObject): { root: THREE.Group; update: (c: Cam
   const gaze = new THREE.Line(new THREE.BufferGeometry(), gazeMat);
   root.add(frustum, gaze);
 
-  const light = new THREE.PointLight(0xffffff, 0.0, 0.1);
-  root.add(light);
+  const dir = new THREE.Vector3();
+  const up = new THREE.Vector3(0, 1, 0);
+  const lookMat = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const rollQ = new THREE.Quaternion();
+  const axisZ = new THREE.Vector3(0, 0, 1);
 
   const update = (c: CameraObject) => {
-    root.position.set(c.pos.x, c.pos.y, c.pos.z);
-    root.lookAt(c.lookAt.x, c.lookAt.y, c.lookAt.z);
-    if (c.roll) root.rotateZ(deg(c.roll));
+    dir.set(c.lookAt.x - c.pos.x, c.lookAt.y - c.pos.y, c.lookAt.z - c.pos.z);
+    if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
+    dir.normalize();
+    // eye=0、target=dir：得到的旋转让本地 -Z 指向 dir（相机约定）
+    lookMat.lookAt(new THREE.Vector3(0, 0, 0), dir, up);
+    q.setFromRotationMatrix(lookMat);
+    if (c.roll) q.multiply(rollQ.setFromAxisAngle(axisZ, deg(c.roll)));
+    root.quaternion.copy(q);
 
     const fov = focalLengthToFov(c.focalLength);
     const depth = 1.6;
@@ -277,16 +307,16 @@ function buildCameraRig(cam: CameraObject): { root: THREE.Group; update: (c: Cam
     frustum.geometry.dispose();
     frustum.geometry = new THREE.BufferGeometry().setFromPoints(pts);
 
-    // 注视点连线（在父空间里算，才不会被 root 的旋转重复作用）
-    const from = new THREE.Vector3(c.pos.x, c.pos.y, c.pos.z);
-    const to = new THREE.Vector3(c.lookAt.x, c.lookAt.y, c.lookAt.z);
+    // 注视点连线：世界向量转回本地（q 的逆），而不是直接用世界坐标
+    const localTo = new THREE.Vector3(c.lookAt.x - c.pos.x, c.lookAt.y - c.pos.y, c.lookAt.z - c.pos.z)
+      .applyQuaternion(q.clone().invert());
     gaze.geometry.dispose();
-    gaze.geometry = new THREE.BufferGeometry().setFromPoints([from, to]);
+    gaze.geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), localTo]);
     gaze.computeLineDistances();
   };
 
   update(cam);
-  return { root, update };
+  return { root, lines: [frustum, gaze], update };
 }
 
 // ---------------------------------------------------------------- 主类
@@ -300,6 +330,8 @@ interface Entry {
   actor?: { applyPose: (pose: PoseState) => void };
   /** 机位：只更新参数（视锥线要重算） */
   cam?: { update: (c: CameraObject) => void };
+  /** 机位的辅助线（视锥 + 注视点），受「取景框」开关控制 */
+  camLines?: THREE.Object3D[];
   /** 可着色材质（选中高亮 + 颜色跟随属性） */
   materials: THREE.MeshStandardMaterial[];
   /** 元素的实体网格（改形状/尺寸时换几何体） */
@@ -434,21 +466,28 @@ export class StudioViewport {
     if (this.worldBox) this.worldBox.visible = session.showGrid;
 
     // ---- 灯光
-    const setLight = (l: THREE.DirectionalLight, slot: DirectorDoc["lights"]["key"], visible: boolean) => {
+    // 关键：三点光**永远参与照明**。「灯光位」只是一个显示开关（画三个小球），
+    // 不能拿它去控制灯的 visible——那样默认状态下场景只剩环境光，人物是灰的。
+    const setLight = (l: THREE.DirectionalLight, slot: DirectorDoc["lights"]["key"]) => {
       l.position.set(slot.pos.x, slot.pos.y, slot.pos.z);
       l.intensity = slot.intensity;
       l.color.copy(kelvinColor(slot.colorTemperature));
-      l.visible = visible;
     };
-    setLight(this.lights.key, doc.lights.key, session.showLights);
-    setLight(this.lights.fill, doc.lights.fill, session.showLights);
-    setLight(this.lights.rim, doc.lights.rim, session.showLights);
+    setLight(this.lights.key, doc.lights.key);
+    setLight(this.lights.fill, doc.lights.fill);
+    setLight(this.lights.rim, doc.lights.rim);
     this.hemi.intensity = env.ambient + doc.lights.ambientIntensity * 0.5;
     this.ambient.intensity = doc.lights.ambientIntensity * 0.6;
 
-    // 灯光位置在关掉显示时也想知道「光在哪」——只在开启时画小标记
+    // 灯位标记：位置变了要重建（原来只在第一次显示时建一次，挪了灯标记还留在原地）
+    const helperKey = [doc.lights.key.pos, doc.lights.fill.pos, doc.lights.rim.pos]
+      .map((p) => `${p.x},${p.y},${p.z}`)
+      .join("|");
+    if (helperKey !== this.lightHelperKey) {
+      this.lightHelperKey = helperKey;
+      this.rebuildLightHelpers();
+    }
     for (const h of this.lightHelpers) h.visible = session.showLights;
-    if (this.lightHelpers.length === 0 && session.showLights) this.buildLightHelpers();
 
     // ---- 对象
     const seen = new Set<string>();
@@ -471,6 +510,14 @@ export class StudioViewport {
     const active = doc.objects.find((o) => o.id === doc.activeCameraId);
     const activeCam = active && active.kind === "camera" ? active : null;
     if (session.viewMode === "camera" && activeCam) {
+      // 进机位前把自由视角记下来：切回导演视角要是「刚才看到哪」，不是卡在镜头里
+      if (this.prevViewMode !== "camera") {
+        this.directorView = {
+          pos: this.camera.position.clone(),
+          target: this.controls.target.clone(),
+          fov: this.camera.fov,
+        };
+      }
       this.camera.fov = focalLengthToFov(activeCam.focalLength);
       this.camera.position.set(activeCam.pos.x, activeCam.pos.y, activeCam.pos.z);
       this.camera.lookAt(activeCam.lookAt.x, activeCam.lookAt.y, activeCam.lookAt.z);
@@ -479,12 +526,21 @@ export class StudioViewport {
       this.controls.enabled = false;
       this.controls.target.set(activeCam.lookAt.x, activeCam.lookAt.y, activeCam.lookAt.z);
     } else {
+      if (this.prevViewMode === "camera" && this.directorView) {
+        this.camera.position.copy(this.directorView.pos);
+        this.controls.target.copy(this.directorView.target);
+        this.camera.fov = this.directorView.fov;
+        this.camera.updateProjectionMatrix();
+        this.camera.lookAt(this.directorView.target);
+        this.directorView = null;
+      }
       if (this.camera.fov !== DEFAULT_FOV) {
         this.camera.fov = DEFAULT_FOV;
         this.camera.updateProjectionMatrix();
       }
       this.controls.enabled = this.drag === null;
     }
+    this.prevViewMode = session.viewMode;
 
     // 每次同步顺手核对一次画布尺寸（见 ensureSize 的说明）
     this.ensureSize();
@@ -498,6 +554,10 @@ export class StudioViewport {
 
   private framedOnce = false;
 
+  /** 进机位视角前的自由视角（切回来时恢复，别让用户卡在镜头里） */
+  private directorView: { pos: THREE.Vector3; target: THREE.Vector3; fov: number } | null = null;
+  private prevViewMode: SessionState["viewMode"] | null = null;
+
   private worldBoxKey = "";
 
   private rebuildWorld(doc: DirectorDoc, env: EnvPreset): void {
@@ -509,8 +569,11 @@ export class StudioViewport {
     this.disposeTree(this.ground);
     // 灯光位标记也要连几何体一起释放：世界尺寸每改一次都会重建一轮
     for (const h of this.lightHelpers) this.disposeTree(h);
-    this.grid?.dispose();
+    // GridHelper 没有 dispose()（它是 LineSegments），直接调会在第二次改世界尺寸时抛错
+    this.grid?.geometry.dispose();
     this.lightHelpers = [];
+    // 清掉键，让下一次 sync 按新世界把标记球重建回来
+    this.lightHelperKey = "";
 
     const { x, y, z } = doc.scene.worldSize;
 
@@ -541,7 +604,17 @@ export class StudioViewport {
     this.scene.add(this.worldBox);
   }
 
-  private buildLightHelpers(): void {
+  private lightHelperKey = "";
+
+  /** 重建三盏灯的标记球（位置变化时调用；旧的连几何体一起释放） */
+  private rebuildLightHelpers(): void {
+    for (const h of this.lightHelpers) {
+      this.scene.remove(h);
+      this.disposeTree(h);
+    }
+    this.lightHelpers = [];
+    const d = this.doc?.lights;
+    if (!d) return;
     const mk = (pos: Vec3, color: number) => {
       const g = new THREE.Mesh(
         new THREE.SphereGeometry(0.12, 10, 8),
@@ -551,8 +624,6 @@ export class StudioViewport {
       this.scene.add(g);
       this.lightHelpers.push(g);
     };
-    const d = this.doc?.lights;
-    if (!d) return;
     mk(d.key.pos, 0xfde047);
     mk(d.fill.pos, 0x93c5fd);
     mk(d.rim.pos, 0xf0abfc);
@@ -566,6 +637,7 @@ export class StudioViewport {
     let materials: THREE.MeshStandardMaterial[] = [];
     let actor: Entry["actor"];
     let cam: Entry["cam"];
+    let camLines: Entry["camLines"];
     let propMesh: THREE.Mesh | undefined;
     // 元素的几何体直接按当前尺寸建好，并记下参数键——否则第一次 sync 会白建一次又拆一次
     let key = "";
@@ -590,6 +662,7 @@ export class StudioViewport {
       const rig = buildCameraRig(obj);
       group.add(rig.root);
       cam = { update: rig.update };
+      camLines = rig.lines;
     }
 
     const marker = new THREE.Mesh(
@@ -606,14 +679,15 @@ export class StudioViewport {
     group.add(label);
 
     this.scene.add(group);
-    return { group, object: obj, key, actor, cam, materials, propMesh, label, marker };
+    return { group, object: obj, key, actor, cam, camLines, materials, propMesh, label, marker };
   }
 
   private updateEntry(entry: Entry, obj: DirectorObject, session: SessionState): void {
     entry.object = obj;
     entry.group.visible = obj.visible;
     entry.group.position.set(obj.pos.x, obj.pos.y, obj.pos.z);
-    entry.group.rotation.y = deg(obj.rotY);
+    // 机位的朝向由 pos→lookAt 决定，rotY 对它没有意义（再叠一层只会让机位歪掉）
+    entry.group.rotation.y = obj.kind === "camera" ? 0 : deg(obj.rotY);
     entry.group.scale.setScalar(obj.scale);
 
     if (obj.kind === "actor") {
@@ -629,6 +703,8 @@ export class StudioViewport {
       for (const m of entry.materials) m.color.set(obj.color);
     } else {
       entry.cam?.update(obj);
+      // 「取景框」开关只管辅助线，不影响机位本身
+      for (const l of entry.camLines ?? []) l.visible = session.showFrustum;
     }
 
     const selected = session.selectedId === obj.id;
@@ -750,15 +826,11 @@ export class StudioViewport {
       box.expandByObject(e.group);
       any = true;
     }
-    // 场景里只有机位时（刚打开就是这种情况）再退回来按全部对象取景
-    if (!any) {
-      for (const e of this.entries.values()) {
-        if (!e.group.visible) continue;
-        box.expandByObject(e.group);
-        any = true;
-      }
-    }
-    if (!any || box.isEmpty()) return { center: new THREE.Vector3(0, 1, 0), radius: 4 };
+    // 场景里只有机位时（刚打开就是这种情况）：不要按机位取景——它的视锥线会让包围盒
+    // 忽大忽小，还会把镜头怼到机身背后，看起来就是「打开什么都没有」。直接给一个
+    // 看得到舞台原点的默认机位。
+    if (!any) return { center: new THREE.Vector3(0, 1.1, 1.5), radius: 3.6 };
+    if (box.isEmpty()) return { center: new THREE.Vector3(0, 1.1, 1.5), radius: 3.6 };
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
     // 下限 2.5 米：只有一个机位时别把镜头怼到机身上，画面上什么都看不出来
@@ -806,6 +878,24 @@ export class StudioViewport {
     };
   }
 
+  /**
+   * 编辑器辅助物（选中环、选中高亮、机位视锥、灯位标记）在导出时**必须关掉**。
+   * 它们是「给你看」的，不是画面内容：之前导出的参考首帧里带着一个亮黄色选中环，
+   * 角色也被选中高亮染成荧光色，拿去当 AI 首帧会直接把这些颜色学进去。
+   */
+  private setEditorOverlaysVisible(on: boolean): void {
+    for (const e of this.entries.values()) {
+      const selected = on && this.session?.selectedId === e.object.id;
+      e.marker.visible = selected;
+      for (const m of e.materials) {
+        m.emissive.set(selected ? SELECT_TINT : "#000000");
+        m.emissiveIntensity = selected ? 0.35 : 0;
+      }
+      for (const l of e.camLines ?? []) l.visible = on && !!this.session?.showFrustum;
+    }
+    for (const h of this.lightHelpers) h.visible = on && !!this.session?.showLights;
+  }
+
   capture(opts: CaptureOptions = {}): string | null {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
@@ -834,6 +924,8 @@ export class StudioViewport {
       this.renderer.setSize(outW, outH, false);
       this.camera.aspect = outW / Math.max(1, outH);
       this.camera.updateProjectionMatrix();
+      // 选中环/高亮/视锥这些编辑器辅助物不该进画面
+      this.setEditorOverlaysVisible(false);
       // 先渲染再读像素，否则拿到黑图
       this.renderer.render(this.scene, this.camera);
       return this.renderer.domElement.toDataURL("image/png") || null;
@@ -842,6 +934,7 @@ export class StudioViewport {
       return null;
     } finally {
       // 无论成败都要还原尺寸、比例与像素比，否则后续画面变形或者糊掉
+      this.setEditorOverlaysVisible(true);
       restore();
     }
   }

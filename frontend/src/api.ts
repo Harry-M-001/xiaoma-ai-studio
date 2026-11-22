@@ -10,6 +10,7 @@ import type {
   AgentWorkspaceMeta,
   ChatSession,
   ComfyWorkflow,
+  ComfyScanItem,
   ConfigImportResult,
   ConfigMap,
   ConfigScopesMeta,
@@ -17,13 +18,10 @@ import type {
   EngineJob,
   EngineLocalTts,
   EnginePageData,
-  HarnessDirs,
-  HarnessStatus,
   InterpolateOptions,
   InterpolateRequest,
   LogExport,
   LogsStatus,
-  McpConfirmation,
   ModalityMeta,
   ModelOption,
   ModelSpec,
@@ -51,6 +49,7 @@ import type {
   CanvasDoc,
   CanvasNodeSchema,
   CanvasNodeStatus,
+  CanvasAgentDraft,
   CanvasAnimaticResult,
   CanvasLint,
   CanvasNodeVersions,
@@ -217,6 +216,7 @@ export const api = {
     first_frame_asset_id?: number | null;
     ratio: string;
     resolution: string;
+    audio_ref_asset_id?: number | null;
   }) => request<PreflightResult>("/api/videos/preflight", { method: "POST", body: json(payload) }),
 
   // 分享：服务端不托管任何内容，这里只做「打包」与「读懂」两件纯事
@@ -284,6 +284,7 @@ export const api = {
     project_id?: number | null;
     agent_project_id?: number | null;
     auto_approve?: boolean;
+    thinking?: boolean;
   }) => request<AgentPayload>("/api/agent/sessions", { method: "POST", body: json(payload) }),
   getAgentSession: (id: number) => request<AgentPayload>(`/api/agent/sessions/${id}`),
   patchAgentSession: (
@@ -294,6 +295,7 @@ export const api = {
       project_id?: number | null;
       agent_project_id?: number | null;
       auto_approve?: boolean;
+      thinking?: boolean;
     }
   ) => request<AgentPayload>(`/api/agent/sessions/${id}`, { method: "PATCH", body: json(payload) }),
   deleteAgentSession: (id: number) =>
@@ -308,13 +310,10 @@ export const api = {
       method: "POST",
       body: json({ step_id: stepId, approve }),
     }),
-  // ---------- dsh sidecar：阻塞式确认门 ----------
-  // 工具调用在 MCP 那一侧挂起，界面轮询这张表；批准动作只在这里，模型拿不到。
-  mcpConfirmations: () => request<{ items: McpConfirmation[] }>("/api/mcp/confirmations"),
-  mcpConfirm: (stepId: number, approve: boolean) =>
-    request<{ ok: boolean }>(`/api/mcp/confirmations/${stepId}`, {
+  /** 停止 `/goal` 的持续监测：当前这次模型调用收尾后请求就结束 */
+  stopAgentGoal: (id: number) =>
+    request<{ ok: boolean; running: boolean }>(`/api/agent/sessions/${id}/goal/stop`, {
       method: "POST",
-      body: json({ approve }),
     }),
   // ---- 导演台 ----
   ffmpegStatus: () => request<{ available: boolean; version: string | null }>("/api/director/ffmpeg"),
@@ -476,6 +475,10 @@ export const api = {
       schemaVersion: number;
       nodeSchemas: Record<string, CanvasNodeSchema>;
     }>("/api/canvas/contract"),
+  // 一句话搭画布：只回草稿，不动画布。落定由前端做（它本来就有画布状态与自动保存）。
+  // 与 Agent 的 draft_canvas 走同一个 planner，这里只是另一个入口。
+  canvasAgentPlan: (payload: { brief: string; model_key?: string }) =>
+    request<CanvasAgentDraft>("/api/canvas/agent/plan", { method: "POST", body: json(payload) }),
   getCanvas: (projectId: number) =>
     request<CanvasDoc>(`/api/canvas/${projectId}`),
   saveCanvas: (projectId: number, doc: CanvasDoc) =>
@@ -577,24 +580,6 @@ export const api = {
   disconnectLocalTts: () =>
     request<EngineLocalTts>("/api/engines/local-tts/disconnect", { method: "POST" }),
 
-  // ---- DeepSeek Harness（可选组件，高级模式）----
-  harnessStatus: () => request<HarnessStatus>("/api/harness/status"),
-  harnessInstall: () =>
-    request<{ job: HarnessStatus["job"] }>("/api/harness/install", { method: "POST" }),
-  harnessStart: (port?: number) =>
-    request<{ ok: boolean; url?: string; error?: string; hint?: string; detail?: string }>(
-      "/api/harness/start",
-      { method: "POST", body: json({ port: port ?? 3080 }) },
-    ),
-  harnessStop: () => request<{ ok: boolean }>("/api/harness/stop", { method: "POST" }),
-  harnessSetWorkspace: (path: string) =>
-    request<{ ok: boolean; path: string }>("/api/harness/workspace", {
-      method: "POST",
-      body: json({ path }),
-    }),
-  harnessDirs: (path = "") =>
-    request<HarnessDirs>(`/api/harness/dirs?path=${encodeURIComponent(path)}`),
-
   // ---- 在线更新 ----
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),
   checkUpdate: () => request<UpdateStatus>("/api/update/check", { method: "POST" }),
@@ -608,6 +593,22 @@ export const api = {
 
   // ---- ComfyUI 工作流 ----
   listComfyWorkflows: () => request<ComfyWorkflow[]>("/api/comfy/workflows"),
+  comfyRoot: () => request<{ root: string }>("/api/comfy/root"),
+  comfySetRoot: (root: string) =>
+    request<{ ok: boolean; root: string }>("/api/comfy/root", {
+      method: "POST",
+      body: json({ root }),
+    }),
+  comfyScan: (root = "") =>
+    request<{ root: string; items: ComfyScanItem[] }>("/api/comfy/scan", {
+      method: "POST",
+      body: json({ root }),
+    }),
+  comfyImport: (paths: string[], providerId?: number) =>
+    request<ComfyWorkflow[]>("/api/comfy/import", {
+      method: "POST",
+      body: json({ paths, provider_id: providerId }),
+    }),
   uploadComfyWorkflow: (file: File) => {
     const fd = new FormData();
     fd.append("file", file);

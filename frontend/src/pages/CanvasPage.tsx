@@ -1,5 +1,7 @@
 import {
   createContext,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -32,22 +34,27 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clapperboard,
   FileText,
   Film,
   ImageIcon,
   Images,
+  Keyboard,
   PanelLeftClose,
   PanelLeftOpen,
   Play,
   Plus,
   RefreshCw,
+  Redo2,
   Save,
   ScanSearch,
   Share2,
   Sparkles,
   Trash2,
+  Undo2,
   Upload,
   Video,
+  Wand2,
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
@@ -55,6 +62,7 @@ import { api } from "../api";
 import type {
   AgentMeta,
   Asset,
+  CanvasAgentDraft,
   CanvasAnimaticReport,
   CanvasRunSummary,
   CanvasDoc,
@@ -93,6 +101,37 @@ import {
 
 /** 自动链文档节点类型（需要调 LLM 写正文） */
 const DOC_KINDS = new Set(["idea", "novel", "script", "storyboard", "assetSheet"]);
+
+/**
+ * 画布快捷键清单：只放**确实实现了**的几项。
+ *
+ * 两条口径：
+ * 1. 单键（N / F / Delete / ?）只在没有弹层、且焦点不在输入框里时生效——
+ *    否则在节点提示词里打一个 f 就会把视图缩走。
+ * 2. 会花钱的动作只能走到「确认」那一步（运行整图先弹花费预览），快捷键不替人点确认。
+ */
+const CANVAS_SHORTCUTS: { label: string; keys: string[] }[] = [
+  { label: "保存画布", keys: ["Ctrl", "S"] },
+  { label: "运行整图（先看花费，再决定）", keys: ["Ctrl", "Enter"] },
+  { label: "复制选中节点", keys: ["Ctrl", "C"] },
+  { label: "剪切选中节点", keys: ["Ctrl", "X"] },
+  { label: "粘贴", keys: ["Ctrl", "V"] },
+  { label: "就地复制一份", keys: ["Ctrl", "D"] },
+  { label: "全选节点", keys: ["Ctrl", "A"] },
+  { label: "撤销", keys: ["Ctrl", "Z"] },
+  { label: "重做", keys: ["Ctrl", "Y"] },
+  { label: "删除选中节点", keys: ["Delete"] },
+  { label: "打开「添加节点」菜单", keys: ["N"] },
+  { label: "适配视图（缩放到全部节点）", keys: ["F"] },
+  { label: "取消选中 / 关闭浮层", keys: ["Esc"] },
+  { label: "打开这份快捷键说明", keys: ["?"] },
+];
+
+/**
+ * 画布里的「3D 导演台」入口：懒加载——three 约 1MB，不开 3D 的人不该为它买单。
+ * 打开后截一张参考首帧，直接变成一个图片节点的参考图。
+ */
+const DirectorStudio3D = lazy(() => import("../director3d/DirectorStudio3D"));
 
 /** 资产设定图的生成范围档位 */
 const ASSET_SCOPES: [string, string][] = [
@@ -816,6 +855,241 @@ function ShareDialog({
                 导入到画布
               </button>
             )
+          )}
+        </div>
+    </Dialog>
+  );
+}
+
+/* ---------------- 一句话搭画布（只出草稿，确认才落定） ---------------- */
+
+const AGENT_EXAMPLES = [
+  "做一个 60 秒竖屏短剧，三幕结构，从一句话创意开始",
+  "只要文字产出：小说到分镜，先不要出图",
+  "角色要立得住：先出资产表做设定图，再逐镜出图",
+];
+
+/** 预览卡片与间距：固定尺寸而不是按后端坐标缩放——7 列的链缩到 460px 宽会糊成一坨 */
+const MINI_COL_W = 106;
+const MINI_ROW_H = 38;
+const MINI_CARD_W = 88;
+const MINI_CARD_H = 26;
+
+/**
+ * 草稿的迷你预览。
+ *
+ * 不按后端坐标等比缩放，而是取「列序 / 行序」重新摆：后端布局本来就是整齐的网格，
+ * 取序号之后无论 3 个节点还是 12 个节点，预览都一样看得清。
+ * 形状忠实（分叉能看出来），尺寸不忠实——这是有意的取舍。
+ */
+function DraftMiniMap({
+  draft,
+  labelOf,
+}: {
+  draft: CanvasAgentDraft;
+  labelOf: (kind: string) => string;
+}) {
+  const xs = [...new Set(draft.nodes.map((n) => n.position.x))].sort((a, b) => a - b);
+  const colOf = new Map(xs.map((x, i) => [x, i]));
+  const byCol = new Map<number, CanvasAgentDraft["nodes"]>();
+  for (const n of draft.nodes) {
+    const c = colOf.get(n.position.x) ?? 0;
+    byCol.set(c, [...(byCol.get(c) ?? []), n]);
+  }
+  const place = new Map<string, { x: number; y: number }>();
+  let maxRows = 1;
+  for (const [col, list] of byCol) {
+    const sorted = [...list].sort((a, b) => a.position.y - b.position.y);
+    maxRows = Math.max(maxRows, sorted.length);
+    sorted.forEach((n, row) => place.set(n.id, { x: col * MINI_COL_W, y: row * MINI_ROW_H }));
+  }
+  const width = Math.max(1, xs.length) * MINI_COL_W;
+  const height = maxRows * MINI_ROW_H;
+
+  return (
+    <div className="agent-mini">
+      <div className="agent-mini-inner" style={{ width, height }}>
+        <svg className="agent-mini-edges" width={width} height={height}>
+          {draft.edges.map((e, i) => {
+            const a = place.get(e.from);
+            const b = place.get(e.to);
+            if (!a || !b) return null;
+            const y1 = a.y + MINI_CARD_H / 2;
+            const y2 = b.y + MINI_CARD_H / 2;
+            const mid = (a.x + MINI_CARD_W + b.x) / 2;
+            return (
+              <path
+                key={i}
+                d={`M ${a.x + MINI_CARD_W} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${b.x} ${y2}`}
+              />
+            );
+          })}
+        </svg>
+        {draft.nodes.map((n) => {
+          const p = place.get(n.id)!;
+          return (
+            <div
+              key={n.id}
+              className="agent-mini-node"
+              style={{ left: p.x, top: p.y, width: MINI_CARD_W, height: MINI_CARD_H }}
+              title={String(n.data.prompt ?? "")}
+            >
+              {labelOf(n.kind)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** 状态 → 这块面板该怎么说话。文案集中在表里，免得散在 JSX 里各写一遍。 */
+const AGENT_FAIL_TITLE: Record<CanvasAgentDraft["status"], string> = {
+  ok: "",
+  need_input: "需求再具体一点",
+  need_credentials: "还没有可用的文本模型",
+  unparsable: "模型没有按格式回答",
+  upstream_error: "调用模型失败",
+};
+
+function AgentDialog({
+  textModels,
+  schemas,
+  onApply,
+  onClose,
+}: {
+  textModels: ModelOption[];
+  schemas: Record<string, CanvasNodeSchema>;
+  onApply: (draft: CanvasAgentDraft) => void;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [brief, setBrief] = useState("");
+  const [modelKey, setModelKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState<CanvasAgentDraft | null>(null);
+
+  const labelOf = (kind: string) => schemas[kind]?.label ?? kind;
+
+  const run = async () => {
+    if (brief.trim().length < 4) {
+      toast.error("先说说你想做什么");
+      return;
+    }
+    setBusy(true);
+    try {
+      setDraft(await api.canvasAgentPlan({ brief: brief.trim(), model_key: modelKey }));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "生成失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const ok = draft?.status === "ok";
+
+  return (
+    <Dialog
+      onClose={onClose}
+      label="AI 搭画布"
+      maskClassName="canvas-dialog-mask"
+      className="canvas-dialog agent"
+    >
+        <div className="canvas-dialog-head">
+          <span className="canvas-dialog-title">一句话搭画布</span>
+          <button type="button" className="canvas-dialog-close" onClick={onClose} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+
+        <div className="agent-body">
+          <div className="field">
+            <label className="field-label">你想要什么</label>
+            <textarea
+              className="input agent-brief"
+              rows={2}
+              autoFocus
+              value={brief}
+              placeholder="例如：做一个 60 秒竖屏短剧，三幕结构，从一句话创意开始"
+              onChange={(e) => setBrief(e.target.value)}
+            />
+            <div className="agent-examples">
+              {AGENT_EXAMPLES.map((ex) => (
+                <button key={ex} type="button" className="agent-example" onClick={() => setBrief(ex)}>
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="field">
+            <label className="field-label">用哪个模型搭（可留空，自动挑一个可用的文本模型）</label>
+            <ModelSelect models={textModels} value={modelKey} onChange={setModelKey} placeholder="自动选择" />
+          </div>
+
+          {draft && (
+            <div className="agent-result">
+              {ok ? (
+                <>
+                  <div className="agent-summary">{draft.summary || "已按你的需求搭好草稿"}</div>
+                  <DraftMiniMap draft={draft} labelOf={labelOf} />
+                  <div className="agent-node-list">
+                    {draft.nodes.map((n) => (
+                      <div key={n.id} className="agent-node-row">
+                        <span className="agent-node-kind">{labelOf(n.kind)}</span>
+                        <span className="agent-node-prompt">{String(n.data.prompt ?? "") || "（未写要求）"}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="agent-fail">
+                  <div className="agent-fail-title">{AGENT_FAIL_TITLE[draft.status]}</div>
+                  {draft.nextAction ? <div className="agent-fail-next">{draft.nextAction}</div> : null}
+                </div>
+              )}
+
+              {draft.warnings.length > 0 && (
+                <ul className="agent-lines warn">
+                  {draft.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
+              {draft.notes.length > 0 && (
+                <>
+                  <div className="agent-lines-title">我对模型给的东西做了这些改动</div>
+                  <ul className="agent-lines">
+                    {draft.notes.map((n, i) => (
+                      <li key={i}>{n}</li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {ok && (
+                <div className="agent-caveat">
+                  这只是草稿：落定之后每个节点的要求都可以再改，也可以先只跑前面几步看看效果。
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="canvas-dialog-foot">
+          <span className="canvas-dialog-hint">
+            {ok ? `${draft.nodes.length} 个节点 · 还没放到画布上` : "生成不影响现有画布 · 与 Agent 里的搭画布是同一份"}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            关闭
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void run()} disabled={busy}>
+            {busy ? <Spinner /> : <Sparkles size={14} />}
+            {draft ? "重新生成" : "生成草稿"}
+          </button>
+          {ok && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => onApply(draft)}>
+              放到画布上
+            </button>
           )}
         </div>
     </Dialog>
@@ -1818,7 +2092,8 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         </div>
       )}
 
-      {features.includes("imageUpload") && videoMode !== "text2video" && !isShotVideoNode && (
+      {/* 图片节点永远有参考图（图生图就是靠它）；视频节点只有「文生视频」不需要 */}
+      {features.includes("imageUpload") && (!isVideo || videoMode !== "text2video") && !isShotVideoNode && (
         <div className="field">
           {videoMode === "first_last" ? (
             <>
@@ -1964,12 +2239,16 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
         )}
         {features.includes("duration") && (
           <div className="field">
-            <label className="field-label">时长（秒）</label>
+            <label className="field-label">
+              时长（秒）
+              <span className="field-hint-inline">3–30 秒，按模型上限</span>
+            </label>
             <input
               className="input"
               type="number"
-              min={1}
-              max={15}
+              min={3}
+              max={30}
+              step={1}
               value={Number(data.duration ?? 5)}
               onChange={(e) => patch({ duration: Number(e.target.value) || 5 })}
             />
@@ -2247,6 +2526,10 @@ function NodeFloatingPanel({ id, data }: { id: string; data: CanvasNodeData }) {
             任务 #{status.taskId} · {STATUS_BADGE[status.status] ?? status.status}
             {status.taskCount && status.taskCount > 1 ? ` · 共 ${status.taskCount} 个任务` : ""}
             {status.error ? <div className="canvas-float-error">{status.error}</div> : null}
+            {status.assetUrl && status.assetKind === "video" && (
+              // 视频产物就地预览：成片/逐镜视频不用再开新标签页
+              <video className="canvas-float-video" src={status.assetUrl} controls preload="metadata" />
+            )}
             {status.assetUrl && status.assetKind !== "document" && (
               <a className="btn btn-ghost btn-sm" href={status.assetUrl} target="_blank" rel="noreferrer">
                 查看产物
@@ -2568,7 +2851,7 @@ function AssetPickerDialog({
 
 function CanvasInner({ projectId, projectName, onBack }: { projectId: number; projectName: string; onBack: () => void }) {
   const toast = useToast();
-  const { screenToFlowPosition, toObject, setCenter, getZoom, getViewport, setViewport } =
+  const { screenToFlowPosition, toObject, setCenter, getZoom, getViewport, setViewport, fitView } =
     useReactFlow();
   const wrapper = useRef<HTMLDivElement>(null);
 
@@ -2589,7 +2872,12 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [assetKind, setAssetKind] = useState<AssetKind>("all");
   const [railTab, setRailTab] = useState<"elements" | "assets">("elements");
   const [addMenu, setAddMenu] = useState<{ x: number; y: number } | null>(null);
+  /** 3D 导演台浮层：记录「从哪个位置打开」，出图后就在那里落节点 */
+  const [studio3d, setStudio3d] = useState<{ x: number; y: number } | null>(null);
+  const [agentOpen, setAgentOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  /** 快捷键说明（按 ? 或点工具栏上的键盘图标打开） */
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [pickerFor, setPickerFor] = useState<{ nodeId: string; slot?: "first" | "last" } | null>(null);
   const [lightbox, setLightbox] = useState<LightboxItem | null>(null);
   const [editorFor, setEditorFor] = useState<DocEditRequest | null>(null);
@@ -2648,21 +2936,27 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     return () => window.removeEventListener("keydown", guard, true);
   }, []);
 
-  // Esc 关闭灯箱 / 图库弹窗 / 添加菜单 / 正文编辑器
+  // Esc 关闭灯箱 / 图库弹窗 / 添加菜单 / 正文编辑器 / 3D 导演台浮层
   useEffect(() => {
-    if (!lightbox && !pickerFor && !addMenu && !editorFor) return;
+    if (!lightbox && !pickerFor && !addMenu && !editorFor && !studio3d) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       setLightbox(null);
       setPickerFor(null);
       setAddMenu(null);
       setEditorFor(null);
+      setStudio3d(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [lightbox, pickerFor, addMenu, editorFor]);
+  }, [lightbox, pickerFor, addMenu, editorFor, studio3d]);
 
   useEffect(() => {
+    // 换画布（或首次进来）期间不记撤销历史：这段里的 nodes 变化是「加载」不是「编辑」
+    loadGuard.current = true;
+    historyRef.current = { past: [], future: [] };
+    lastSnapRef.current = null;
+    setHistoryCounts({ undo: 0, redo: 0 });
     (async () => {
       const [contract, doc, imageModels, videoModels, textModels, agentList, styleList] =
         await Promise.all([
@@ -2678,18 +2972,19 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       setModels([...imageModels, ...videoModels, ...textModels]);
       setAgents(agentList);
       setStyles(styleList);
-      if (doc.nodes?.length) {
-        setNodes(
-          doc.nodes.map((n) => ({
-            id: n.id,
-            type: "contract",
-            position: n.position,
-            data: { ...n.data, schema: contract.nodeSchemas[n.type], nodeType: n.type } as CanvasNodeData,
-          }))
-        );
-        setEdges(doc.edges as Edge[]);
-      }
+      const loadedNodes: Node<CanvasNodeData>[] = (doc.nodes || []).map((n) => ({
+        id: n.id,
+        type: "contract",
+        position: n.position,
+        data: { ...n.data, schema: contract.nodeSchemas[n.type], nodeType: n.type } as CanvasNodeData,
+      }));
+      // 空画布也要显式清空：否则从有节点的画布切到空画布时会留着上一张的节点
+      setNodes(loadedNodes);
+      setEdges((doc.edges || []) as Edge[]);
       setLoaded(true);
+      // 基线从这里开始：下一次真正的编辑才会被记进撤销栈
+      loadGuard.current = false;
+      lastSnapRef.current = { nodes: loadedNodes, edges: (doc.edges || []) as Edge[] };
       try {
         const st = await api.canvasStatus(projectId);
         setStatusMap(st.nodes);
@@ -2740,7 +3035,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   }, [statusMap]);
 
   const addNodeAt = useCallback(
-    (type: string, screenX: number, screenY: number) => {
+    (type: string, screenX: number, screenY: number, extra?: Partial<CanvasNodeData>) => {
       const schema = schemas[type];
       if (!schema) return;
       nodeSeq += 1;
@@ -2754,11 +3049,12 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
           type: "contract",
           position,
           selected: true,
-          data: { prompt: "", schema, nodeType: type } as CanvasNodeData,
+          data: { prompt: "", schema, nodeType: type, ...extra } as CanvasNodeData,
         },
       ]);
       setSelectedId(id);
       setDirty(true);
+      return id;
     },
     [schemas, screenToFlowPosition, setNodes]
   );
@@ -2858,6 +3154,18 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       return added.length;
     },
     [models, schemas, setEdges, setNodes]
+  );
+
+  const applyAgentDraft = useCallback(
+    (draft: CanvasAgentDraft) => {
+      const count = mergeCanvasContent(
+        draft.nodes.map((n) => ({ id: n.id, type: n.kind, position: n.position, data: n.data })),
+        draft.edges.map((e) => ({ source: e.from, target: e.to })),
+      );
+      setAgentOpen(false);
+      toast.success(`已放上 ${count} 个节点，可以逐个改，也可以直接运行`);
+    },
+    [mergeCanvasContent, toast],
   );
 
   const applyImportedDoc = useCallback(
@@ -3109,13 +3417,403 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     }, 3000);
   };
 
+  /**
+   * 删除选中节点：既认右侧面板选中的那一个（`selectedId`），
+   * 也认画布上框选出来的多个（ReactFlow 的 `selected` 标记）。
+   * 键盘删除走的是同一个函数，所以删完一定会标脏、自动保存会接上。
+   */
   const deleteSelected = () => {
-    if (!selectedId) return;
-    setNodes((prev) => prev.filter((n) => n.id !== selectedId));
-    setEdges((prev) => prev.filter((e) => e.source !== selectedId && e.target !== selectedId));
+    const ids = new Set(nodes.filter((n) => n.selected).map((n) => n.id));
+    if (selectedId) ids.add(selectedId);
+    if (ids.size === 0) return;
+    setNodes((prev) => prev.filter((n) => !ids.has(n.id)));
+    setEdges((prev) => prev.filter((e) => !ids.has(e.source) && !ids.has(e.target)));
     setSelectedId(null);
     setDirty(true);
   };
+
+  // ============================================================ 撤销 / 重做
+  //
+  // 做法是**整体快照 + 落定后记一笔**，不是给每个动作写反向操作：
+  // - 拖动、改参数、连线、粘贴、导入都经过 nodes/edges，一处记录就全覆盖；
+  // - 但只在「改动停下来 400ms」后记一次，否则拖一次节点会塞进几十帧；
+  // - 节点的选中态与运行状态不参与比对：轮询刷新状态、点一下选中等都不算一次编辑，
+  //   否则按一次 Ctrl+Z 只是把选中状态倒回去，用户会觉得撤销坏了。
+  type CanvasSnapshot = { nodes: Node<CanvasNodeData>[]; edges: Edge[] };
+  const historyRef = useRef<{ past: CanvasSnapshot[]; future: CanvasSnapshot[] }>({
+    past: [],
+    future: [],
+  });
+  /** 撤销/重做按钮的可用状态：ref 变化不会触发渲染，用这个计数推动 */
+  const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
+  /** 首次加载 / 换画布期间不记历史（否则会把上一张画布塞进这张的撤销栈） */
+  const loadGuard = useRef(true);
+  const lastSnapRef = useRef<CanvasSnapshot | null>(null);
+
+  const snapshotCanvas = (): CanvasSnapshot => ({
+    // 浅拷一层就够：节点自身与 data 在更新时都是整体替换的；
+    // schema 是契约对象，共享同一份引用，不会按快照数量翻倍占内存。
+    nodes: nodesRef.current.map((n) => ({ ...n, data: { ...n.data } })),
+    edges: edgesRef.current.map((e) => ({ ...e })),
+  });
+
+  /** 比对用签名：不看 status（轮询写的）与 selected（点选写的） */
+  const canvasSignature = (snap: CanvasSnapshot) =>
+    JSON.stringify({
+      n: snap.nodes.map((n) => {
+        const { status: _status, schema: _schema, ...rest } = n.data as CanvasNodeData;
+        return [n.id, n.type, n.position.x, n.position.y, rest];
+      }),
+      e: snap.edges.map((e) => [e.id, e.source, e.sourceHandle ?? "", e.target, e.targetHandle ?? ""]),
+    });
+
+  const syncHistoryCounts = () => {
+    setHistoryCounts({
+      undo: historyRef.current.past.length,
+      redo: historyRef.current.future.length,
+    });
+  };
+
+  const applySnapshot = (snap: CanvasSnapshot) => {
+    setNodes(
+      snap.nodes.map((n) => ({
+        ...n,
+        selected: false,
+        // schema 是运行时缓存：按当前契约取一份，老快照里那份可能已经过期
+        data: {
+          ...n.data,
+          schema: schemas[String(n.data.nodeType || "")] ?? n.data.schema,
+        } as CanvasNodeData,
+      }))
+    );
+    setEdges(snap.edges.map((e) => ({ ...e, selected: false })));
+    setSelectedId(null);
+    setDirty(true);
+  };
+
+  const undo = () => {
+    const h = historyRef.current;
+    const prev = h.past.pop();
+    if (!prev) {
+      toast.info("没有可撤销的操作");
+      return;
+    }
+    h.future.push(snapshotCanvas());
+    applySnapshot(prev);
+    // 让监听把「恢复后的状态」当成新基线，别再记一笔，否则一撤销就多出一条历史
+    lastSnapRef.current = prev;
+    syncHistoryCounts();
+    toast.info("已撤销");
+  };
+
+  const redo = () => {
+    const h = historyRef.current;
+    const next = h.future.pop();
+    if (!next) {
+      toast.info("没有可重做的操作");
+      return;
+    }
+    h.past.push(snapshotCanvas());
+    applySnapshot(next);
+    lastSnapRef.current = next;
+    syncHistoryCounts();
+    toast.info("已重做");
+  };
+
+  // 改动停下来 400ms 记一笔（比自动保存的 1s 更早，撤销拿到的才是上一版）
+  useEffect(() => {
+    if (!loaded || loadGuard.current) return;
+    const timer = window.setTimeout(() => {
+      if (loadGuard.current) return;
+      const snap = snapshotCanvas();
+      const prev = lastSnapRef.current;
+      if (!prev) {
+        lastSnapRef.current = snap;
+        return;
+      }
+      if (canvasSignature(prev) === canvasSignature(snap)) {
+        // 只是选中 / 状态变了：更新基线，但不记历史
+        lastSnapRef.current = snap;
+        return;
+      }
+      const h = historyRef.current;
+      h.past.push(prev);
+      if (h.past.length > 50) h.past.shift();
+      h.future = [];
+      lastSnapRef.current = snap;
+      syncHistoryCounts();
+    }, 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, edges, loaded]);
+
+  /**
+   * 内部剪贴板：只在这一页里用，不碰系统剪贴板。
+   *
+   * 理由：画布节点是带 schema / 端口 / 运行状态的内部结构，粘到别处没有意义；
+   * 反过来，从别处复制一段文字再按 Ctrl+V 时，也不该突然在画布上多出几个节点。
+   */
+  const clipRef = useRef<{ nodes: Node<CanvasNodeData>[]; edges: Edge[] }>({ nodes: [], edges: [] });
+  /** 连续粘贴时逐次错开，避免叠在一起看不出来 */
+  const pasteTimes = useRef(0);
+
+  /** 复制/剪切/删除都认「面板选中的那一个 + 画布上框选的」 */
+  const pickedNodes = () => nodes.filter((n) => n.selected || n.id === selectedId);
+
+  const copySelection = () => {
+    const picked = pickedNodes();
+    if (picked.length === 0) {
+      toast.info("先选中要复制的节点");
+      return false;
+    }
+    const ids = new Set(picked.map((n) => n.id));
+    clipRef.current = {
+      // 深拷一份 data：节点自带的参数对象是引用，不拷的话改副本会连原件一起改。
+      // 同时去掉两个运行时字段——schema 粘贴时按当前契约重取，status 属于原节点那一次运行。
+      nodes: picked.map((n) => {
+        const { schema: _schema, status: _status, ...rest } = n.data as CanvasNodeData;
+        return {
+          ...n,
+          selected: false,
+          data: JSON.parse(JSON.stringify(rest)) as CanvasNodeData,
+        };
+      }),
+      // 只带「两端都在选区内」的连线；跨选区的线不复制，免得粘出一个半截链
+      edges: edges.filter((e) => ids.has(e.source) && ids.has(e.target)).map((e) => ({ ...e })),
+    };
+    pasteTimes.current = 0;
+    toast.success(`已复制 ${picked.length} 个节点`);
+    return true;
+  };
+
+  const pasteClipboard = () => {
+    const clip = clipRef.current;
+    if (clip.nodes.length === 0) {
+      toast.info("剪贴板里还没有节点：先选中再 Ctrl+C");
+      return 0;
+    }
+    pasteTimes.current += 1;
+    const offset = 36 * pasteTimes.current;
+    const stamp = `${Date.now().toString(36)}${pasteTimes.current}`;
+    const idMap = new Map<string, string>();
+    const added = clip.nodes.map((n, i) => {
+      const id = `n${stamp}_${i}`;
+      idMap.set(n.id, id);
+      const kind = String(n.data.nodeType || "");
+      return {
+        ...n,
+        id,
+        position: { x: n.position.x + offset, y: n.position.y + offset },
+        selected: true,
+        // schema 是运行时缓存（端口/参数契约），粘贴时按当前契约重新取一份
+        data: { ...n.data, schema: schemas[kind] ?? n.data.schema },
+      } as Node<CanvasNodeData>;
+    });
+    const addedEdges: Edge[] = clip.edges.map((e, i) => ({
+      ...e,
+      id: `e${stamp}_${i}`,
+      source: idMap.get(e.source) as string,
+      target: idMap.get(e.target) as string,
+      selected: false,
+    }));
+    // 旧节点取消选中、新节点选中：粘完直接可以继续拖或再粘一次
+    setNodes((prev) => [
+      ...prev.map((n) => (n.selected ? { ...n, selected: false } : n)),
+      ...added,
+    ]);
+    setEdges((prev) => [...prev, ...addedEdges]);
+    setSelectedId(added[0]?.id ?? null);
+    setDirty(true);
+    return added.length;
+  };
+
+  /** 就地复制：先按当前选区刷新剪贴板再粘一份，连按几次会一级级错开 */
+  const duplicateSelection = () => {
+    if (!copySelection()) return;
+    pasteClipboard();
+  };
+
+  const selectAllNodes = () => {
+    if (nodes.length === 0) return;
+    setNodes((prev) => prev.map((n) => (n.selected ? n : { ...n, selected: true })));
+  };
+
+  /**
+   * 画布快捷键的动作都放在 ref 里：监听只挂一次，
+   * 每轮渲染只更新 ref，避免因为轮询重渲染把监听反复拆装。
+   */
+  const shortcutActions = useRef<{
+    save: () => void;
+    run: () => void;
+    del: () => void;
+    hasSelection: () => boolean;
+    addNode: () => void;
+    fit: () => void;
+    deselect: () => void;
+    copy: () => void;
+    cut: () => void;
+    paste: () => void;
+    duplicate: () => void;
+    selectAll: () => void;
+    undo: () => void;
+    redo: () => void;
+  }>({
+    save: () => {},
+    run: () => {},
+    del: () => {},
+    hasSelection: () => false,
+    addNode: () => {},
+    fit: () => {},
+    deselect: () => {},
+    copy: () => {},
+    cut: () => {},
+    paste: () => {},
+    duplicate: () => {},
+    selectAll: () => {},
+    undo: () => {},
+    redo: () => {},
+  });
+  shortcutActions.current = {
+    save: () => {
+      if (!saving) void saveDoc();
+    },
+    run: () => {
+      if (!running) void runAll();
+    },
+    del: deleteSelected,
+    hasSelection: () =>
+      Boolean(selectedId) || nodesRef.current.some((n) => n.selected),
+    addNode: () => setAddMenu({ x: window.innerWidth / 2 - 110, y: 180 }),
+    fit: () => {
+      void fitView({ padding: 0.2, duration: 300 });
+    },
+    deselect: () => {
+      setSelectedId(null);
+      setNodes((prev) => (prev.some((n) => n.selected) ? prev.map((n) => ({ ...n, selected: false })) : prev));
+    },
+    copy: copySelection,
+    cut: () => {
+      if (!copySelection()) return;
+      deleteSelected();
+    },
+    paste: () => {
+      pasteClipboard();
+    },
+    duplicate: duplicateSelection,
+    selectAll: selectAllNodes,
+    undo,
+    redo,
+  };
+
+  /** 有弹层时，单键快捷键让位（弹窗自己的 Esc 由 Dialog 管） */
+  const overlayOpen = Boolean(
+    addMenu || lightbox || pickerFor || editorFor || studio3d || agentOpen || shareOpen ||
+    runPreview || lintReport || runReport || shortcutsOpen
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing = Boolean(
+        el &&
+          (el.tagName === "INPUT" ||
+            el.tagName === "TEXTAREA" ||
+            el.tagName === "SELECT" ||
+            el.isContentEditable)
+      );
+      const mod = e.metaKey || e.ctrlKey;
+      const key = e.key.toLowerCase();
+
+      // ? 随时能开说明；输入框里的 ? 就是一个问号
+      if (!typing && !mod && e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
+        return;
+      }
+      if (mod && key === "s") {
+        e.preventDefault();
+        void shortcutActions.current.save();
+        return;
+      }
+      if (mod && e.key === "Enter") {
+        e.preventDefault();
+        void shortcutActions.current.run();
+        return;
+      }
+      // 输入框里的 Ctrl+C/V 就是普通复制粘贴，别抢
+      if (typing) return;
+      // 弹层开着时，编辑类快捷键让位（避免在弹窗背后改画布）
+      if (overlayOpen) return;
+      if (mod) {
+        if (key === "c") {
+          e.preventDefault();
+          shortcutActions.current.copy();
+          return;
+        }
+        if (key === "x") {
+          e.preventDefault();
+          shortcutActions.current.cut();
+          return;
+        }
+        if (key === "v") {
+          e.preventDefault();
+          shortcutActions.current.paste();
+          return;
+        }
+        if (key === "d") {
+          e.preventDefault();
+          shortcutActions.current.duplicate();
+          return;
+        }
+        if (key === "a") {
+          e.preventDefault();
+          shortcutActions.current.selectAll();
+          return;
+        }
+        if (key === "z") {
+          // Ctrl+Z 撤销；Ctrl+Shift+Z 也当地道的「重做」（部分用户更习惯这个）
+          e.preventDefault();
+          if (e.shiftKey) shortcutActions.current.redo();
+          else shortcutActions.current.undo();
+          return;
+        }
+        if (key === "y") {
+          e.preventDefault();
+          shortcutActions.current.redo();
+          return;
+        }
+        // 其它组合键（Ctrl+滚轮缩放等）原样交给浏览器
+        return;
+      }
+      if (e.altKey) return;
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (shortcutActions.current.hasSelection()) {
+          // 捕获阶段就拦下：别让 ReactFlow 先删一遍（那样不会标脏）
+          e.preventDefault();
+          e.stopPropagation();
+          shortcutActions.current.del();
+        }
+        return;
+      }
+      if (key === "n") {
+        e.preventDefault();
+        shortcutActions.current.addNode();
+        return;
+      }
+      if (key === "f") {
+        e.preventDefault();
+        shortcutActions.current.fit();
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        shortcutActions.current.deselect();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [overlayOpen]);
 
   const updateNodeData = useCallback((id: string, patch: Partial<CanvasNodeData>) => {
     setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)));
@@ -3448,6 +4146,14 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             </button>
             <button
               className="btn btn-ghost btn-sm"
+              onClick={() => setAgentOpen(true)}
+              title="用一句话描述你想要什么，让 AI 把节点拓扑搭出来（只出草稿，确认后才落到画布上）"
+            >
+              <Wand2 size={14} />
+              一句话搭画布
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
               onClick={() => setShareOpen(true)}
               title="把这个画布分享给别人（分享码或 .json 文件），或导入别人分享的画布"
             >
@@ -3465,6 +4171,14 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             <button className="btn btn-ghost btn-sm" onClick={refreshStatus} title="刷新节点状态">
               <RefreshCw size={14} />
             </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setShortcutsOpen(true)}
+              title="快捷键（按 ? 也能打开）"
+              aria-label="画布快捷键"
+            >
+              <Keyboard size={14} />
+            </button>
             {/* 体检放在「花钱之前」的位置：它零成本，但能省下一整轮逐镜生成的钱 */}
             <button
               className="btn btn-ghost btn-sm"
@@ -3475,7 +4189,30 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
               {linting ? <Spinner /> : <ScanSearch size={14} />}
               体检
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={deleteSelected} disabled={!selectedId} title="删除选中节点">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={undo}
+              disabled={historyCounts.undo === 0}
+              title="撤销（Ctrl+Z）"
+              aria-label="撤销"
+            >
+              <Undo2 size={14} />
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={redo}
+              disabled={historyCounts.redo === 0}
+              title="重做（Ctrl+Y）"
+              aria-label="重做"
+            >
+              <Redo2 size={14} />
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={deleteSelected}
+              disabled={!selectedId && !nodes.some((n) => n.selected)}
+              title="删除选中节点（Delete）"
+            >
               <Trash2 size={14} />
             </button>
             <button className="btn btn-primary btn-sm" onClick={() => void saveDoc()} disabled={saving || !loaded}>
@@ -3562,7 +4299,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                 </div>
               )}
 
-              <div className="canvas-palette-hint">双击画布空白处添加节点；点节点在下方配置与运行。</div>
+              <div className="canvas-palette-hint">双击画布空白处添加节点；点节点在下方配置与运行。按 ? 看快捷键。</div>
             </div>
           )}
 
@@ -3607,6 +4344,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                   draggingRef.current = false;
                 }}
                 zoomOnDoubleClick={false}
+                // 删除统一走页面的快捷键处理：删完要标脏，ReactFlow 自带的删除不会
+                deleteKeyCode={null}
                 onlyRenderVisibleElements
                 connectionRadius={28}
                 fitView
@@ -3629,9 +4368,21 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
                 }}
               >
                 <div className="canvas-addmenu-title">添加节点</div>
+                {/* 3D 导演台不是一种节点：它负责「摆位 → 截参考首帧」，出图后落成图片节点 */}
+                <button
+                  className="canvas-addmenu-item"
+                  onClick={() => {
+                    setStudio3d({ x: addMenu.x, y: addMenu.y });
+                    setAddMenu(null);
+                  }}
+                >
+                  <Clapperboard size={13} />
+                  <span>3D 导演台</span>
+                  <em>摆位取景，截一张参考首帧放进画布</em>
+                </button>
                 {Object.entries(schemas)
-                  // 配方节点（如旧分镜图）不再作为新节点入口，统一用承载它的原语
-                  .filter(([, s]) => !s.hidden)
+                  // 配方节点与「只给 Agent/自动链用」的节点不再作为手工入口
+                  .filter(([, s]) => !s.hidden && !s.menuHidden)
                   .map(([type, s]) => (
                     <button
                       key={type}
@@ -3650,6 +4401,37 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             </>
           )}
         </div>
+
+        {agentOpen && (
+          <AgentDialog
+            textModels={models.filter((m) => m.modality === "text")}
+            schemas={schemas}
+            onApply={applyAgentDraft}
+            onClose={() => setAgentOpen(false)}
+          />
+        )}
+
+        {studio3d && (
+          <div className="canvas-3d-mask">
+            <div className="canvas-3d-modal">
+              <Suspense fallback={<div className="director-3d-loading">正在加载 3D 模块…</div>}>
+                <DirectorStudio3D
+                  // 场景跟着项目走：同一个项目下次打开还是上次摆的那个场面
+                  scope={`canvas-${projectId}`}
+                  onClose={() => setStudio3d(null)}
+                  onUseAsset={(asset) => {
+                    // 出图即成品：直接落成图片节点，那张图当参考首帧
+                    addNodeAt("image", studio3d.x, studio3d.y, {
+                      refImages: [{ id: asset.id, url: asset.url }],
+                    });
+                    setStudio3d(null);
+                    toast.success("已把参考首帧放进画布");
+                  }}
+                />
+              </Suspense>
+            </div>
+          </div>
+        )}
 
         {pickerFor && (
           <AssetPickerDialog
@@ -3708,6 +4490,42 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
         )}
 
         {lintReport && <LintDialog report={lintReport} onClose={() => setLintReport(null)} />}
+
+        {shortcutsOpen && (
+          <Dialog
+            onClose={() => setShortcutsOpen(false)}
+            label="画布快捷键"
+            maskClassName="canvas-dialog-mask"
+            className="canvas-dialog canvas-shortcuts-dialog"
+          >
+            <div className="canvas-dialog-head">
+              <span className="canvas-dialog-title">画布快捷键</span>
+              <button
+                type="button"
+                className="canvas-dialog-close"
+                onClick={() => setShortcutsOpen(false)}
+                title="关闭"
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <div className="canvas-shortcuts">
+              {CANVAS_SHORTCUTS.map((row) => (
+                <div key={row.label} className="canvas-shortcut-row">
+                  <span className="canvas-shortcut-label">{row.label}</span>
+                  <span className="canvas-shortcut-keys">
+                    {row.keys.map((k) => (
+                      <kbd key={k}>{k}</kbd>
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="canvas-dialog-foot muted">
+              输入框聚焦时，Ctrl+C / V 交给输入框本身；单键快捷键也不生效（避免把提示词里的字母当成命令）。复制的是节点与其内部连线，连续粘贴会逐次错开。运行整图只会打开花费预览，不会替你点确认。
+            </div>
+          </Dialog>
+        )}
 
         {lightbox && (
           <Dialog

@@ -73,14 +73,17 @@ register(
     "dashscope",
     lambda base_url, api_key: DashScopeAdapter(base_url, api_key),
     "阿里百炼 DashScope",
-    "可灵 Kling v3 系列 / 通义万相 wan2.7 系列在此接入；模型名如 kling/kling-v3-omni-video-generation、wan2.7-i2v-2026-04-25。",
+    "图片 wan2.7-image / wan2.7-image-pro；视频 wan3.0-video、wan2.7 系列、可灵 4.0/3.0 在此接入；"
+    "模型名如 wan3.0-video、kling/kling-v4-video-generation、wan2.7-i2v。"
+    "可灵只在华北2（北京）提供；参考视频/音频只收公网 URL。",
 )
 register(
     "kie",
     lambda base_url, api_key: KieAdapter(base_url, api_key),
-    "KIE 异步任务（图片）",
+    "KIE 异步任务（图片/视频）",
     "统一任务接口（createTask → recordInfo）。Base URL 填 https://api.kie.ai；"
-    "模型名如 bytedance/seedream-v4-text-to-image。文本对话请另建一条「OpenAI 兼容」服务。",
+    "图片如 seedream/5-flash-text-to-image、nano-banana-2；视频如 bytedance/seedance-2-5、"
+    "kling-4.0/keyframe-to-video（需首帧）、wan/3-0-video。文本对话请另建一条「OpenAI 兼容」服务。",
 )
 register(
     "comfyui",

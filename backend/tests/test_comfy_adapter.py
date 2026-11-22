@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.providers import comfyui
 from app.providers.comfyui import ComfyUIAdapter
-from app.services.comfy_workflow_service import classify_artifact
+from app.services.comfy_workflow_service import classify_artifact, parse_workflow
 
 
 class _FakeResp:
@@ -68,6 +68,40 @@ def test_classify_artifact_by_extension():
     assert classify_artifact("clip.mov") == "video"
     assert classify_artifact("voice.flac") == "other"
     assert classify_artifact("noext") == "other"
+
+
+def test_workflow_values_map_size_duration_and_leave_sampling_alone():
+    """工作流当模型时，只有「多大 / 多长」跟着节点走；采样器用工作流自己的。
+
+    实测踩过两个坑：
+    - 参数 key 是 `节点id_字段`，以前按裸字段判断，宽高从来没传进去过；
+    - 视频只传了提示词，length 一直是工作流写死的 33 帧（2 秒），
+      节点上填的 6 秒完全不生效。
+    """
+    params = [
+        {"key": "4_width", "field": "width", "type": "number", "default": 768},
+        {"key": "4_height", "field": "height", "type": "number", "default": 768},
+        {"key": "4_batch_size", "field": "batch_size", "type": "number", "default": 1},
+        {"key": "5_steps", "field": "steps", "type": "number", "default": 20},
+        {"key": "6_fps", "field": "fps", "type": "number", "default": 16},
+        {"key": "6_length", "field": "length", "type": "number", "default": 33},
+        {"key": "7_width", "field": "width", "type": "number", "default": 480},
+        {"key": "7_height", "field": "height", "type": "number", "default": 320},
+    ]
+    adapter = ComfyUIAdapter("http://127.0.0.1:8188", "", params=params)
+
+    image_values = adapter._values_for("1024x768", 2)
+    assert image_values["4_width"] == 1024
+    assert image_values["4_height"] == 768
+    assert image_values["4_batch_size"] == 2
+    assert "5_steps" not in image_values, "采样参数不该被节点覆盖"
+
+    video_values = adapter._video_values(8, "9:16", "480p")
+    assert video_values["7_width"] == 256  # 480 * 9/16 = 270 → 向下取 16 的倍数
+    assert video_values["7_height"] == 480
+    # 8 秒 × 16fps = 128 帧；Wan 的 length 要是 4n+1
+    assert video_values["6_length"] == 129
+    assert "5_steps" not in video_values
     assert classify_artifact("") == "other"
 
 
@@ -236,6 +270,68 @@ def test_submit_error_generic_when_only_type():
     msg, detail = comfyui._describe_submit_error(resp)
     assert "no_prompt" in msg
     assert "no_prompt" in detail
+
+
+def test_bound_workflow_serves_as_an_image_model():
+    """「工作流即模型」：绑定工作流后，图片页可以直接把 comfy:<id> 当模型用。"""
+    graph = {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "sd.safetensors"}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "低质量", "clip": ["4", 1]}},
+        "3": {"class_type": "KSampler", "inputs": {
+            "seed": 1, "steps": 20, "cfg": 7.0, "sampler_name": "euler", "scheduler": "normal",
+            "denoise": 1.0, "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0],
+            "latent_image": ["5", 0],
+        }},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "ComfyUI", "images": ["8", 0]}},
+    }
+    parsed = parse_workflow(graph)
+
+    class _Resp:
+        def __init__(self, payload=None, content: bytes = b"") -> None:
+            self.status_code = 200
+            self._payload = payload if payload is not None else {}
+            self.content = content
+            self.text = ""
+
+        def json(self):
+            return self._payload
+
+    class _Routed:
+        async def post(self, url: str, **_kw):
+            assert url.endswith("/prompt")
+            return _Resp({"prompt_id": "p1"})
+
+        async def get(self, url: str, **_kw):
+            if "/history/" in url:
+                return _Resp({
+                    "p1": {
+                        "status": {"status_str": "success", "completed": True, "messages": []},
+                        "outputs": {"9": {"images": [
+                            {"filename": "ComfyUI_00001_.png", "subfolder": "", "type": "output"}
+                        ]}},
+                    }
+                })
+            return _Resp({}, b"PNGDATA")
+
+    adapter = ComfyUIAdapter(
+        "http://127.0.0.1:8188", "", workflow=graph, params=parsed["paramMap"]
+    )
+
+    async def fake_client():
+        return _Routed()
+
+    adapter.client = fake_client  # type: ignore[method-assign]
+
+    async def fake_wait(prompt_id: str, timeout: float = 300.0):
+        return await adapter.poll_workflow(prompt_id)
+
+    adapter._wait_workflow = fake_wait  # type: ignore[method-assign]
+
+    out = asyncio.run(adapter.generate_image(model="comfy:1", prompt="猫", size="512x512"))
+    assert out == [b"PNGDATA"]
 
 
 if __name__ == "__main__":

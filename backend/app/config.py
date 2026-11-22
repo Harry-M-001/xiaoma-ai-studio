@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # 可选访问口令；留空表示免登录（纯本机使用）
     APP_PASSWORD: str = ""
 
+    # 高级模式（dsh sidecar）：默认关闭。
+    # 这是个给极客用的实验能力（Shell / 文件 / 子 Agent），普通用户不该看到入口；
+    # 设 XMS_HARNESS=1 才挂载 /api/mcp 与 /api/harness 两组接口。
+    XMS_HARNESS: bool = False
+
     # 前端构建产物目录（生产模式由后端托管）
     FRONTEND_DIST: str = str(_DEFAULT_DIST)
 

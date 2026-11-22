@@ -295,8 +295,8 @@ def test_storyboard_image_node_contract():
     assert schema["handles"]["sources"][0]["type"] == "image"
 
 
-def test_image_group_is_the_generic_fanout_primitive():
-    """图片组是通用原语：分镜图是它的旧配方，两者都走同一段扇出执行。"""
+def test_storyboard_image_is_the_user_facing_fanout_node():
+    """对外的批量出图入口是「分镜图」；图片组退回内部实现，两者走同一段扇出执行。"""
     assert is_image_group("imageGroup") is True
     assert is_image_group("storyboardImage") is False
     assert is_fanout_image("imageGroup") is True
@@ -304,18 +304,19 @@ def test_image_group_is_the_generic_fanout_primitive():
     assert is_fanout_image("image") is False
     assert set(FANOUT_IMAGE_KINDS) == {"imageGroup", "storyboardImage"}
     assert is_batch_image("imageGroup") is True
+    assert is_batch_image("storyboardImage") is True
 
-    schema = NODE_SCHEMAS["imageGroup"]
+    schema = NODE_SCHEMAS["storyboardImage"]
     assert schema["category"] == "image"
-    assert schema["label"] == "图片组"
+    assert schema["label"] == "分镜图"
     for feature in ("styleSelect", "shotLimit", "modelSelect", "imageSize", "sampleCount"):
         assert feature in schema["features"], feature
-    # 样片与分镜表同源：图片组也能出
+    # 样片与分镜表同源：分镜图也能出
     assert "animatic" in schema["features"]
-    # 分镜图已收成配方：不再作为新建入口，但存量画布仍按原类型执行
+    # 分镜图是对外入口；图片组退成内部原语（不再出现在新建菜单）
     assert not schema.get("hidden")
-    assert NODE_SCHEMAS["storyboardImage"].get("hidden") is True
-    assert NODE_SCHEMAS["storyboardImage"].get("presetOf") == "imageGroup"
+    assert NODE_SCHEMAS["imageGroup"].get("hidden") is True
+    assert NODE_SCHEMAS["imageGroup"].get("presetOf") == "storyboardImage"
 
 
 def test_style_select_only_on_expected_nodes():

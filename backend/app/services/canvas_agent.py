@@ -222,8 +222,8 @@ def build_system_prompt(
         "【常见需求的搭法】",
         "- 只要文字产出：idea → novel → script → storyboard",
         "- 还要看到画面：再接 assetSheet → assetImage（角色/场景设定图），",
-        "  或 storyboard → imageGroup（逐镜出图；图片组就是通用的逐行出图原语）",
-        "- 还要出片子：imageGroup 之后接 video（params 里给 shotVideo: chain，逐镜出片并首尾相连）",
+        "  或 storyboard → storyboardImage（分镜图：逐镜出图，一个节点产出 N 张）",
+        "- 还要出片子：storyboardImage 之后接 video（params 里给 shotVideo: chain，逐镜出片并首尾相连）",
     ]
     if styles:
         lines += ["", "【可选风格卡】用户明确提到风格时才填 params.styleKey（多个节点都填同一个）："]

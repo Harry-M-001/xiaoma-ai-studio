@@ -25,7 +25,7 @@ sys.path.insert(0, str(BACKEND))
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
 from app.database import Base  # noqa: E402
-from app.models import Asset, Task  # noqa: E402
+from app.models import Asset, ProviderService, Task  # noqa: E402
 from app.schemas import (  # noqa: E402
     ImageBatchPreflightIn,
     ImagePreflightIn,
@@ -295,6 +295,86 @@ def test_text_to_video_has_no_first_frame_warning():
             first_frame_asset_id=None, ratio="9:16", resolution="1080p",
         )
         assert not any(c.startswith("video.first_frame") for c in _codes(r)), _codes(r)
+        return True
+
+    assert _run(case) is True
+
+
+def test_audio_ref_on_a_model_that_does_not_support_it_warns():
+    """1.0 不认对白音轨：提交前就该说清，而不是等上游 400 再翻译。"""
+
+    async def case(db):
+        svc = ProviderService(
+            name="火山方舟 Ark", kind="ark",
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            api_key_enc="x", enabled=True, models_json="[]",
+        )
+        db.add(svc)
+        voice = Asset(kind="audio", filename="2026-09/voice.wav", original_name="对白",
+                      content_type="audio/wav", source="generated")
+        db.add(voice)
+        await db.commit()
+        await db.refresh(svc)
+        await db.refresh(voice)
+
+        r = await preflight.check_video(
+            db, prompt="镜头缓缓推近", model_key=f"{svc.id}:doubao-seedance-1-0-pro-250528",
+            audio_ref_asset_id=voice.id,
+        )
+        w = _by_code(r, "video.audio_ref_unsupported")
+        assert w is not None, f"1.0 + 对白音轨应当告警，实际 {_codes(r)}"
+        assert "1.5 pro" in w.suggestion and "对白音轨" in w.suggestion
+        return True
+
+    assert _run(case) is True
+
+
+def test_audio_ref_on_a_supported_model_is_quiet():
+    async def case(db):
+        svc = ProviderService(
+            name="火山方舟 Ark", kind="ark",
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            api_key_enc="x", enabled=True, models_json="[]",
+        )
+        db.add(svc)
+        voice = Asset(kind="audio", filename="2026-09/voice.wav", original_name="对白",
+                      content_type="audio/wav", source="generated")
+        db.add(voice)
+        await db.commit()
+        await db.refresh(svc)
+        await db.refresh(voice)
+
+        r = await preflight.check_video(
+            db, prompt="镜头缓缓推近", model_key=f"{svc.id}:doubao-seedance-2-0-pro-261111",
+            audio_ref_asset_id=voice.id,
+        )
+        assert "video.audio_ref_unsupported" not in _codes(r), _codes(r)
+        return True
+
+    assert _run(case) is True
+
+
+def test_audio_ref_warning_is_ark_only():
+    """别家的模型名撞上「seedance-1-0」也不该被这条名单误伤——适配器会在提交时自己报。"""
+
+    async def case(db):
+        svc = ProviderService(
+            name="KIE（图片/视频·异步）", kind="kie", base_url="https://api.kie.ai",
+            api_key_enc="x", enabled=True, models_json="[]",
+        )
+        db.add(svc)
+        voice = Asset(kind="audio", filename="2026-09/voice.wav", original_name="对白",
+                      content_type="audio/wav", source="generated")
+        db.add(voice)
+        await db.commit()
+        await db.refresh(svc)
+        await db.refresh(voice)
+
+        r = await preflight.check_video(
+            db, prompt="镜头缓缓推近", model_key=f"{svc.id}:doubao-seedance-1-0-pro",
+            audio_ref_asset_id=voice.id,
+        )
+        assert "video.audio_ref_unsupported" not in _codes(r), _codes(r)
         return True
 
     assert _run(case) is True

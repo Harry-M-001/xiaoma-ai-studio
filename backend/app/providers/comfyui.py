@@ -10,14 +10,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
+from urllib.parse import urlencode
 
 import httpx
 
 from app.providers.base import (
     AdapterError,
+    AudioRef,
     BaseAdapter,
     SpeechResult,
     VideoStatus,
@@ -25,7 +28,7 @@ from app.providers.base import (
     unsupported,
     url_host,
 )
-from app.services.comfy_workflow_service import classify_artifact
+from app.services.comfy_workflow_service import apply_params, classify_artifact
 
 
 def _describe_failure(status_info: dict[str, Any]) -> str:
@@ -134,8 +137,141 @@ def _describe_submit_error(resp: httpx.Response) -> tuple[str, str]:
 class ComfyUIAdapter(BaseAdapter):
     kind = "comfyui"
 
+    def __init__(
+        self,
+        base_url: str = "",
+        api_key: str = "",
+        *,
+        workflow: dict[str, Any] | None = None,
+        params: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """`workflow` / `params` 只在使用「工作流即模型」时传入。
+
+        普通连接测试、画布工作流节点仍然是 stateless 的：它们自己带着图调用
+        `submit_workflow`。绑定工作流时，适配器才具备 generate_image / submit_video
+        这两条通用能力。
+        """
+        super().__init__(base_url, api_key)
+        self.workflow = workflow
+        self.params = params or []
+
     def headers(self) -> dict[str, str]:
         return {}  # 本地服务无鉴权
+
+    def _bound_workflow(self) -> dict[str, Any]:
+        if not isinstance(self.workflow, dict) or not self.workflow:
+            raise unsupported("直接生成（这个 ComfyUI 服务没有绑定工作流）")
+        return self.workflow
+
+    def _params_for(self, field: str) -> list[dict[str, Any]]:
+        """同一字段可能出现在多个节点上（图片 latent + 视频 latent 都有 width）。"""
+        return [p for p in self.params if str(p.get("field") or "") == field]
+
+    def _values_for(self, size: str, n: int) -> dict[str, Any]:
+        """只填工作流里真实存在的参数：宽高 / 张数。
+
+        注意 key 是 `节点id_字段`（如 `5_width`），不是裸字段名——以前按裸字段
+        判断，结果宽高从来没传进去过（工作流一直用图里写死的尺寸）。
+        """
+        values: dict[str, Any] = {}
+        try:
+            w, h = (int(x) for x in str(size).lower().split("x", 1))
+        except (TypeError, ValueError):
+            w = h = 0
+        if w:
+            for p in self._params_for("width"):
+                values[str(p["key"])] = w
+        if h:
+            for p in self._params_for("height"):
+                values[str(p["key"])] = h
+        if n > 1:
+            for p in self._params_for("batch_size"):
+                values[str(p["key"])] = int(n)
+        return values
+
+    @staticmethod
+    def _video_size(resolution: str, ratio: str) -> tuple[int, int]:
+        """分辨率档位 + 画幅 → 宽高（按 16 对齐）。认不出返回 (0, 0)。"""
+        heights = {"480p": 480, "720p": 720, "1080p": 1080, "2160p": 2160}
+        height = heights.get(str(resolution or "").lower(), 0)
+        if not height:
+            return 0, 0
+        try:
+            rw, rh = (int(x) for x in str(ratio or "").split(":", 1))
+        except (TypeError, ValueError):
+            rw, rh = 16, 9
+        if rw <= 0 or rh <= 0:
+            rw, rh = 16, 9
+        width = round(height * rw / rh)
+        return max(16, width // 16 * 16), max(16, height // 16 * 16)
+
+    def _video_values(self, duration: int, ratio: str, resolution: str) -> dict[str, Any]:
+        """时长 / 画幅 → 工作流里的 width/height/length。
+
+        采样器（步数/CFG/采样器）**不动**：那是工作流作者调好的，交给工作流原值。
+        只把用户真正会改的两件事映射出去：出多长、出多大。
+        """
+        values: dict[str, Any] = {}
+
+        width, height = self._video_size(resolution, ratio)
+        if width and height:
+            for p in self._params_for("width"):
+                values[str(p["key"])] = width
+            for p in self._params_for("height"):
+                values[str(p["key"])] = height
+
+        fps = 16.0
+        for name in ("fps", "frame_rate"):
+            found = self._params_for(name)
+            if found:
+                try:
+                    fps = float(found[0].get("default") or fps)
+                except (TypeError, ValueError):
+                    fps = 16.0
+                break
+        frames = max(1, round(float(duration or 5) * fps))
+        for name in ("length", "num_frames", "frames"):
+            for p in self._params_for(name):
+                # Wan 一类的 length 要求 4n+1（1、5、9…）：向上取到最近的合法值，
+                # 宁可多一帧也不要把用户要的 8 秒缩成 7.8 秒
+                values[str(p["key"])] = ((frames + 2) // 4 * 4 + 1) if name == "length" else frames
+        return values
+
+    async def _upload_refs(self, blobs: list[bytes]) -> dict[str, str]:
+        """按参数表里 image 槽位的顺序，把参考图/首帧上传成 ComfyUI 文件名。"""
+        if not blobs:
+            return {}
+        slots = [p for p in self.params if p.get("type") == "image"]
+        if not slots:
+            raise AdapterError(
+                "这个工作流没有参考图槽位（LoadImage），不能带图运行。",
+                log_detail="comfy_no_image_slot",
+            )
+        files: dict[str, str] = {}
+        for i, (param, blob) in enumerate(zip(slots, blobs)):
+            files[str(param.get("key"))] = await self.upload_image(
+                blob, f"xiaoma-ref-{i}.png"
+            )
+        return files
+
+    async def _wait_workflow(self, prompt_id: str, timeout: float = 300.0) -> ComfyRunStatus:
+        waited = 0.0
+        while waited < timeout:
+            await asyncio.sleep(2.0)
+            waited += 2.0
+            status = await self.poll_workflow(prompt_id)
+            if status.status != "processing":
+                return status
+        raise AdapterError(
+            f"ComfyUI 工作流 {prompt_id} 超过 {int(timeout)} 秒仍未完成",
+            log_detail="comfy_timeout",
+        )
+
+    def _view_url(self, file: ComfyOutputFile) -> str:
+        query = urlencode(
+            {"filename": file.filename, "subfolder": file.subfolder, "type": file.folder_type}
+        )
+        return f"{self.base_url}/view?{query}"
 
     async def test_connection(self, model: str | None = None) -> None:
         if not self.base_url:
@@ -160,14 +296,82 @@ class ComfyUIAdapter(BaseAdapter):
         raise unsupported("文本对话（ComfyUI 只执行工作流）")
         yield ""  # pragma: no cover
 
-    async def generate_image(self, **kwargs: Any) -> list[bytes]:
-        raise unsupported("直接生图（ComfyUI 请通过工作流节点执行）")
+    async def generate_image(
+        self,
+        *,
+        model: str = "",
+        prompt: str = "",
+        n: int = 1,
+        size: str = "1024x1024",
+        ref_images: list[bytes] | None = None,
+    ) -> list[bytes]:
+        """把绑定的工作流当成一个「图片模型」跑一次。"""
+        graph = apply_params(
+            self._bound_workflow(),
+            self.params,
+            self._values_for(size, max(1, int(n))),
+            await self._upload_refs(ref_images or []),
+            prompt_text=prompt,
+        )
+        prompt_id = await self.submit_workflow(graph)
+        status = await self._wait_workflow(prompt_id)
+        if status.status != "succeeded":
+            raise AdapterError(status.error or "ComfyUI 工作流执行失败", log_detail="comfy_workflow_failed")
+        images = [f for f in status.files if f.kind == "image"]
+        if not images:
+            raise AdapterError(
+                "工作流执行成功，但没有图片产物。确认图里包含 SaveImage / SaveAnimatedWEBP 这类输出节点。",
+                log_detail="comfy_no_image_output",
+            )
+        return [await self.download_output(f) for f in images]
 
-    async def submit_video(self, **kwargs: Any) -> str:
-        raise unsupported("直接生视频（ComfyUI 请通过工作流节点执行）")
+    async def submit_video(
+        self,
+        *,
+        model: str = "",
+        prompt: str = "",
+        first_frame: bytes | None = None,
+        duration: int = 5,
+        ratio: str = "16:9",
+        resolution: str = "720p",
+        last_frame: bytes | None = None,
+        ref_images: list[bytes] | None = None,
+        ref_videos: list[bytes] | None = None,
+        ref_audio: AudioRef | None = None,
+    ) -> str:
+        """把绑定的工作流当成「视频模型」提交；返回 ComfyUI prompt_id。"""
+        if last_frame or ref_videos or ref_audio:
+            raise AdapterError(
+                "ComfyUI 工作流这一版只接首帧/参考图；尾帧、视频参考、参考音频还没接。",
+                log_detail="comfy_video_ref_unsupported",
+            )
+        blobs: list[bytes] = []
+        if first_frame is not None:
+            blobs.append(first_frame)
+        if ref_images:
+            blobs.extend(ref_images)
+        graph = apply_params(
+            self._bound_workflow(),
+            self.params,
+            self._video_values(duration, ratio, resolution),
+            await self._upload_refs(blobs),
+            prompt_text=prompt,
+        )
+        return await self.submit_workflow(graph)
 
     async def poll_video(self, remote_id: str) -> VideoStatus:
-        raise unsupported("直接生视频（ComfyUI 请通过工作流节点执行）")
+        status = await self.poll_workflow(remote_id)
+        if status.status == "failed":
+            return VideoStatus(status="failed", error=status.error or "ComfyUI 工作流执行失败")
+        if status.status != "succeeded":
+            return VideoStatus(status="processing", progress=status.progress)
+        files = [f for f in status.files if f.kind == "video"] or status.files
+        if not files:
+            return VideoStatus(
+                status="failed",
+                error="工作流执行成功，但没有视频产物。确认图里包含 SaveVideo / VHS_VideoCombine 这类输出节点。",
+            )
+        return VideoStatus(status="succeeded", video_url=self._view_url(files[0]), progress=100)
 
     async def synthesize_speech(self, **kwargs: Any) -> SpeechResult:
         raise unsupported("语音合成（ComfyUI 走工作流，不在适配器层做）")

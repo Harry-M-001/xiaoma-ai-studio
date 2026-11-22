@@ -121,6 +121,60 @@ AUDIO_REF_NO_HINT = (
     "只想让它动起来、不需要说话，就把「对白音轨」去掉"
 )
 
+#: Seedream 各档的最低总像素（官方参数表）：低于它上游会直接 400。
+#: 5.5 / 5.0 pro 是 1280x720（921600），5.0 lite / 4.5 是 2560x1440（3686400）。
+_IMAGE_MIN_AREA = 921_600
+_IMAGE_MIN_AREA_LITE = 3_686_400
+
+
+def ark_image_size(model: str, size: str) -> str:
+    """把界面的 `宽x高` 抬到该模型的最低像素要求，保持比例不变。
+
+    不这么做的话，默认的 `1024x1024` 在 Seedream 5.0 Lite 上必然 400
+    （它最低 2K），用户只会看到一句笼统的「参数不合法」。
+    档位写法（`2K` / `4K`）原样透传。
+    """
+    raw = str(size or "").strip()
+    if "x" not in raw.lower():
+        return raw or "2K"
+    name = (model or "").strip().lower()
+    if "seedream-5-0-lite" in name or "seedream-4-5" in name:
+        min_area = _IMAGE_MIN_AREA_LITE
+    elif "seedream-5" in name or "seedream-4" in name:
+        min_area = _IMAGE_MIN_AREA
+    else:
+        return raw
+    try:
+        w, h = (int(x) for x in raw.lower().split("x", 1))
+    except (TypeError, ValueError):
+        return raw
+    if w <= 0 or h <= 0 or w * h >= min_area:
+        return raw
+    scale = (min_area / (w * h)) ** 0.5
+    nw = max(16, int(round(w * scale / 16)) * 16)
+    nh = max(16, int(round(h * scale / 16)) * 16)
+    return f"{nw}x{nh}"
+
+
+def ark_video_duration(model: str, duration: int) -> int:
+    """按模型把时长夹到它能接受的区间（秒）。
+
+    之前只传 5 / 10，所以没暴露过；现在界面允许 3–30，Seedance 1.0 拿到 7 秒
+    只会回一句 400。夹取口径与 `provider_store.video_duration_limit` 一致。
+    """
+    name = (model or "").strip().lower()
+    value = int(duration or 5)
+    if "seedance-2-5" in name:
+        return max(4, min(30, value))
+    if "seedance-2-0" in name:
+        return max(4, min(15, value))
+    if "seedance-1-5" in name:
+        return max(4, min(12, value))
+    if "seedance-1-0" in name:
+        # 1.0 只认 5 / 10 两档，就近归到其中一档
+        return 10 if value >= 8 else 5
+    return value
+
 
 class ArkAdapter(BaseAdapter):
     kind = "ark"
@@ -180,16 +234,35 @@ class ArkAdapter(BaseAdapter):
     ) -> list[bytes]:
         if not self.base_url or not self.api_key:
             raise AdapterError("该服务尚未填写 Base URL 或 API Key", log_detail="config_invalid missing_credentials")
+        # Seedream 5.x（5.5 / 5.0）的图片接口**一次只出一张图**，官方参数表里没有
+        # n / max_images（那是 4.0 一代的组图参数）。界面允许选 1-4 张，
+        # 这里按数量发多次请求——不然「选了 4 张只回 1 张」又是个没人解释的坑。
+        count = max(1, min(int(n or 1), 4))
+        results: list[bytes] = []
+        for _ in range(count):
+            results.extend(
+                await self._generate_image_once(
+                    model=model, prompt=prompt, size=size, ref_images=ref_images
+                )
+            )
+        return results
+
+    async def _generate_image_once(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        size: str,
+        ref_images: list[bytes] | None,
+    ) -> list[bytes]:
         body: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
-            "size": size,
+            "size": ark_image_size(model, size),
             "response_format": "b64_json",
         }
-        if n and n > 1:
-            body["n"] = n
         if ref_images:
-            # Seedream 4.0+：image 数组支持 1~多张参考图（URL 或 base64）
+            # Seedream 5.x：image 数组支持 1~10 张参考图（URL 或 base64）
             body["image"] = [_data_uri(img) for img in ref_images]
         client = await self.client()
         try:
@@ -284,7 +357,7 @@ class ArkAdapter(BaseAdapter):
         body: dict[str, Any] = {
             "model": model,
             "content": content,
-            "duration": duration,
+            "duration": ark_video_duration(model, duration),
             "ratio": ratio,
             "resolution": resolution,
         }

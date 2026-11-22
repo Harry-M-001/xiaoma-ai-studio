@@ -34,6 +34,22 @@ from app.services import config_center_service as cc  # noqa: E402
 from app.services import provider_store  # noqa: E402
 
 
+_ORIGINAL_STORE: dict[str, object] = {}
+
+
+def _restore_store() -> None:
+    """把 provider_store 的画面换回真的。
+
+    原来只在 atexit 恢复，于是同一个 pytest 进程里后面的用例（甚至别的文件）
+    会继续看到「list_services 恒为空」的假实现——症状是别人莫名其妙地
+    IndexError 或「没有语音模型」。一个用例的桩不该漏出这个用例。
+    """
+    if _ORIGINAL_STORE:
+        provider_store.resolve_model = _ORIGINAL_STORE["resolve_model"]  # type: ignore[assignment]
+        provider_store.list_services = _ORIGINAL_STORE["list_services"]  # type: ignore[assignment]
+        _ORIGINAL_STORE.clear()
+
+
 def _run(fn):
     async def main():
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -47,7 +63,11 @@ def _run(fn):
         finally:
             await engine.dispose()
 
-    return asyncio.run(main())
+    _restore_store()
+    try:
+        return asyncio.run(main())
+    finally:
+        _restore_store()
 
 
 def _node(node_id: str, kind: str, prompt: str = "做点什么", **params) -> dict:
@@ -332,12 +352,12 @@ def test_system_prompt_covers_every_node_kind_in_the_registry():
 
 
 def test_a_recipe_kind_in_a_draft_is_rewritten_to_its_host_node():
-    """模型仍写老类型（分镜图）时，草稿里直接改写成图片组，不丢节点也不留老类型。"""
+    """模型仍写内部原语（图片组）时，草稿里直接改写成对外的分镜图，不丢节点也不留内部分支。"""
     _, nodes, edges, notes = canvas_agent.repair(
-        {"summary": "s", "nodes": [{"id": "n1", "kind": "storyboardImage", "prompt": "逐镜出图"}], "edges": []},
+        {"summary": "s", "nodes": [{"id": "n1", "kind": "imageGroup", "prompt": "逐镜出图"}], "edges": []},
         {}, [],
     )
-    assert [n["kind"] for n in nodes] == ["imageGroup"]
+    assert [n["kind"] for n in nodes] == ["storyboardImage"]
     assert any("并入" in n for n in notes), f"没有说明改写：{notes}"
 
 
@@ -505,16 +525,12 @@ def _install_fake(db, replies: list[str], error: str = ""):
 
     orig_resolve = provider_store.resolve_model
     orig_list = provider_store.list_services
+    # 只在「当前是真实现」时记一次：连续两次 install 不能把假实现记成原件
+    _ORIGINAL_STORE.setdefault("resolve_model", orig_resolve)
+    _ORIGINAL_STORE.setdefault("list_services", orig_list)
     provider_store.resolve_model = fake_resolve  # type: ignore[assignment]
     provider_store.list_services = fake_list  # type: ignore[assignment]
 
-    import atexit
-
-    def restore():
-        provider_store.resolve_model = orig_resolve  # type: ignore[assignment]
-        provider_store.list_services = orig_list  # type: ignore[assignment]
-
-    atexit.register(restore)
     return lambda: adapter.calls
 
 

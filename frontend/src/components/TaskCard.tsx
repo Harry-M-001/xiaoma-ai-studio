@@ -315,7 +315,7 @@ export default function TaskCard({
                   <input
                     className="input"
                     type="number"
-                    min={1}
+                    min={3}
                     max={30}
                     value={retryForm.duration ?? 5}
                     onChange={(e) =>

@@ -5,12 +5,19 @@
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.services.comfy_workflow_service import apply_params, parse_workflow
+from app.services.comfy_workflow_service import (
+    apply_params,
+    convert_ui_to_api,
+    parse_workflow,
+    scan_workflows,
+)
 
 SD_GRAPH = {
     "3": {
@@ -139,6 +146,107 @@ def test_apply_params_image_slots():
     pm2 = parse_workflow(graph)["paramMap"]
     g = apply_params(graph, pm2, {}, image_files={"10_image": "canvas_ref_1_0.png"}, prompt_text="")
     assert g["10"]["inputs"]["image"] == "canvas_ref_1_0.png"
+
+
+# ============================================================
+# UI 格式 → API 格式（ComfyUI「保存」出来的是 UI 格式）
+# ============================================================
+
+UI_GRAPH = {
+    "nodes": [
+        {
+            "id": 3, "type": "KSampler",
+            "widgets_values": [123, "randomize", 20, 8.0, "euler", "normal", 1.0],
+            "inputs": [
+                {"name": "model", "link": 10},
+                {"name": "positive", "link": 11},
+                {"name": "negative", "link": 12},
+                {"name": "latent_image", "link": 13},
+            ],
+        },
+        {"id": 4, "type": "CheckpointLoaderSimple",
+         "widgets_values": ["sd_xl.safetensors"], "inputs": []},
+        {"id": 5, "type": "EmptyLatentImage",
+         "widgets_values": [1024, 1024, 1], "inputs": []},
+        {"id": 6, "type": "CLIPTextEncode",
+         "widgets_values": ["正向默认"], "inputs": [{"name": "clip", "link": 14}]},
+        {"id": 7, "type": "CLIPTextEncode",
+         "widgets_values": ["负向默认"], "inputs": [{"name": "clip", "link": 15}]},
+        {"id": 8, "type": "VAEDecode", "widgets_values": [],
+         "inputs": [{"name": "samples", "link": 16}, {"name": "vae", "link": 17}]},
+        {"id": 9, "type": "SaveImage",
+         "widgets_values": ["ComfyUI"], "inputs": [{"name": "images", "link": 18}]},
+    ],
+    "links": [
+        [10, 4, 0, 3, 0, "MODEL"],
+        [11, 6, 0, 3, 1, "CONDITIONING"],
+        [12, 7, 0, 3, 2, "CONDITIONING"],
+        [13, 5, 0, 3, 3, "LATENT"],
+        [14, 4, 1, 6, 0, "CLIP"],
+        [15, 4, 1, 7, 0, "CLIP"],
+        [16, 3, 0, 8, 0, "LATENT"],
+        [17, 4, 2, 8, 1, "VAE"],
+        [18, 8, 0, 9, 0, "IMAGE"],
+    ],
+}
+
+
+def test_convert_ui_graph_keeps_links_and_widget_values():
+    api = convert_ui_to_api(UI_GRAPH)
+    assert set(api) == {"3", "4", "5", "6", "7", "8", "9"}
+    sampler = api["3"]
+    assert sampler["class_type"] == "KSampler"
+    # 连线用 [源 id, 源槽位]
+    assert sampler["inputs"]["model"] == ["4", 0]
+    assert sampler["inputs"]["positive"] == ["6", 0]
+    # 控件值按固定顺序写回，但不把纯 UI 字段塞给 API
+    assert sampler["inputs"]["seed"] == 123
+    assert sampler["inputs"]["steps"] == 20
+    assert sampler["inputs"]["sampler_name"] == "euler"
+    assert "control_after_generate" not in sampler["inputs"]
+    assert api["6"]["inputs"]["text"] == "正向默认"
+    # 转完就能被现有解析器识别
+    parsed = parse_workflow(api)
+    assert parsed["outputKind"] == "image"
+    assert any(p["type"] == "prompt" for p in parsed["paramMap"])
+
+
+def test_convert_prefers_widget_metadata_over_static_order():
+    graph = {
+        "nodes": [
+            {
+                "id": 1, "type": "SomeCustomNode",
+                "widgets_values": ["a", 7],
+                "inputs": [
+                    {"name": "text", "widget": {"name": "prompt_text"}},
+                    {"name": "steps", "widget": {"name": "steps"}},
+                ],
+            }
+        ],
+        "links": [],
+    }
+    api = convert_ui_to_api(graph)
+    assert api["1"]["inputs"] == {"prompt_text": "a", "steps": 7}
+
+
+def test_convert_passes_api_graph_through():
+    assert convert_ui_to_api(SD_GRAPH) is SD_GRAPH
+
+
+def test_scan_finds_ui_and_api_workflows_and_reports_bad_ones():
+    with tempfile.TemporaryDirectory() as tmp:
+        wf_dir = Path(tmp) / "user" / "default" / "workflows"
+        wf_dir.mkdir(parents=True)
+        (wf_dir / "ui.json").write_text(json.dumps(UI_GRAPH, ensure_ascii=False), encoding="utf-8")
+        (wf_dir / "api.json").write_text(json.dumps(SD_GRAPH, ensure_ascii=False), encoding="utf-8")
+        (wf_dir / "broken.json").write_text("{not json", encoding="utf-8")
+
+        items = scan_workflows(tmp)
+        by_name = {i["name"]: i for i in items}
+        assert by_name["ui"]["format"] == "ui" and by_name["ui"]["ok"]
+        assert by_name["ui"]["outputKind"] == "image"
+        assert by_name["api"]["format"] == "api" and by_name["api"]["ok"]
+        assert by_name["broken"]["ok"] is False and by_name["broken"]["reason"]
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import {
   LogOut,
   Moon,
   MoreHorizontal,
+  Plus,
   Sun,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -14,6 +15,7 @@ import { api } from "../api";
 import type { AgentProjectInfo, AgentSessionInfo, NavMeta, Project } from "../types";
 import { prefs } from "../prefs";
 import { getNavIcon } from "./IconMap";
+import { useToast } from "./Toast";
 
 /** 路由标识改为动态字符串：导航菜单由后端配置表驱动，没有固定枚举 */
 export type RouteKey = string;
@@ -45,6 +47,7 @@ export default function Sidebar({
   badgeRoutes,
   onOpenCanvas,
   onOpenAgentSession,
+  onAgentProjectCreated,
 }: {
   route: RouteKey;
   onNavigate: (r: RouteKey) => void;
@@ -65,7 +68,10 @@ export default function Sidebar({
   /** 工作区里的画布/任务要能直接打开 */
   onOpenCanvas?: (p: { id: number; name: string }) => void;
   onOpenAgentSession?: (id: number) => void;
+  /** 在工作区里新建了 Agent 项目：Agent 页要重新读一次项目列表 */
+  onAgentProjectCreated?: () => void;
 }) {
+  const toast = useToast();
   // main 组直接列出；create 组收进「创作台」折叠组；settings 组收进底部「更多」
   const mainItems = nav.filter((item) => item.group !== "settings" && item.group !== "create");
   const createItems = nav.filter((item) => item.group === "create");
@@ -78,6 +84,9 @@ export default function Sidebar({
   const [canvases, setCanvases] = useState<Project[]>([]);
   const [openWs, setOpenWs] = useState<number | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState<string | null>(null);
+  /** 新任务用哪个模型：与 Agent 页同一个默认（目录里第一个可用文本模型） */
+  const [modelKey, setModelKey] = useState("");
 
   const loadWorkspace = useCallback(async () => {
     try {
@@ -85,9 +94,12 @@ export default function Sidebar({
       setWsProjects(meta.projects || []);
       setWsSessions(meta.sessions || []);
       setCanvases(projects);
+      setModelKey((prev) => prev || meta.models[0]?.key || "");
       setOpenWs((prev) => prev ?? meta.projects?.[0]?.id ?? null);
+      return meta;
     } catch {
       // 侧栏读不到不影响导航本身；下次路由变化会再试
+      return null;
     }
   }, []);
 
@@ -96,6 +108,40 @@ export default function Sidebar({
       void loadWorkspace();
     }
   }, [route, loadWorkspace]);
+
+  /** 在某个项目下开一条新任务并打开它——原来 Agent 页左栏那个「新任务」按钮的替身 */
+  const createTask = async (projectId: number | null) => {
+    try {
+      const payload = await api.createAgentSession({
+        model_key: modelKey,
+        agent_project_id: projectId,
+      });
+      await loadWorkspace();
+      onOpenAgentSession?.(payload.session.id);
+    } catch (e) {
+      toast.error(`新建任务失败：${(e as Error).message}`);
+    }
+  };
+
+  /** 新建项目就在工作区标题旁边：不用再绕去 Agent 页左边那一列 */
+  const createProject = async () => {
+    const name = (newProjectName || "").trim();
+    if (!name) {
+      setNewProjectName(null);
+      return;
+    }
+    try {
+      const p = await api.createAgentProject({ name });
+      setNewProjectName(null);
+      setOpenWs(p.id);
+      await loadWorkspace();
+      onAgentProjectCreated?.();
+      toast.success(`项目「${p.name}」已建好`);
+      onNavigate("agent");
+    } catch (e) {
+      toast.error(`新建项目失败：${(e as Error).message}`);
+    }
+  };
 
   const canvasName = (id: number | null | undefined) =>
     canvases.find((c) => c.id === id)?.name || `画布 #${id}`;
@@ -125,43 +171,74 @@ export default function Sidebar({
         {!collapsed && "收起导航"}
       </button>
 
-      {headItem && (
-        <NavRow
-          key={headItem.key || headItem.route}
-          item={headItem}
-          route={route}
-          collapsed={collapsed}
-          onNavigate={onNavigate}
-          badgeRoutes={badgeRoutes}
-        />
-      )}
+      {/* 中间这一段可滚动：品牌与底部「更多」都不动，导航和工作区随滚轮走 */}
+      <div className="sidebar-scroll">
+        {headItem && (
+          <NavRow
+            key={headItem.key || headItem.route}
+            item={headItem}
+            route={route}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+            badgeRoutes={badgeRoutes}
+          />
+        )}
 
-      {createItems.length > 0 && (
-        <CollapsibleGroup
-          groupKey="create"
-          items={createItems}
-          route={route}
-          collapsed={collapsed}
-          onNavigate={onNavigate}
-          badgeRoutes={badgeRoutes}
-        />
-      )}
+        {createItems.length > 0 && (
+          <CollapsibleGroup
+            groupKey="create"
+            items={createItems}
+            route={route}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+            badgeRoutes={badgeRoutes}
+          />
+        )}
 
-      {tailItems.map((item) => (
-        <NavRow
-          key={item.key || item.route}
-          item={item}
-          route={route}
-          collapsed={collapsed}
-          onNavigate={onNavigate}
-          badgeRoutes={badgeRoutes}
-        />
-      ))}
+        {tailItems.map((item) => (
+          <NavRow
+            key={item.key || item.route}
+            item={item}
+            route={route}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+            badgeRoutes={badgeRoutes}
+          />
+        ))}
 
-      {/* 工作区：项目 → 任务；图标态不显示（那里每一样都只是一枚图标，树会失去意义） */}
-      {!collapsed && wsProjects.length > 0 && (
-        <div className="nav-workspace">
-          <div className="nav-group-label">工作区</div>
+        {/* 工作区：项目 → 任务；图标态不显示（那里每一样都只是一枚图标，树会失去意义）。
+            新建项目放在标题旁边——Agent 页里那一列项目列表已经撤掉，这里是唯一的入口。 */}
+        {!collapsed && (
+          <div className="nav-workspace">
+          <div className="nav-workspace-head">
+            <span className="nav-group-label">工作区</span>
+            <button
+              className="icon-btn ws-add"
+              onClick={() => setNewProjectName(newProjectName === null ? "" : null)}
+              title="新建项目"
+              aria-label="新建项目"
+            >
+              <Plus size={14} />
+            </button>
+          </div>
+          {newProjectName !== null && (
+            <div className="ws-new">
+              <input
+                className="input ws-new-input"
+                autoFocus
+                placeholder="项目名，如「短剧 A · 前期」"
+                value={newProjectName}
+                onChange={(e) => setNewProjectName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void createProject();
+                  if (e.key === "Escape") setNewProjectName(null);
+                }}
+              />
+              <button className="btn btn-primary btn-xs" onClick={() => void createProject()}>
+                建
+              </button>
+            </div>
+          )}
           {wsProjects.map((p) => {
             const sessions = sessionsOf(p.id);
             const open = openWs === p.id;
@@ -202,12 +279,18 @@ export default function Sidebar({
                         <span className="ws-task-time">{s.updatedAt.slice(5, 10)}</span>
                       </button>
                     ))}
-                    {sessions.length === 0 && <div className="ws-empty">还没有任务</div>}
+                    <button className="ws-task ws-task-new" onClick={() => void createTask(p.id)}>
+                      <Plus size={11} />
+                      <span className="ws-task-title">新任务</span>
+                    </button>
                   </div>
                 )}
               </div>
             );
           })}
+          {wsProjects.length === 0 && newProjectName === null && (
+            <div className="ws-empty">还没有项目，点右上角 + 建一个</div>
+          )}
           {unfiled.length > 0 && (
             <div className="ws-project-wrap">
               <button
@@ -232,12 +315,17 @@ export default function Sidebar({
                       <span className="ws-task-time">{s.updatedAt.slice(5, 10)}</span>
                     </button>
                   ))}
+                  <button className="ws-task ws-task-new" onClick={() => void createTask(null)}>
+                    <Plus size={11} />
+                    <span className="ws-task-title">新任务</span>
+                  </button>
                 </div>
               )}
             </div>
           )}
         </div>
       )}
+      </div>
 
       <div className="sidebar-footer">
         <button

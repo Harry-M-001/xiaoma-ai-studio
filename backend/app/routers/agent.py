@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
+#: `/goal` 正在持续监测的会话 → 停止信号。请求没结束时这一条一直在，
+#: 既用来点「停止」，也用来挡住同一会话的第二次发送。
+_GOAL_RUNS: dict[int, asyncio.Event] = {}
+#: 目标模式撞上「要人点确认」而暂停的会话：人点确认后从这里接着监测。
+_GOAL_PENDING: set[int] = set()
+
 
 # ============================================================ 出入参
 
@@ -41,6 +48,7 @@ class SessionIn(BaseModel):
     project_id: int | None = None
     agent_project_id: int | None = None
     auto_approve: bool = False
+    thinking: bool = True
 
 
 class SessionPatch(BaseModel):
@@ -49,6 +57,7 @@ class SessionPatch(BaseModel):
     project_id: int | None = None
     agent_project_id: int | None = None
     auto_approve: bool | None = None
+    thinking: bool | None = None
 
 
 class AgentProjectIn(BaseModel):
@@ -97,6 +106,8 @@ def _step_out(s: AgentStep) -> dict[str, Any]:
         "status": s.status,
         "durationMs": s.duration_ms,
         "tokens": s.tokens,
+        # 思考模式下的思维链（回放时看得见，也是下一轮必须回传的东西）
+        "reasoning": s.reasoning,
         "createdAt": s.created_at.isoformat() if s.created_at else "",
     }
 
@@ -109,6 +120,9 @@ def _session_out(s: AgentSession) -> dict[str, Any]:
         "projectId": s.canvas_project_id,
         "agentProjectId": s.agent_project_id,
         "autoApprove": bool(s.auto_approve),
+        "thinking": bool(s.thinking),
+        # 刷新 / 另一个标签页也要知道：这个会话的 /goal 还在跑，能显示「监测中」并停止
+        "goalRunning": s.id in _GOAL_RUNS,
         "createdAt": s.created_at.isoformat() if s.created_at else "",
         "updatedAt": s.updated_at.isoformat() if s.updated_at else "",
     }
@@ -189,7 +203,7 @@ async def meta(db: AsyncSession = Depends(get_db)) -> dict:
         "models": [
             ModelOption(
                 key=m.key, service_id=m.service_id, service_name=m.service_name,
-                name=m.name, label=m.label, modality=m.modality,
+                name=m.name, label=m.label, modality=m.modality, thinking=m.thinking,
             ).model_dump()
             for m in models
         ],
@@ -296,6 +310,7 @@ async def create_session(payload: SessionIn, db: AsyncSession = Depends(get_db))
         canvas_project_id=payload.project_id,
         agent_project_id=payload.agent_project_id,
         auto_approve=bool(payload.auto_approve),
+        thinking=bool(payload.thinking),
     )
     db.add(session)
     await db.commit()
@@ -338,6 +353,8 @@ async def patch_session(
         session.agent_project_id = payload.agent_project_id or None
     if payload.auto_approve is not None:
         session.auto_approve = bool(payload.auto_approve)
+    if payload.thinking is not None:
+        session.thinking = bool(payload.thinking)
     await db.commit()
     await db.refresh(session)
     return await _payload(db, session)
@@ -383,14 +400,60 @@ async def send_message(
             status_code=409,
             detail="上一次调用还在等你确认（跑整图/跑节点），先点确认或拒绝，再继续说。",
         )
+
+    # 斜杠命令：/spec 只出规范、/plan 只出计划、/goal 持续跑到完成
+    mode, content = agent_runner.parse_command(payload.content)
+    if not content:
+        raise HTTPException(
+            status_code=400, detail="在 /spec、/plan、/goal 后面写一句要做什么。"
+        )
+    if mode == "goal":
+        if session_id in _GOAL_RUNS:
+            raise HTTPException(
+                status_code=409, detail="这个任务正在持续监测中；先点「停止」再发新消息。"
+            )
+        cancel = asyncio.Event()
+        _GOAL_RUNS[session_id] = cancel
+    else:
+        cancel = None
+
+    result: dict = {}
     try:
-        result = await agent_runner.send(db, session, payload.content)
-    except Exception as e:  # noqa: BLE001
-        raise _fail(e) from e
+        try:
+            result = await agent_runner.send(
+                db, session, content, mode=mode, cancel=cancel
+            )
+            if (
+                mode == "goal"
+                and cancel is not None
+                and result.get("status") not in ("need_confirm", "cancelled")
+            ):
+                result = await agent_runner.monitor_goal(db, session, cancel)
+        except Exception as e:  # noqa: BLE001
+            raise _fail(e) from e
+    finally:
+        if mode == "goal":
+            _GOAL_RUNS.pop(session_id, None)
+            if result.get("status") == "need_confirm":
+                # 目标被「要人点确认」打断：记住它，人点完确认再接着监测
+                _GOAL_PENDING.add(session_id)
+            else:
+                _GOAL_PENDING.discard(session_id)
+
     await db.refresh(session)
     body = await _payload(db, session)
     body["run"] = result
     return body
+
+
+@router.post("/sessions/{session_id}/goal/stop")
+async def stop_goal(session_id: int) -> dict:
+    """停止 `/goal` 的持续监测：请求会在下一次检查时收尾。"""
+    cancel = _GOAL_RUNS.get(session_id)
+    if cancel is None:
+        return {"ok": True, "running": False}
+    cancel.set()
+    return {"ok": True, "running": True}
 
 
 @router.post("/sessions/{session_id}/confirm")
@@ -400,10 +463,28 @@ async def confirm_step(
     session = await db.get(AgentSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    # 这个确认是不是 /goal 被打断的那一步：是的话，确认完要接着持续监测
+    resume_goal = payload.approve and session_id in _GOAL_PENDING
+    _GOAL_PENDING.discard(session_id)
     try:
         result = await agent_runner.confirm(db, session, payload.step_id, payload.approve)
     except Exception as e:  # noqa: BLE001
         raise _fail(e) from e
+
+    if resume_goal and result.get("status") not in ("need_confirm", "cancelled"):
+        if session_id in _GOAL_RUNS:
+            raise HTTPException(status_code=409, detail="这个任务正在持续监测中。")
+        cancel = asyncio.Event()
+        _GOAL_RUNS[session_id] = cancel
+        try:
+            result = await agent_runner.monitor_goal(db, session, cancel)
+        except Exception as e:  # noqa: BLE001
+            raise _fail(e) from e
+        finally:
+            _GOAL_RUNS.pop(session_id, None)
+            if result.get("status") == "need_confirm":
+                _GOAL_PENDING.add(session_id)
+
     await db.refresh(session)
     body = await _payload(db, session)
     body["run"] = result

@@ -32,6 +32,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "../api";
+import type { Asset } from "../types";
 import { useToast } from "../components/Toast";
 import { Spinner } from "../components/common";
 import { SceneStore, type StudioState } from "./store";
@@ -129,26 +130,34 @@ function Slider({
   value,
   min,
   max,
+  step = 1,
+  /** 单位后缀。关节滑杆是「°」，灯光强度之类的没有单位 */
+  unit = "°",
+  decimals = 0,
   onChange,
 }: {
   label: string;
   value: number;
   min: number;
   max: number;
+  step?: number;
+  unit?: string;
+  decimals?: number;
   onChange: (v: number) => void;
 }) {
+  const text = `${value.toFixed(decimals)}${unit}`;
   return (
-    <label className="d3d-slider" title={`${label}：${Math.round(value)}°`}>
+    <label className="d3d-slider" title={`${label}：${text}`}>
       <span>{label}</span>
       <input
         type="range"
         min={min}
         max={max}
-        step={1}
-        value={Math.round(value)}
+        step={step}
+        value={value}
         onChange={(e) => onChange(Number(e.target.value))}
       />
-      <b>{Math.round(value)}°</b>
+      <b>{text}</b>
     </label>
   );
 }
@@ -180,9 +189,14 @@ interface Props {
   /** 存档作用域：项目 id 或 demo。换作用域时请用 key 强制重挂载 */
   scope: string;
   onClose: () => void;
+  /**
+   * 画布入口用：截图上传成功后把资产交给调用方（落成图片节点的参考图）。
+   * 不传就是「只存进资产库」——导演台页用的就是这条路径。
+   */
+  onUseAsset?: (asset: Asset) => void;
 }
 
-export default function DirectorStudio3D({ scope, onClose }: Props) {
+export default function DirectorStudio3D({ scope, onClose, onUseAsset }: Props) {
   const toast = useToast();
   const storeRef = useRef<SceneStore | null>(null);
   if (!storeRef.current) storeRef.current = new SceneStore(scope);
@@ -321,13 +335,14 @@ export default function DirectorStudio3D({ scope, onClose }: Props) {
     setBusy("shot");
     try {
       const asset = await api.uploadAsset(file);
-      toast.success(`已存入资产库：${asset.original_name}（可直接当首帧用）`);
+      if (onUseAsset) onUseAsset(asset);
+      else toast.success(`已存入资产库：${asset.original_name}（可直接当首帧用）`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "上传失败");
     } finally {
       setBusy("");
     }
-  }, [ratioKey, scale, toast]);
+  }, [onUseAsset, ratioKey, scale, toast]);
 
   /** 把当前视角存成一个机位（不用去算坐标，看好了直接存） */
   const saveViewAsCamera = useCallback(() => {
@@ -377,15 +392,19 @@ export default function DirectorStudio3D({ scope, onClose }: Props) {
 
   const addActor = () => {
     const i = nextIndex(doc, "actor");
-    // 新对象落在原点附近错开一点，避免叠在一起看不出来
-    const spread = ((i - 1) % 5) * 1.1 - 2.2;
-    store.addObject(makeActor(i, { x: spread, y: 0, z: 0 }));
+    // 第一个角色就站在原点，之后左右交替错开（原来是第一个就偏到 -2.2，
+    // 用户一加人就发现「人怎么在画面边上」）
+    const idx = i - 1;
+    const x = idx === 0 ? 0 : Math.ceil(idx / 2) * 1.2 * (idx % 2 === 1 ? 1 : -1);
+    store.addObject(makeActor(i, { x, y: 0, z: 0 }));
   };
 
   const addProp = () => {
     const i = nextIndex(doc, "prop");
-    const spread = ((i - 1) % 5) * 1.1 - 2.2;
-    store.addObject(makeProp(i, { x: spread, y: 0, z: 1.6 }));
+    const idx = i - 1;
+    const x = idx === 0 ? 1.4 : Math.ceil(idx / 2) * 1.4 * (idx % 2 === 1 ? 1 : -1);
+    // 放在主体**后方**（-z）：默认机位在 +z 看原点，元素放前面会直接把人和镜头挡住
+    store.addObject(makeProp(i, { x, y: 0, z: -1.8 }));
   };
 
   const addCameraPreset = () => {
@@ -399,6 +418,7 @@ export default function DirectorStudio3D({ scope, onClose }: Props) {
   const actors = actorsOf(doc);
   const props = propsOf(doc);
   const cameras = camerasOf(doc);
+  const activeCam = cameras.find((c) => c.id === doc.activeCameraId) ?? null;
 
   return (
     <div className="d3d">
@@ -572,30 +592,57 @@ export default function DirectorStudio3D({ scope, onClose }: Props) {
         </aside>
 
         <main className="d3d-stage">
-          <div ref={hostRef} className="d3d-viewport" />
+          {/* 视口与浮层单独包一层：浮层要相对「画面」定位，而不是相对包含工具条的整列 */}
+          <div className="d3d-canvas-wrap">
+            <div ref={hostRef} className="d3d-viewport" />
 
-          <div className="d3d-overlay d3d-overlay-tl">
-            {(
-              [
-                { key: "showGrid", label: "网格" },
-                { key: "showFrustum", label: "取景框" },
-                { key: "showGuide", label: "构图线" },
-                { key: "showLights", label: "灯光位" },
-              ] as const
-            ).map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                className={session[t.key] ? "on" : ""}
-                onClick={() => store.setSession({ [t.key]: !session[t.key] })}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+            <div className="d3d-overlay d3d-overlay-tl">
+              {(
+                [
+                  { key: "showGrid", label: "网格" },
+                  { key: "showFrustum", label: "取景框" },
+                  { key: "showGuide", label: "构图线" },
+                  { key: "showLights", label: "灯光位" },
+                ] as const
+              ).map((t) => (
+                <button
+                  key={t.key}
+                  type="button"
+                  className={session[t.key] ? "on" : ""}
+                  onClick={() => store.setSession({ [t.key]: !session[t.key] })}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
 
-          <div className="d3d-overlay d3d-overlay-tr">
-            角色 {actors.length} · 元素 {props.length} · 机位 {cameras.length}
+            <div className="d3d-overlay d3d-overlay-tr">
+              角色 {actors.length} · 元素 {props.length} · 机位 {cameras.length}
+            </div>
+
+            {/* 构图线：只用 DOM 画，不进截图（截图要的是干净画面） */}
+            {session.viewMode === "camera" && session.showGuide && (
+              <div className="d3d-guide" aria-hidden>
+                <i className="gv gv1" />
+                <i className="gv gv2" />
+                <i className="gh gh1" />
+                <i className="gh gh2" />
+              </div>
+            )}
+
+            {session.viewMode === "camera" && activeCam && (
+              <div className="d3d-shotinfo">
+                {SHOT_TYPE_OPTIONS.find((o) => o.value === activeCam.shotType)?.label ?? activeCam.shotType}
+                {" · "}
+                {activeCam.focalLength}mm
+                {" · "}
+                {COMPOSITION_OPTIONS.find((o) => o.value === activeCam.composition)?.label ?? activeCam.composition}
+              </div>
+            )}
+
+            {actors.length === 0 && props.length === 0 && (
+              <div className="d3d-emptyhint">从左侧「加角色 / 加元素」开始摆位，再按机位预设取景</div>
+            )}
           </div>
 
           <div className="d3d-shotbar">
@@ -619,7 +666,7 @@ export default function DirectorStudio3D({ scope, onClose }: Props) {
               存成机位
             </button>
             <button type="button" className="btn btn-primary btn-sm" disabled={busy !== ""} onClick={() => void takeShot()}>
-              {busy === "shot" ? <Spinner light /> : null} 截图存到资产库
+              {busy === "shot" ? <Spinner light /> : null} {onUseAsset ? "截图放进画布" : "截图存到资产库"}
             </button>
           </div>
         </main>
@@ -754,6 +801,9 @@ function SceneFields({ state, store }: { state: StudioState; store: SceneStore }
             value={doc.lights[slot].intensity}
             min={0}
             max={4}
+            step={0.05}
+            unit=""
+            decimals={2}
             onChange={(v) => store.updateLights({ [slot]: { ...doc.lights[slot], intensity: v } }, `light:${slot}`)}
           />
           <Num

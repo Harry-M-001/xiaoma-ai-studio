@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import type {
+  ComfyScanItem,
   Modality,
   ModalityMeta,
   ModelSpec,
@@ -211,6 +212,8 @@ export default function ProvidersPage() {
         name: m.name.trim(),
         modality: m.modality,
         label: m.label?.trim() || "",
+        // 兼容别名要原样带回去：漏掉它，用户一保存就变成下拉里的重复模型
+        ...(m.hidden ? { hidden: true } : {}),
       })),
     };
     try {
@@ -493,6 +496,9 @@ export default function ProvidersPage() {
                     ))}
                   </div>
                 )}
+                {p.kind === "comfyui" && (
+                  <ComfyRootPanel provider={p} onImported={load} />
+                )}
               </div>
               <div className="provider-actions">
                 <label className="switch" title={p.enabled ? "点击停用" : "点击启用"}>
@@ -644,6 +650,11 @@ export default function ProvidersPage() {
                     ))}
                   </select>
                 </div>
+                {m.hidden && (
+                  <span className="badge" title="兼容别名：老会话 / 老画布仍能解析，但不出现在模型下拉里">
+                    别名
+                  </span>
+                )}
                 <button
                   className="icon-btn"
                   onClick={() =>
@@ -697,6 +708,152 @@ export default function ProvidersPage() {
             </div>
           )}
         </Modal>
+      )}
+    </div>
+  );
+}
+
+/**
+ * ComfyUI 工作流根目录：扫描已保存的工作流，导入后作为这个服务下的模型。
+ *
+ * 这里不做任何「上传」，路径与文件都在用户自己的机器上；导入只是把转换后的
+ * API 图存进工作流库，并挂一个 comfy:<id> 的模型条目。
+ */
+function ComfyRootPanel({
+  provider,
+  onImported,
+}: {
+  provider: Provider;
+  onImported: () => void | Promise<void>;
+}) {
+  const toast = useToast();
+  const [root, setRoot] = useState("");
+  const [items, setItems] = useState<ComfyScanItem[]>([]);
+  const [busy, setBusy] = useState("");
+  const [picked, setPicked] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    api
+      .comfyRoot()
+      .then((r) => setRoot(r.root || ""))
+      .catch(() => {
+        /* 读不到就让用户手填 */
+      });
+  }, []);
+
+  const save = async () => {
+    setBusy("save");
+    try {
+      const r = await api.comfySetRoot(root.trim());
+      setRoot(r.root);
+      toast.success("目录已保存");
+      const scanned = await api.comfyScan(r.root);
+      setItems(scanned.items);
+      setPicked({});
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const scan = async () => {
+    setBusy("scan");
+    try {
+      const r = await api.comfyScan(root.trim());
+      setItems(r.items);
+      setPicked({});
+      toast.success(`扫描到 ${r.items.length} 个 JSON，可导入 ${r.items.filter((i) => i.ok).length} 个`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "扫描失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const importPicked = async () => {
+    const paths = Object.keys(picked).filter((p) => picked[p]);
+    if (!paths.length) return;
+    setBusy("import");
+    try {
+      const rows = await api.comfyImport(paths, provider.id);
+      toast.success(`已导入 ${rows.length} 个工作流，可在图片/视频里选`);
+      setItems([]);
+      setPicked({});
+      await onImported();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "导入失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const usable = items.filter((i) => i.ok).length;
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+        工作流根目录：扫描 user/default/workflows，导入后作为模型出现在图片 / 视频页
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input
+          className="input"
+          style={{ flex: "1 1 320px", minWidth: 0 }}
+          value={root}
+          onChange={(e) => setRoot(e.target.value)}
+          placeholder="例如 D:\\ComfyUI"
+        />
+        <button className="btn btn-ghost" onClick={save} disabled={busy !== ""}>
+          保存目录
+        </button>
+        <button className="btn btn-ghost" onClick={scan} disabled={busy !== ""}>
+          {busy === "scan" ? "扫描中…" : "扫描工作流"}
+        </button>
+      </div>
+
+      {items.length > 0 && (
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+          {items.map((it) => (
+            <label
+              key={it.path}
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                fontSize: 12,
+                opacity: it.ok ? 1 : 0.6,
+              }}
+            >
+              <input
+                type="checkbox"
+                disabled={!it.ok}
+                checked={!!picked[it.path]}
+                onChange={(e) =>
+                  setPicked((prev) => ({ ...prev, [it.path]: e.target.checked }))
+                }
+              />
+              <span style={{ minWidth: 140 }}>{it.name}</span>
+              <span className="badge">{it.format}</span>
+              {it.ok ? (
+                <span className="badge badge-primary">{it.outputKind}</span>
+              ) : (
+                <span className="badge badge-warning">{it.reason}</span>
+              )}
+              {it.warnings.map((w) => (
+                <span key={w} className="badge badge-warning" title={w}>
+                  参数可能不全
+                </span>
+              ))}
+            </label>
+          ))}
+          <button
+            className="btn btn-primary"
+            style={{ alignSelf: "flex-start", marginTop: 4 }}
+            onClick={importPicked}
+            disabled={busy !== "" || usable === 0}
+          >
+            导入选中（{Object.values(picked).filter(Boolean).length}）
+          </button>
+        </div>
       )}
     </div>
   );

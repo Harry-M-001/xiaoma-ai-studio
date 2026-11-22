@@ -3,7 +3,6 @@ import { Puzzle } from "lucide-react";
 import Sidebar, { type RouteKey } from "./components/Sidebar";
 import LoginGate from "./components/LoginGate";
 import SetupBanner from "./components/SetupBanner";
-import McpGate from "./components/McpGate";
 import { ToastProvider } from "./components/Toast";
 import { Empty } from "./components/common";
 import { api, authToken, cfgBool, cfgString } from "./api";
@@ -101,6 +100,8 @@ function Shell() {
   const [authed, setAuthed] = useState(false);
   const [canvasProject, setCanvasProject] = useState<{ id: number; name: string } | null>(null);
   const [agentSessionId, setAgentSessionId] = useState<number | null>(null);
+  /** 侧栏新建了 Agent 项目：+1 通知 Agent 页重读项目/任务列表 */
+  const [agentProjectsRev, setAgentProjectsRev] = useState(0);
   const [updateAvailable, setUpdateAvailable] = useState(false);
 
   useEffect(() => {
@@ -256,6 +257,7 @@ function Shell() {
             onOpenCanvas={openCanvas}
             openSessionId={agentSessionId}
             onSessionOpened={() => setAgentSessionId(null)}
+            projectsRev={agentProjectsRev}
           />
         );
       case "canvas":
@@ -319,13 +321,12 @@ function Shell() {
         badgeRoutes={updateAvailable ? ["settings"] : undefined}
         onOpenCanvas={openCanvas}
         onOpenAgentSession={openAgentSession}
+        onAgentProjectCreated={() => setAgentProjectsRev((v) => v + 1)}
       />
       <main className="main">
         <SetupBanner route={route} onNavigate={setRoute} />
         {renderPage()}
       </main>
-      {/* dsh sidecar 的执行确认：MCP 工具调用挂起，任何页面都要能看到 */}
-      <McpGate />
     </div>
   );
 }

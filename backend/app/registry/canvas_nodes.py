@@ -48,6 +48,8 @@ NODE_SCHEMAS: dict[str, dict] = {
         "kind": "idea",
         "category": "document",
         "label": "创意策划",
+        # 菜单精简：仍由 Agent / 自动链使用，但不在「添加节点」里单独出现。
+        "menuHidden": True,
         "description": "一句话想法 → 创意简报（卖点/主角/冲突/三幕/视觉基调）",
         "features": ["prompt", "modelSelect"],
         "promptLabel": "你的想法",
@@ -100,6 +102,8 @@ NODE_SCHEMAS: dict[str, dict] = {
         "kind": "assetSheet",
         "category": "document",
         "label": "资产表",
+        # 资产能力内置：用户不再手工加这两个节点，由自动链 / Agent 按需编排。
+        "menuHidden": True,
         "description": "剧本/分镜 → 资产表（角色/场景/道具 + 英文视觉描述 + 出现场次），供下游生成设定图",
         "features": ["prompt", "modelSelect"],
         "promptLabel": "补充要求",
@@ -126,6 +130,7 @@ NODE_SCHEMAS: dict[str, dict] = {
         "kind": "assetImage",
         "category": "image",
         "label": "资产设定图",
+        "menuHidden": True,
         "description": "读上游资产表逐行生成设定图（角色=三视图+特写；场景=广角空镜），存入资产库供下游按名自动引用",
         "features": ["prompt", "modelSelect", "assetScope", "imageSize", "sampleCount"],
         "promptLabel": "统一风格（可选）",
@@ -160,22 +165,35 @@ NODE_SCHEMAS: dict[str, dict] = {
             "sources": [{"id": "out-video", "type": "video"}],
         },
     },
+    # ---- 成片：把上游逐镜视频接成一条 ----
+    # 它不是「生成」节点：只调本地 ffmpeg 按顺序拼接，不额外调用任何模型。
+    # 放在画布末尾当「保存/预览」用，也让自动链真正一条链出成片。
+    "film": {
+        "kind": "film",
+        "category": "video",
+        "label": "成片",
+        "description": "把上游多段视频按节点从左到右的顺序合成一条成片（本地 ffmpeg，不调用模型、不花钱）；"
+        "跑完可直接预览或下载",
+        "features": ["mergeVideo"],
+        "handles": {
+            "targets": [{"id": "in-video", "type": "video"}],
+            "sources": [],
+        },
+    },
     # ---- 分镜图：读分镜表逐镜出图（C 期） ----
     # 每镜用它自己的首帧提示词，上游纯图片不参与（要的是"这一镜的角色"），
     # 参考图 = 节点上手动选的 + 该镜文本里提到的资产设定图。
     # `animatic` = 出完图之后可以零成本出一版「静图缓动样片」：
     # 按分镜表的时长与运镜把静图串成能看的片子，先审节奏再决定要不要花视频钱。
     #
-    # 现在它已经是图片组的一条**内置配方**（执行走同一段扇出）：
-    # - `hidden`：不再出现在「添加节点」等新建入口，新画布一律用图片组；
-    # - `presetOf`：模型/草稿里仍写老类型时，修复阶段直接改写成图片组；
-    # - 存量画布里的 storyboardImage 照常执行，不做迁移。
+    # 现在它是**面向用户的那一个入口**（图片组退回内部实现）：
+    # - 新建节点菜单里只出现「分镜图」，用户不用理解「组」这种抽象；
+    # - 执行仍走图片组的同一条扇出路径，能力没有减少；
+    # - 模型/草稿仍写 imageGroup 时，修复阶段会改写成 storyboardImage。
     "storyboardImage": {
         "kind": "storyboardImage",
         "category": "image",
         "label": "分镜图",
-        "hidden": True,
-        "presetOf": "imageGroup",
         "description": "读上游分镜表逐镜出图（用每镜的首帧提示词，自动追加风格词）；"
         "提到资产名会自动挂设定图；出完图可以零成本出一版静图样片",
         "features": [
@@ -194,15 +212,17 @@ NODE_SCHEMAS: dict[str, dict] = {
             "sources": [{"id": "out-image", "type": "image"}],
         },
     },
-    # ---- 图片组：通用的「一个节点 → N 张图」（组合原语） ----
-    # 分镜图是它内置的一条配方（读分镜表）；以后商品多角度、角色表情包也从这里长，
-    # 不再为每种场景新增一个节点类型。第一版先复用分镜表的解析与逐行参考注入。
+    # ---- 图片组：内部通用原语，不再作为新建入口 ----
+    # 它是「一个节点 → N 张图」的实现层；分镜图是它面向用户的名字。
+    # 保留 kind 是为了存量画布与既有草稿照常执行，新草稿会被改写成 storyboardImage。
     "imageGroup": {
         "kind": "imageGroup",
         "category": "image",
         "label": "图片组",
+        "hidden": True,
+        "presetOf": "storyboardImage",
         "description": "按上游表格逐行出图：一个节点产出 N 张、按行号保序；"
-        "每行用自己的提示词，提到资产名会自动挂设定图。适合分镜、多角度、批量变体",
+        "每行用自己的提示词，提到资产名会自动挂设定图。它是分镜图的内部实现",
         "features": [
             "prompt",
             "modelSelect",
@@ -223,6 +243,9 @@ NODE_SCHEMAS: dict[str, dict] = {
         "kind": "workflow",
         "category": "tool",
         "label": "ComfyUI 工作流",
+        # 新流程：工作流在「模型服务」里配置根目录后导入，作为模型出现在图片/视频节点；
+        # 不再作为新建节点入口。存量画布里的工作流节点照常执行。
+        "hidden": True,
         "description": "上传 workflow_api.json 后按参数表调分辨率/帧数/步数等执行；产物类型由工作流决定",
         "features": ["prompt", "workflowSelect", "imageUpload"],
         "handles": {

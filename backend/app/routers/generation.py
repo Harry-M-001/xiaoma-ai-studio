@@ -144,6 +144,7 @@ async def preflight_videos(
         db, prompt=payload.prompt, model_key=payload.model_key,
         first_frame_asset_id=payload.first_frame_asset_id,
         ratio=payload.ratio, resolution=payload.resolution,
+        audio_ref_asset_id=payload.audio_ref_asset_id,
     )
     return _to_preflight_out(report)
 
@@ -255,8 +256,12 @@ async def generate_videos(
         if ff is None or ff.kind != "image":
             raise HTTPException(status_code=400, detail="首帧图片不存在或不是图片")
 
-    # 参数档位以配置表为准
-    duration = await option_service.validate_int_option(db, "video_duration", payload.duration, "视频时长")
+    # 时长是连续值：区间由模型能力决定（Seedance 2.5 / Wan 3.0 可到 30 秒），
+    # 其余参数仍以配置表档位为准。
+    dur_low, dur_high = provider_store.video_duration_limit(
+        resolved.service.kind, resolved.model_name
+    )
+    duration = option_service.validate_duration(payload.duration, dur_low, dur_high)
     ratio = await option_service.validate_option(db, "video_ratio", payload.ratio, "画幅比例")
     resolution = await option_service.validate_option(
         db, "video_resolution", payload.resolution, "清晰度"

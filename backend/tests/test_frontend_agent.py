@@ -1,18 +1,18 @@
-"""「AI 搭画布」入口收进 Agent 后的前端静态检查。
+"""画布页「一句话搭画布」入口与 Agent 的分工（前端静态检查）。
 
 运行：venv/Scripts/python tests/test_frontend_agent.py
 
-背景：画布页原先有一个「AI 搭画布」按钮，用一句话生成节点草稿。Agent 上线后
-它和 Agent 里的 `draft_canvas` 是同一件事的两套入口——用户不知道该点哪个，
-维护也要改两处。现在口径是：
+背景：画布页曾有一个「AI 搭画布」按钮，一度被整条删掉、只留 Agent 里的
+`draft_canvas`。但用户站在画布上想「一句话铺一条链」时，还得跳去 Agent 再回来，
+多一道门槛。现在的口径是：
 
-1. **画布页不再有这条入口**：按钮、弹窗、草稿类型与请求函数都删掉；
-2. **后端 planner 还在**：它仍是 Agent 工具 `draft_canvas` 的实现，
-   只是不再由画布页直接调用；
+1. **入口回到画布**：工具栏有「一句话搭画布」，出草稿、看预览、点落定；
+2. **实现只有一份**：它调的就是 Agent `draft_canvas` 用的同一个后端 planner
+   （`/api/canvas/agent/plan`），前端不许自己写第二套拓扑/布局；
 3. **降级路径必须留着**：不支持工具调用的模型仍然要能干活——自动链、模板、
    手动添加节点、分享导入，这四条一个都不能少。
 
-这里的断言全是静态的：删干净之后如果有人又把它加回来，测试会立刻红。
+这里的断言全是静态的：有人把入口又删了、或者另起一套 planner，测试会立刻红。
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "frontend" / "src"
 CANVAS = SRC / "pages" / "CanvasPage.tsx"
+AGENT_PAGE = SRC / "pages" / "AgentPage.tsx"
 API = SRC / "api.ts"
 TYPES = SRC / "types.ts"
 BACKEND_AGENT = ROOT / "backend" / "app" / "services" / "canvas_agent.py"
@@ -35,23 +36,22 @@ def _text(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def test_the_canvas_toolbar_no_longer_has_its_own_agent_entry():
-    """按钮、弹窗、草稿预览一并消失——半留半删比不删更糟。"""
+def test_the_canvas_has_a_one_sentence_draft_entry():
+    """按钮、弹窗、草稿预览与落定回调都要在——只留个按钮等于没做。"""
     src = _text(CANVAS)
-    for gone in ("AI 搭画布", "function AgentDialog", "DraftMiniMap", "AGENT_FAIL_TITLE"):
-        assert gone not in src, f"画布页里还有 {gone}，入口没收干净"
-    for gone in ("setAgentOpen", "applyAgentDraft", "canvasAgentPlan"):
-        assert gone not in src, f"画布页里还在调用 {gone}"
+    for needed in ("一句话搭画布", "function AgentDialog", "DraftMiniMap", "applyAgentDraft"):
+        assert needed in src, f"画布页缺 {needed}，入口不完整"
 
 
-def test_the_frontend_no_longer_requests_plans_directly():
-    """草稿只经 Agent 的 draft_canvas 生成，前端不再单独发这个请求。"""
-    assert "canvasAgentPlan" not in _text(API), "api.ts 里还留着 canvasAgentPlan"
-    assert "CanvasAgentDraft" not in _text(TYPES), "types.ts 里还留着草稿类型"
+def test_the_frontend_plan_request_is_shared_with_the_agent():
+    """草稿只经后端 planner 生成；前端请求函数与草稿类型缺一不可。"""
+    assert "canvasAgentPlan" in _text(API), "api.ts 少了 canvasAgentPlan"
+    assert "/api/canvas/agent/plan" in _text(API), "前端请求没有打到 Agent 那同一个 planner"
+    assert "CanvasAgentDraft" in _text(TYPES), "types.ts 少了草稿类型"
 
 
-def test_the_backend_planner_is_still_there_for_the_agent_tool():
-    """planner 没被误删：Agent 的 draft_canvas 还要调它。"""
+def test_the_backend_planner_is_the_single_implementation():
+    """planner 同时服务 Agent 的 draft_canvas 与画布页入口，不许删其中一边。"""
     assert "async def plan(" in _text(BACKEND_AGENT)
     assert '"/agent/plan"' in _text(BACKEND_ROUTER), "后端路由被误删了"
     tools = _text(BACKEND_TOOLS)
@@ -73,11 +73,11 @@ def test_manual_paths_stay_available_for_models_without_tool_calling():
 
 
 def test_new_node_menu_skips_recipe_kinds():
-    """「添加节点」不再列出配方节点（旧分镜图）：新画布统一用图片组。"""
+    """「添加节点」不再列出内部原语（图片组）：新画布统一从分镜图进入。"""
     src = _text(CANVAS)
     menu = src[src.index("canvas-addmenu-title"):]
     menu = menu[: menu.index("</div>", menu.index("</button>")) + 6]
-    assert "s.hidden" in menu, "添加节点菜单没有按 hidden 过滤"
+    assert "s.hidden" in menu and "s.menuHidden" in menu, "添加节点菜单没有按 hidden/menuHidden 过滤"
     assert "storyboardImage" not in menu, "添加节点菜单里还在硬编码分镜图"
 
 
@@ -88,6 +88,54 @@ def test_the_shared_landing_helper_is_still_used_by_import():
     helper = helper[: helper.index("const applyImportedDoc")]
     for needed in ("Date.now().toString(36)", "modelKeyForNodeType(", "setDirty(true)"):
         assert needed in helper, f"落定逻辑里缺 {needed}"
+
+
+def test_the_agent_timeline_shows_what_it_did_to_the_canvas():
+    """Agent 读/改/跑画布时，对话里要看得见对象与结果，而不是一坨 JSON。
+
+    守三件事：画布工具有一张人话卡片、页顶有条监视条、卡片能直接打开画布。
+    """
+    src = _text(AGENT_PAGE)
+    for needed in (
+        "function CanvasActivityCard",
+        "function CanvasMonitor",
+        '"agent-canvas-card"',
+        "get_canvas",
+        "apply_canvas_draft",
+        "run_canvas",
+        "canvas_status",
+        "onOpenCanvas",
+    ):
+        assert needed in src, f"Agent 页缺「{needed}」，画布活动又只能看 JSON 了"
+
+
+def test_the_agent_has_three_slash_commands_and_a_stop_button():
+    """输入 / 弹三条命令；/goal 的持续监测要能看见、能停。"""
+    src = _text(AGENT_PAGE)
+    for needed in (
+        "SLASH_ITEMS",
+        "Spec",
+        "Plan",
+        "Goal",
+        "agent-slash",
+        "selectSlash",
+        "持续监测中",
+        "stopAgentGoal",
+        "goalRunning",
+    ):
+        assert needed in src, f"Agent 页缺「{needed}」"
+    assert "stopAgentGoal" in _text(API), "api.ts 少了停止持续监测的接口"
+
+
+def test_the_agent_polls_only_while_a_turn_or_a_run_is_in_flight():
+    """请求进行中要逐步回读会话；画布只在真有任务在跑时继续轮询。
+
+    没有这条节制，打开一个老会话就会每 2 秒打两次接口，永远停不下来。
+    """
+    src = _text(AGENT_PAGE)
+    assert "getAgentSession(sid)" in src, "请求进行中没有回读会话，思考与工具调用不会实时出现"
+    assert "polls < 900" in src, "画布轮询没有停止条件"
+    assert "RUNNING_STATUS" in src, "没有按任务状态判断「还在跑」"
 
 
 if __name__ == "__main__":

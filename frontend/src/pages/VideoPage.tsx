@@ -12,9 +12,6 @@ import TaskCard from "../components/TaskCard";
 import Lightbox from "../components/Lightbox";
 
 /** 后端未配置参数档位时的内置回落，保证页面仍然可用 */
-const FALLBACK_DURATION: ParamOptionItem[] = [
-  { id: -1, value: "5", label: "5 秒", meta: {}, sort_order: 1 },
-];
 const FALLBACK_RATIO: ParamOptionItem[] = [
   { id: -1, value: "16:9", label: "16:9", meta: {}, sort_order: 1 },
 ];
@@ -48,7 +45,6 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
   const [duration, setDuration] = useState(5);
   const [ratio, setRatio] = useState("16:9");
   const [resolution, setResolution] = useState("720p");
-  const [durationOptions, setDurationOptions] = useState<ParamOptionItem[]>(FALLBACK_DURATION);
   const [ratioOptions, setRatioOptions] = useState<ParamOptionItem[]>(FALLBACK_RATIO);
   const [resolutionOptions, setResolutionOptions] = useState<ParamOptionItem[]>(FALLBACK_RESOLUTION);
   const [firstFrame, setFirstFrame] = useState<{ id: number; url: string } | null>(null);
@@ -95,13 +91,12 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
       } catch {
         // 接口不可用：使用上方内置默认档位
       }
-      const durations = options.video_duration?.length ? options.video_duration : FALLBACK_DURATION;
       const ratios = options.video_ratio?.length ? options.video_ratio : FALLBACK_RATIO;
       const resolutions = options.video_resolution?.length ? options.video_resolution : FALLBACK_RESOLUTION;
-      setDurationOptions(durations);
       setRatioOptions(ratios);
       setResolutionOptions(resolutions);
-      setDuration(Number(pickValue(durations, String(cfgNumber(config, "defaults.video_duration", 5)))));
+      // 时长不再用档位：只取配置里的默认值，再按当前模型区间夹一次（上面的 effect 兜底）
+      setDuration(Number(cfgNumber(config, "defaults.video_duration", 5)));
       setRatio(pickValue(ratios, cfgString(config, "defaults.video_ratio", "16:9")));
       setResolution(pickValue(resolutions, cfgString(config, "defaults.video_resolution", "720p")));
       setConfirmGen(cfgBool(config, "safety.confirm_before_generate", true));
@@ -111,6 +106,15 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
   useEffect(() => {
     prefs.modelKey.set("video", modelKey);
   }, [modelKey]);
+
+  // 时长区间跟着所选模型走：判据由后端给（Seedance 2.5 / Wan 3.0 能到 30 秒），
+  // 前端不按模型名猜——换模型后把越界的值拉回区间内。
+  const currentModel = models.find((m) => m.key === modelKey);
+  const durationMin = currentModel?.min_duration ?? 3;
+  const durationMax = currentModel?.max_duration ?? 15;
+  useEffect(() => {
+    setDuration((d) => Math.min(durationMax, Math.max(durationMin, d)));
+  }, [durationMin, durationMax]);
 
   const runningIds = tasks.filter((t) => isRunning(t.status)).map((t) => t.id).join(",");
   useEffect(() => {
@@ -153,6 +157,7 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
           first_frame_asset_id: firstFrame?.id ?? null,
           ratio,
           resolution,
+          audio_ref_asset_id: audioRef?.id ?? null,
         }),
       );
       setWarnings(found);
@@ -178,6 +183,8 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
     await doCreate();
   };
 
+  const safeDuration = Math.min(durationMax, Math.max(durationMin, duration));
+
   const doCreate = async () => {
     setSubmitting(true);
     try {
@@ -186,7 +193,7 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
         prompt: prompt.trim(),
         first_frame_asset_id: firstFrame?.id ?? null,
         audio_ref_asset_id: audioRef?.id ?? null,
-        duration,
+        duration: safeDuration,
         ratio,
         resolution,
       });
@@ -277,18 +284,26 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
           </div>
 
           <div className="field">
-            <label className="field-label">时长</label>
-            <div className="segmented">
-              {durationOptions.map((d) => (
-                <button
-                  key={d.value}
-                  className={duration === Number(d.value) ? "active" : ""}
-                  onClick={() => setDuration(Number(d.value))}
-                >
-                  {d.label}
-                </button>
-              ))}
-            </div>
+            <label className="field-label">
+              时长（秒）
+              <span className="field-hint-inline">
+                {durationMin}–{durationMax} 秒，可手动输入
+              </span>
+            </label>
+            <input
+              className="input"
+              type="number"
+              min={durationMin}
+              max={durationMax}
+              step={1}
+              value={duration}
+              onChange={(e) => setDuration(Number(e.target.value) || durationMin)}
+              onBlur={(e) =>
+                setDuration(
+                  Math.min(durationMax, Math.max(durationMin, Number(e.target.value) || durationMin)),
+                )
+              }
+            />
           </div>
 
           <div className="field">
@@ -393,7 +408,7 @@ export default function VideoPage({ onGoSettings }: { onGoSettings: () => void }
             <div className="confirm-row">
               <span>参数</span>
               <b>
-                {duration} 秒 · {ratio} · {resolution}
+                {safeDuration} 秒 · {ratio} · {resolution}
                 {firstFrame ? " · 图生视频" : ""}
               </b>
             </div>

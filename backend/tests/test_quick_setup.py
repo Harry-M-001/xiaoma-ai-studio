@@ -40,12 +40,12 @@ def test_recognizes_openai_project_key():
 
 
 def test_ambiguous_sk32_hits_both_candidates():
-    """DeepSeek 与通义千问的 Key 形状完全相同。
+    """DeepSeek、通义千问、阿里百炼的 Key 形状完全相同。
 
-    这是现实：机器分不开。所以要求**两个都进候选**，由真实请求去分辨，
+    这是现实：机器分不开。所以要求**全部进候选**，由真实请求去分辨，
     而不是按 sort_order 偷偷选一个——选错的表现是「Key 明明没问题却报 401」。
     """
-    assert _who("sk-" + "0123456789abcdef" * 2) == ["deepseek", "qwen"]
+    assert _who("sk-" + "0123456789abcdef" * 2) == ["deepseek", "qwen", "bailian"]
 
 
 def test_recognizes_kimi_long_key():

@@ -35,7 +35,12 @@ def _parse_models(raw: str) -> list[ModelSpec]:
         modality = str(item.get("modality") or "").strip()
         if name and modality:
             out.append(
-                ModelSpec(name=name, modality=modality, label=str(item.get("label") or ""))
+                ModelSpec(
+                    name=name,
+                    modality=modality,
+                    label=str(item.get("label") or ""),
+                    hidden=bool(item.get("hidden")),
+                )
             )
     return out
 
@@ -174,6 +179,66 @@ def _make_key(service_id: int, model_name: str) -> str:
     return f"{service_id}:{model_name}"
 
 
+def supports_thinking(service: ProviderService, model_name: str) -> bool:
+    """这个模型能不能开思考模式（纯判据，与适配器里的判定同一条口径）。
+
+    只认 DeepSeek 的 OpenAI 兼容端点：`thinking` 是它家文档里的入参形状，
+    别家收到不认识的字段多半直接 400。判不出来就不给开——比「点了没反应」诚实。
+    """
+    if service.kind != "openai":
+        return False
+    return "deepseek" in (service.base_url or "").lower() or model_name.lower().startswith("deepseek")
+
+
+def video_duration_limit(kind: str, model_name: str) -> tuple[int, int]:
+    """这个视频模型的时长区间（秒）。
+
+    时长不是「档位」：同一个下拉里既有只认 5/10 的老模型，也有能到 30 秒的
+    Seedance 2.5 / Wan 3.0。把区间放在这里（而不是前端按模型名猜），
+    界面和接口校验用的是同一份判据。判不出来时给一个保守但不算死的区间。
+    """
+    kind = (kind or "").strip().lower()
+    name = (model_name or "").strip().lower()
+
+    if kind == "ark":
+        if "seedance-2-5" in name:
+            return 4, 30
+        if "seedance-2-0" in name:
+            return 4, 15
+        if "seedance-1-5" in name:
+            return 4, 12
+        if "seedance-1-0" in name:
+            return 5, 10  # 1.0 系列只有 5 / 10 两档
+        return 4, 15
+
+    if kind == "kie":
+        if "seedance-2-5" in name:
+            return 4, 30
+        if "seedance-2" in name:
+            return 4, 15
+        if "kling-4" in name:
+            return 3, 30
+        if "wan/3-0" in name:
+            return 2, 30
+        return 5, 10  # 老一代（kling v2.5 / seedream v4 视频等）
+
+    if kind == "dashscope":
+        if name.startswith("wan3"):
+            return 2, 30
+        if "kling-v4" in name:
+            return 3, 30
+        if name.startswith("kling/"):
+            return 3, 15
+        if "wan2.7-r2v" in name:
+            return 2, 10
+        if name.startswith("wan2.7"):
+            return 2, 15
+        return 2, 15
+
+    # 认不出厂商：给 3–15 的常用区间，超出由上游报错；不要在这里装作知道
+    return 3, 15
+
+
 def list_model_options(rows: list[ProviderService], modality: str | None = None) -> list[ModelOption]:
     options: list[ModelOption] = []
     for row in rows:
@@ -182,6 +247,14 @@ def list_model_options(rows: list[ProviderService], modality: str | None = None)
         for spec in _parse_models(row.models_json):
             if modality and spec.modality != modality:
                 continue
+            # 兼容别名只参与解析，不出现在下拉里（否则一个服务下挂四个同义模型）
+            if spec.hidden:
+                continue
+            low, high = (
+                video_duration_limit(row.kind, spec.name)
+                if spec.modality == "video"
+                else (None, None)
+            )
             options.append(
                 ModelOption(
                     key=_make_key(row.id, spec.name),
@@ -190,6 +263,9 @@ def list_model_options(rows: list[ProviderService], modality: str | None = None)
                     name=spec.name,
                     label=spec.label or spec.name,
                     modality=spec.modality,
+                    thinking=supports_thinking(row, spec.name),
+                    min_duration=low,
+                    max_duration=high,
                 )
             )
     return options
@@ -221,6 +297,33 @@ async def resolve_model(
         raise AdapterError("模型已从服务配置中移除，请重新选择")
     if spec.modality != expected_modality:
         raise AdapterError("所选模型与当前能力不匹配，请重新选择模型")
+
+    # ComfyUI「工作流即模型」：模型名形如 comfy:12，图与参数表从工作流库取，
+    # 适配器带着它们构造，后面 generate_image / submit_video 就能直接跑。
+    if row.kind == "comfyui" and model_name.startswith("comfy:"):
+        from app.models import ComfyWorkflow
+        from app.providers.comfyui import ComfyUIAdapter
+
+        try:
+            workflow_id = int(model_name.split(":", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise AdapterError("ComfyUI 工作流模型的编号不正确，请重新扫描导入") from exc
+        workflow = await db.get(ComfyWorkflow, workflow_id)
+        if workflow is None or workflow.provider_id != row.id:
+            raise AdapterError("这个 ComfyUI 工作流已被删除，请到模型服务里重新扫描导入")
+        adapter = ComfyUIAdapter(
+            row.base_url,
+            "",
+            workflow=json.loads(workflow.graph_json or "{}"),
+            params=json.loads(workflow.param_map_json or "[]"),
+        )
+        return ResolvedModel(
+            service=row,
+            adapter=adapter,
+            model_name=model_name,
+            modality=spec.modality,
+            label=spec.label or model_name,
+        )
 
     return ResolvedModel(
         service=row,

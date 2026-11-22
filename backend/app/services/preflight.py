@@ -278,13 +278,52 @@ async def check_video(
     first_frame_asset_id: int | None = None,
     ratio: str = "",
     resolution: str = "",
+    audio_ref_asset_id: int | None = None,
 ) -> Report:
     report = Report()
     report.add(_prompt_warning(prompt))
     report.add(await _recent_failure_warning(db, model_key, "video"))
     report.add(_queue_warning(1))
     report.add(await _first_frame_warnings(db, first_frame_asset_id, ratio, resolution))
+    report.add(await _audio_ref_warning(db, model_key, audio_ref_asset_id))
     return report
+
+
+async def _audio_ref_warning(
+    db: AsyncSession, model_key: str, audio_ref_asset_id: int | None
+) -> Warning | None:
+    """这一档模型认不认参考音频（对白音轨）。
+
+    上游对不认识的参数会直接 400，虽然不扣钱，但任务中心会多一条失败记录，
+    用户看到的又是「上游拒绝了这次请求」这种要靠猜的话。能提前说就直接说。
+    """
+    if not audio_ref_asset_id or not model_key or ":" not in model_key:
+        return None
+    from app.models import ProviderService
+    from app.providers.ark import audio_ref_support
+
+    sid_text, model_name = model_key.split(":", 1)
+    try:
+        service = await db.get(ProviderService, int(sid_text))
+    except ValueError:
+        return None
+    # 名单只对 Ark（Seedance）有效；别家的适配器会在提交时明确报错，不在这里猜
+    if service is None or service.kind != "ark":
+        return None
+    if audio_ref_support(model_name) is not False:
+        return None
+    return Warning(
+        code="video.audio_ref_unsupported",
+        message=(
+            f"「{model_name}」不认参考音频：这条对白音轨发过去会被上游直接拒绝。"
+            "不扣费，但会多一条失败任务。"
+        ),
+        suggestion=(
+            "把视频模型换成 Seedance 1.5 pro / 2.0 / 2.5 这几档；"
+            "或者去掉对白音轨，只出无声片子。"
+        ),
+    )
+
 
 
 def _frame_pixels(frame: Asset) -> tuple[int, int] | None:

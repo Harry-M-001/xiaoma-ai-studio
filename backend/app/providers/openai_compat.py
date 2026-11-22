@@ -167,6 +167,7 @@ class OpenAICompatAdapter(BaseAdapter):
         tools: list[dict] | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        thinking: bool | None = None,
     ) -> dict:
         """非流式 + 工具调用。
 
@@ -174,6 +175,11 @@ class OpenAICompatAdapter(BaseAdapter):
         **下标增量**拼的（`index` + 分片的 `arguments` 字符串），各家还各有偏差；
         Agent 每步只等一次完整响应，非流式拿到的就是完整的 `message.tool_calls`，
         拼装这件事根本不存在。
+
+        `thinking` 只对认这个参数的端点下发（见 `_thinking_supported`）：
+        DeepSeek 的 Chat Completions 用 `{"thinking": {"type": "enabled"|"disabled"}}`，
+        且**默认就是 enabled**——所以「关掉思考」必须显式下发 disabled，不能省。
+        思维链在响应的 `message.reasoning_content` 里，与 content 同级。
         """
         if not self.base_url or not self.api_key:
             raise AdapterError(
@@ -192,6 +198,8 @@ class OpenAICompatAdapter(BaseAdapter):
             body["tool_choice"] = "auto"
         if max_tokens:
             body["max_tokens"] = int(max_tokens)
+        if thinking is not None and self.supports_thinking(model):
+            body["thinking"] = {"type": "enabled" if thinking else "disabled"}
 
         try:
             resp = await client.post(url, headers={**self.headers(),
@@ -244,9 +252,20 @@ class OpenAICompatAdapter(BaseAdapter):
         return {
             "content": message.get("content") or "",
             "tool_calls": calls,
+            # 思维链：DeepSeek 用 reasoning_content；少数兼容层叫 reasoning（字符串）
+            "reasoning": str(message.get("reasoning_content") or message.get("reasoning") or ""),
             "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason") or "",
             "usage": data.get("usage") or {},
         }
+
+    def supports_thinking(self, model: str) -> bool:
+        """这个端点认不认 `thinking` 参数（纯判据）。
+
+        只认 DeepSeek：`thinking` 是它家的入参形状，别家收到不认识的字段多半直接 400，
+        而「猜错了就整轮失败」比「这次不思考」糟得多。所以判不出来就不下发，
+        界面上也不把开关做成可用（`provider_store.supports_thinking` 用的是同一判据）。
+        """
+        return "deepseek" in (self.base_url or "").lower() or model.lower().startswith("deepseek")
 
     async def generate_image(
         self,

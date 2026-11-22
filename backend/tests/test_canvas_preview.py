@@ -544,13 +544,14 @@ def test_image_group_still_prefers_storyboard_format():
     assert storyboard_sheet.parse_table_rows("| 名字 | 数量 |\n| --- | --- |\n| 猫 | 2 |\n") == []
 
 
-def test_auto_chain_uses_the_image_group_primitive():
-    """自动链不再铺固定的「分镜图」类型，改成通用图片组（分镜图降为配方）。"""
+def test_auto_chain_uses_the_storyboard_image_node():
+    """自动链铺的是对外的「分镜图」；图片组退回内部实现，不该再被新建。"""
     src = (BACKEND.parent / "frontend" / "src" / "canvasChain.ts").read_text(encoding="utf-8")
-    assert "{ type: IMAGE_GROUP_KIND, col: 4, row: 1 }" in src, "L3 没有铺图片组"
-    assert '["storyboard", IMAGE_GROUP_KIND]' in src, "图片组没接分镜表"
-    assert "[IMAGE_GROUP_KIND, \"video\"]" in src, "视频没接图片组"
-    assert 'type: "storyboardImage"' not in src, "自动链还在铺旧的固定节点"
+    assert "{ type: STORYBOARD_IMAGE_KIND, col: 4, row: 1 }" in src, "L3 没有铺分镜图"
+    assert '["storyboard", STORYBOARD_IMAGE_KIND]' in src, "分镜图没接分镜表"
+    assert "[STORYBOARD_IMAGE_KIND, \"video\"]" in src, "视频没接分镜图"
+    assert "{ type: IMAGE_GROUP_KIND, col:" not in src, "自动链还在铺内部图片组"
+    assert '[IMAGE_GROUP_KIND, "video"]' not in src, "视频还接在内部图片组上"
 
 
 def test_guard_preview_shares_the_same_builder():
@@ -575,10 +576,10 @@ def test_guard_fanout_builders_accept_dry_run():
 
 
 def test_guard_build_node_tasks_forwards_dry_run():
-    """节点级分发要把 dry_run 传给每一个批量分支。"""
+    """节点级分发要把 dry_run 传给每一个分支（含成片这种本地节点）。"""
     body = _body("_build_node_tasks")
-    assert body.count("dry_run=dry_run") == 4  # 资产设定图 / 分镜图 / 逐镜视频 / 单任务
-    assert body.count("await _create_") == 4
+    assert body.count("dry_run=dry_run") == 5  # 资产设定图 / 分镜图 / 逐镜视频 / 成片 / 单任务
+    assert body.count("await _create_") == 5
     assert body.count("await _create_node_task(") == 1
 
 

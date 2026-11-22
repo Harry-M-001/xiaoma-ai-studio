@@ -124,8 +124,9 @@ app.include_router(interpolate.router)
 app.include_router(projects.router)
 app.include_router(canvas.router)
 app.include_router(agent.router)
-app.include_router(mcp.router)
-app.include_router(harness.router)
+if settings.XMS_HARNESS:
+    app.include_router(mcp.router)
+    app.include_router(harness.router)
 app.include_router(share.router)
 app.include_router(comfy.router)
 app.include_router(update.router)
@@ -151,6 +152,10 @@ if _dist.exists():
         async def get_response(self, path: str, scope):  # type: ignore[override]
             # Windows 下 Mount 传来的 path 可能用反斜杠分隔
             rel = path.replace("\\", "/").lstrip("/")
+            # API 不能回退到 index.html：没挂载的接口（比如默认关闭的 /api/mcp）
+            # 应该如实 404，拿一段 HTML 回去会让调用方以为「调通了」。
+            if rel.startswith("api/"):
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
             try:
                 response = await super().get_response(path, scope)
             except StarletteHTTPException:

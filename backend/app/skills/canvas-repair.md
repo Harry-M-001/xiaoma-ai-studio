@@ -16,6 +16,7 @@ description: 画布「跑不起来 / 跑出来不对」时，按读→体检→�
 ## 修的时候
 
 - **改节点用 `update_node`**，参数只传契约里允许的键（被忽略的键会在 `ignored_params` 里）；
+  换模型直接传顶层 `model_key`（先 `list_models(modality=...)` 拿准确的 key），不用让用户手动点；
 - **连线的端口类型必须匹配**（文本→文本、图片→图片），不合法会被后端拒绝；
 - 改完再跑一次 `preview_canvas` 或 `lint_canvas` 复核，**用工具结果说话**。
 

@@ -1476,6 +1476,47 @@ def _has_input(node: dict, prompt: str, upstream_text: str) -> bool:
 _IMAGE_CONSUMERS = ("image", "video", "workflow")
 
 
+async def _create_film_task(
+    db: AsyncSession,
+    project_id: int,
+    node: dict,
+    upstream: list[tuple[str, dict, list[Asset]]],
+    *,
+    dry_run: bool = False,
+) -> list[Task]:
+    """成片节点：把上游视频按节点从左到右的顺序合成一条。
+
+    只认**视频**产物；上游没有视频（例如只接了图片）就明确报错，
+    而不是安静地出一条空片。合并本身是本地 ffmpeg，不调用模型。
+    """
+    ordered = sorted(
+        upstream,
+        key=lambda item: float((item[1].get("position") or {}).get("x") or 0),
+    )
+    asset_ids: list[int] = []
+    for _nid, _src, assets in ordered:
+        # 一个视频节点可能一次出多段（逐镜出片）：它们都要进成片，
+        # 不能只取第一段——那会把 3 镜剪成 1 镜。顺序沿用任务/资产本身的顺序。
+        asset_ids.extend(a.id for a in assets if a.kind == "video")
+
+    if len(asset_ids) < 2:
+        raise ValueError(
+            "成片节点至少要接两段视频（按节点从左到右的顺序合成）；"
+            "现在只找到 %d 段。请先把上游视频节点跑出产物，再运行成片。" % len(asset_ids)
+        )
+
+    task = Task(
+        kind="film",
+        status="pending",
+        model="local:ffmpeg",
+        prompt=f"成片：{len(asset_ids)} 段视频按顺序合并",
+        params_json=json.dumps({"asset_ids": asset_ids}, ensure_ascii=False),
+        canvas_project_id=project_id,
+        canvas_node_id=str(node["id"]),
+    )
+    return [await _persist_task(db, task, dry_run)]
+
+
 async def _build_node_tasks(
     db: AsyncSession,
     project_id: int,
@@ -1491,6 +1532,10 @@ async def _build_node_tasks(
     `dry_run=True` 只算数不落库：整图确认弹窗（见 `preview_graph`）走的也是这一段，
     保证「弹窗上写的数」和「真跑派出的数」来自同一份计算。
     """
+    # 成片只吃上游视频、不需要提示词，必须放在「有没有输入内容」的检查之前
+    if normalize_type(str(node.get("type") or "")) == "film":
+        return await _create_film_task(db, project_id, node, upstream, dry_run=dry_run)
+
     prompt, images, videos, upstream_text = await _node_inputs(db, doc, node, upstream)
     if not _has_input(node, prompt, upstream_text):
         raise ValueError("节点没有可用的输入内容")
@@ -1621,6 +1666,18 @@ def run_progress(run_id: str) -> dict:
     return {"active": not state["done"], "expected": state["expected"]}
 
 
+def active_run_for(project_id: int) -> str:
+    """这张画布上还在进行的整图 run_id（没有就空串）。
+
+    给「等任务」用：整图是边跑边派下游的，任务表这会儿可能是空的，
+    但这一跑其实还没结束。只看任务表会在第一个节点跑完时就误判成「全跑完了」。
+    """
+    for run_id, state in reversed(list(_ACTIVE_RUNS.items())):
+        if state.get("projectId") == project_id and not state.get("done"):
+            return run_id
+    return ""
+
+
 async def _stamp_run(db: AsyncSession, tasks: list[Task], run_id: str) -> None:
     """把这一批任务标上「属于哪一跑」。
 
@@ -1637,6 +1694,56 @@ async def _stamp_run(db: AsyncSession, tasks: list[Task], run_id: str) -> None:
 
 # 一张素材被这一跑引用这么多次以上，才值得在确认弹窗里点名（更低的次数属正常搭配）
 _REUSE_MIN_HITS = 2
+
+
+async def _input_warnings(
+    db: AsyncSession,
+    node: dict,
+    upstream: list[tuple[str, dict, list[Asset]]],
+) -> list[str]:
+    """上游接进来的媒体，当前模型/工作流到底吃不吃。
+
+    这一版只对 ComfyUI 工作流做「能力体检」（它最容易出现「没有参考图槽位」）；
+    其它家的模型在适配器里已经有明确报错，不在这里重复猜。
+    返回值直接进运行确认弹窗的提醒区——先告诉人，而不是等跑一半才炸。
+    """
+    data = node.get("data") or {}
+    model_key = str(data.get("model_key") or "")
+    if not model_key:
+        return []
+    ntype = normalize_type(str(node.get("type") or ""))
+    modality = "video" if ntype == "video" else "image"
+    try:
+        resolved = await provider_store.resolve_model(db, model_key, modality)
+    except Exception:  # noqa: BLE001 - 模型没了是另一种错误，交给后面的正常流程去报
+        return []
+    if getattr(resolved.service, "kind", "") != "comfyui":
+        return []
+    try:
+        workflow_id = int(str(resolved.model_name).split(":", 1)[1])
+    except (IndexError, ValueError):
+        return []
+    workflow = await db.get(ComfyWorkflow, workflow_id)
+    if workflow is None:
+        return []
+    params = json.loads(workflow.param_map_json or "[]")
+    has_image_slot = any(p.get("type") == "image" for p in params)
+
+    images = [a for _nid, _src, assets in upstream for a in assets if a.kind == "image"]
+    videos = [a for _nid, _src, assets in upstream for a in assets if a.kind == "video"]
+    audios = [a for _nid, _src, assets in upstream for a in assets if a.kind == "audio"]
+
+    out: list[str] = []
+    if images and not has_image_slot:
+        out.append(
+            "当前 ComfyUI 工作流没有参考图槽位（LoadImage）：上游接进来的图片不会被使用，"
+            "运行时会直接报错。请关掉这个节点的「提及注入」，或换一个带参考图槽位的工作流。"
+        )
+    if videos:
+        out.append("当前 ComfyUI 工作流不支持参考视频：上游的视频只能当普通产物，模型读不到。")
+    if audios:
+        out.append("当前 ComfyUI 工作流不支持参考音频：上游的音频不会被使用。")
+    return out
 
 
 async def preview_graph(project_id: int) -> dict:
@@ -1671,8 +1778,9 @@ async def preview_graph(project_id: int) -> dict:
             if not is_runnable(node["type"]):
                 continue
             step_nodes += 1
-            if node["type"] != "workflow":
+            if normalize_type(node["type"]) not in ("workflow", "film"):
                 # 非 workflow 节点一律要真调模型（workflow 走本机 ComfyUI，不扣额度）
+                # 成片只跑本地 ffmpeg，既不是模型调用也不花钱
                 billable = True
             label = NODE_SCHEMAS[node["type"]]["label"]
             if version_pin_of(node):
@@ -1699,6 +1807,8 @@ async def preview_graph(project_id: int) -> dict:
                 "outputCount": len(existing),
                 "waiting": waiting,
                 "error": "",
+                # 上游媒体能不能被当前模型/工作流消费：先提醒，而不是跑一半才报错
+                "warnings": await _input_warnings(db, node, upstream),
             }
 
             try:
@@ -1713,11 +1823,13 @@ async def preview_graph(project_id: int) -> dict:
                     blocked.append(label)
             else:
                 item["count"] = len(tasks)
-                total_tasks += len(tasks)
                 by: dict[str, int] = {}
                 for t in tasks:
                     by[t.kind] = by.get(t.kind, 0) + 1
                     by_kind[t.kind] = by_kind.get(t.kind, 0) + 1
+                    # 成片是本地 ffmpeg 合片，不算一次「模型调用」，也不该进预算闸
+                    if t.kind != "film":
+                        total_tasks += 1
                     tp = read_task_params(t)
                     # 逐镜对白会**额外**做语音合成：它不是任务，所以不在「调用次数」里，
                     # 但它是真花钱的一次调用——不摆出来的话，这一跑的账就少算了。
@@ -1744,6 +1856,9 @@ async def preview_graph(project_id: int) -> dict:
             ]
 
     notes: list[dict] = []
+    for it in items:
+        for warning in it.get("warnings") or []:
+            notes.append({"level": "warning", "text": f"「{it['label']}」{warning}"})
     if blocked:
         notes.append(
             {

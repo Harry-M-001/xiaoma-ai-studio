@@ -31,7 +31,9 @@ def _text(p: Path) -> str:
 
 def _share_dialog() -> str:
     src = _text(CANVAS)
-    return src[src.index("function ShareDialog(") : src.index("/* ---------------- 运行整图的二次确认")]
+    # 到下一个组件区块为止：ShareDialog 后面现在跟着「一句话搭画布」的弹窗，
+    # 不切干净会把那边的 onApply 也算进来
+    return src[src.index("function ShareDialog(") : src.index("/* ---------------- 一句话搭画布")]
 
 
 def _apply_imported() -> str:
