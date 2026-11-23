@@ -67,6 +67,9 @@ def test_hashed_assets_are_gzipped_and_cached_forever():
             assert resp.status_code == 200, resp.text
             assert resp.headers.get("content-encoding") == "gzip", dict(resp.headers)
             assert "immutable" in (resp.headers.get("cache-control") or ""), dict(resp.headers)
-            assert resp.headers.get("content-type", "").startswith("text/javascript"), dict(resp.headers)
+            # `.js` 的 MIME 由标准库 mimetypes 给：Linux 上多为 text/javascript，
+            # Windows 注册表会给 application/javascript，两者都是对的（浏览器都认）。
+            ctype = resp.headers.get("content-type", "")
+            assert ctype.startswith(("text/javascript", "application/javascript")), dict(resp.headers)
 
     asyncio.run(case())

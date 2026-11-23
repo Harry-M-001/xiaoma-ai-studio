@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from email.utils import formatdate
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -25,6 +25,7 @@ from app.providers.base import AdapterError
 from app import APP_NAME, __version__
 from app.config import settings
 from app.database import SessionLocal, init_db
+from app.deps import has_valid_token, require_auth
 from app.routers import (
     admin,
     agent,
@@ -149,7 +150,7 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _VIDEO_SUFFIXES = {".mp4", ".webm", ".mov", ".m4v", ".mkv"}
 
 
-@app.get("/media-thumb/{rel:path}")
+@app.get("/media-thumb/{rel:path}", dependencies=[Depends(require_auth)])
 async def media_thumb(rel: str, w: int = 320):
     """列表用的缩略图（默认 320px）。图片缩放，视频抽第 1 秒的一帧当封面。
 
@@ -174,7 +175,22 @@ async def media_thumb(rel: str, w: int = 320):
     )
 
 
-app.mount("/media", StaticFiles(directory=settings.storage_dir), name="media")
+class AuthStaticFiles(StaticFiles):
+    """带口令校验的媒体目录。
+
+    `/media` 下的原片是 `<img>` / `<video>` 直接请求的，加不了自定义请求头，
+    所以这里与 API 同源但不同通道：认登录时种下的 HttpOnly Cookie，也认
+    `?access_token=`（复制直链的场景）。校验通过后仍走 StaticFiles，
+    Range（拖动进度条）、ETag、304 都照旧，不自己实现一套。
+    """
+
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        if not has_valid_token(Request(scope)):
+            return JSONResponse(status_code=401, content={"detail": "未授权，请先输入访问口令"})
+        return await super().get_response(path, scope)
+
+
+app.mount("/media", AuthStaticFiles(directory=settings.storage_dir), name="media")
 
 _dist: Path = settings.frontend_dist
 # 前端构建产物里这些后缀是文本，gzip 收益大；图片/字体/媒体不碰

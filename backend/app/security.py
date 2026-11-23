@@ -19,6 +19,10 @@ from app.config import settings
 
 _TOKEN_TTL_SECONDS = 30 * 24 * 3600
 
+# 媒体（`<img>` / `<video>`）发不了 Authorization 头，登录时用这个 HttpOnly Cookie 顶上。
+AUTH_COOKIE = "xiaoma_auth"
+AUTH_COOKIE_MAX_AGE = _TOKEN_TTL_SECONDS
+
 
 def _load_or_create_key() -> bytes:
     key_file = settings.data_dir / "secret.key"
@@ -58,10 +62,13 @@ def issue_auth_token() -> str:
 def verify_auth_token(token: str) -> bool:
     try:
         raw_b64, sig_b64 = token.split(".", 1)
-    except ValueError:
+        expected = hmac.new(_SIGNING_KEY, raw_b64.encode("ascii"), hashlib.sha256).digest()
+        # 伪造的令牌长度/字符都可能不合法，base64 解码本身就会抛异常；
+        # 这里必须回 False 而不是让它冒成 500——那是「随手改个 cookie 就把服务打挂」。
+        actual = base64.urlsafe_b64decode(sig_b64)
+    except Exception:  # noqa: BLE001
         return False
-    expected = hmac.new(_SIGNING_KEY, raw_b64.encode("ascii"), hashlib.sha256).digest()
-    if not hmac.compare_digest(expected, base64.urlsafe_b64decode(sig_b64)):
+    if not hmac.compare_digest(expected, actual):
         return False
     try:
         payload: dict[str, Any] = json.loads(base64.urlsafe_b64decode(raw_b64))

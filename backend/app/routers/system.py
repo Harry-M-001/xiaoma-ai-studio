@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app import APP_NAME, __version__
 from app.config import settings
 from app.deps import require_auth
 from app.schemas import AppInfo, LoginIn, LoginOut
-from app.security import issue_auth_token
+from app.security import AUTH_COOKIE, AUTH_COOKIE_MAX_AGE, issue_auth_token
 
 router = APIRouter(prefix="/api", tags=["system"])
 
@@ -36,12 +36,25 @@ async def app_info() -> AppInfo:
 
 
 @router.post("/auth/login", response_model=LoginOut)
-async def login(payload: LoginIn) -> LoginOut:
+async def login(payload: LoginIn, response: Response) -> LoginOut:
     if not settings.APP_PASSWORD:
+        # 口令关掉后旧 Cookie 立刻作废，免得关了口令还留着一条能过期的凭据
+        response.delete_cookie(AUTH_COOKIE, path="/")
         return LoginOut(token="")
     if not hmac.compare_digest(payload.password, settings.APP_PASSWORD):
         raise HTTPException(status_code=401, detail="口令不正确")
-    return LoginOut(token=issue_auth_token())
+    token = issue_auth_token()
+    # 媒体原片由 <img>/<video> 直接请求，加不了 Authorization；靠这个 Cookie 过 /media 校验。
+    # HttpOnly：前端脚本读不到；SameSite=Lax：同源图片/视频请求照常带上。
+    response.set_cookie(
+        AUTH_COOKIE,
+        token,
+        max_age=AUTH_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return LoginOut(token=token)
 
 
 @router.get("/auth/check", dependencies=[Depends(require_auth)])

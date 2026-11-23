@@ -79,3 +79,11 @@
 - 后端全量测试 **1,253 项通过**（2026-11-23，提交 `78de46a`）。初版在未迁移临时库上出现的 2 项失败，复核为测试修改全局 `settings.DATA_DIR` 未复原导致的隔离问题，已列入 P0 修复项；与迁移无关。
 - 本轮优化后实测：`/api/meta/setup-status` 冷请求 12–24 ms；`/assets/*` 主包 gzip 后 72.5 kB；缩略图首次生成后缓存命中 5–6 ms。
 - 未验证：真实付费模型、浏览器主链路的完整回归、100 节点以上画布的拖动与保存压测。本轮审查与修订未修改业务源码。
+
+### 第 0 步落地记录（2026-11-23）
+
+- **测试隔离**：新增 `backend/tests/conftest.py`，每个用例独立空数据目录、收工后逐个复原 `settings` 字段；会话开始时对全局库跑一次幂等迁移。在**全新空目录**（`DATA_DIR` 指向刚建的临时目录）跑全量测试：**1,272 项通过**（2:47），不再需要先手工启动一次应用。
+- **媒体授权**：登录接口额外下发 HttpOnly Cookie（SameSite=Lax，30 天），`require_auth` 同时接受 Bearer / `?access_token=` / Cookie；`/media` 换成带校验的 `AuthStaticFiles`，`/media-thumb` 挂同一道鉴权，Range 仍由 Starlette 处理。真实服务实测：未登录 `/media` 与 `/media-thumb` 均 401，登录后 200，`Range: bytes=0-3` 返回 206；口令未设置时一律放行。
+- **CI 基线**：新增 `.github/workflows/ci.yml`，在全新空库执行迁移（并打印建出的表）、跑后端全量测试、前端 `npm ci` + 构建。
+- 附带修复：伪造令牌的 base64 非法时 `verify_auth_token` 会抛异常（500），改为返回 False；`.js` 的 MIME 断言兼容 `text/javascript` 与 `application/javascript`（Windows / Linux 取值不同）。
+

@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from fastapi import Depends, HTTPException, Query
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import SessionLocal
-from app.security import verify_auth_token
-
-_bearer = HTTPBearer(auto_error=False)
+from app.security import AUTH_COOKIE, verify_auth_token
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
@@ -21,18 +18,31 @@ async def get_db() -> AsyncIterator[AsyncSession]:
         yield db
 
 
-async def require_auth(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
-    access_token: str | None = Query(default=None),
-) -> None:
-    """未设置 APP_PASSWORD 时全放行；设置后必须携带有效令牌。
+def token_candidates(request: Request) -> tuple[str, ...]:
+    """请求里可能携带的令牌，按「谁最可信」排在前面。
 
-    令牌支持两种传递方式：
-    1. Authorization: Bearer <token>（接口调用）
-    2. ?access_token=<token>（浏览器直接下载文件等无法加头的场景）
+    三种来源都要认：
+    1. Authorization: Bearer <token>（前端 fetch / SSE）
+    2. ?access_token=<token>（浏览器直链下载，加不了请求头）
+    3. HttpOnly Cookie（`<img>` / `<video>` / `<audio>` 由浏览器自己发起，
+       连 query 都改不了，只能靠登录时种下的 Cookie）
     """
+    auth = request.headers.get("authorization", "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    return (
+        bearer,
+        request.query_params.get("access_token") or "",
+        request.cookies.get(AUTH_COOKIE) or "",
+    )
+
+
+def has_valid_token(request: Request) -> bool:
+    """未设置 APP_PASSWORD 时全放行；设置后任一来源的令牌有效即可。"""
     if not settings.APP_PASSWORD:
-        return
-    token = creds.credentials if creds is not None else access_token
-    if not token or not verify_auth_token(token):
+        return True
+    return any(token and verify_auth_token(token) for token in token_candidates(request))
+
+
+async def require_auth(request: Request) -> None:
+    if not has_valid_token(request):
         raise HTTPException(status_code=401, detail="未授权，请先输入访问口令")
