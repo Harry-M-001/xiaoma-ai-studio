@@ -44,6 +44,7 @@ from app.routers import (
     projects,
     providers,
     share,
+    stats,
     subtitles,
     system,
     update,
@@ -142,6 +143,7 @@ app.include_router(update.router)
 app.include_router(logs.router)
 app.include_router(admin.router)
 app.include_router(workflows.router)
+app.include_router(stats.router)
 
 
 @app.exception_handler(AdapterError)

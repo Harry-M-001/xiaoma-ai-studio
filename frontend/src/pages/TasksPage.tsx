@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ListChecks, RefreshCw } from "lucide-react";
 import { api } from "../api";
-import type { Task, TaskRetryIn, TaskStatus } from "../types";
+import type { Task, TaskRetryIn, TaskStatus, UsageSummary } from "../types";
 import { Empty, Spinner, isDone, isRunning } from "../components/common";
 import TaskCard from "../components/TaskCard";
 import Lightbox from "../components/Lightbox";
@@ -16,6 +16,12 @@ const STATUS_MATCH: Record<Exclude<StatusFilter, "all">, (s: TaskStatus) => bool
   failed: (s) => s === "failed" || s === "cancelled",
 };
 
+function fmtMs(ms: number | null): string {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
 export default function TasksPage() {
   const toast = useToast();
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -23,6 +29,20 @@ export default function TasksPage() {
   const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [preview, setPreview] = useState<{ url: string; kind: string } | null>(null);
+  const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [usageDays, setUsageDays] = useState(7);
+
+  const loadUsage = useCallback(async () => {
+    try {
+      setUsage(await api.getUsage(usageDays));
+    } catch {
+      /* 用量只是附加信息，拉不到不该挡住任务列表 */
+    }
+  }, [usageDays]);
+
+  useEffect(() => {
+    void loadUsage();
+  }, [loadUsage]);
 
   const load = useCallback(async () => {
     try {
@@ -106,10 +126,93 @@ export default function TasksPage() {
             全部图片 / 视频生成任务集中在这里：进行中自动刷新，失败可一键按原参数重试。
           </div>
         </div>
-        <button className="btn btn-ghost" onClick={load} title="刷新">
+        <button
+          className="btn btn-ghost"
+          onClick={() => {
+            void load();
+            void loadUsage();
+          }}
+          title="刷新"
+        >
           <RefreshCw size={15} />
           刷新
         </button>
+      </div>
+
+      <div className="card usage-card">
+        <div className="usage-head">
+          <div>
+            <div className="about-title">用量</div>
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+              只统计真实发出去的请求与上游回报的用量；不估算费用（本机没有价目表）。
+            </div>
+          </div>
+          <div className="segmented">
+            {[7, 30].map((d) => (
+              <button
+                key={d}
+                className={usageDays === d ? "active" : ""}
+                onClick={() => setUsageDays(d)}
+              >
+                近 {d} 天
+              </button>
+            ))}
+          </div>
+        </div>
+        {!usage ? (
+          <div style={{ padding: 16, textAlign: "center" }}>
+            <Spinner />
+          </div>
+        ) : (
+          <>
+            <div className="usage-grid">
+              <div>
+                <span>实际请求</span>
+                <b>{usage.requests.total}</b>
+              </div>
+              <div>
+                <span>完成</span>
+                <b>{usage.requests.completed}</b>
+              </div>
+              <div>
+                <span>失败 / 取消</span>
+                <b className={usage.requests.failed ? "bad" : ""}>{usage.requests.failed}</b>
+              </div>
+              <div>
+                <span>平均耗时</span>
+                <b>{fmtMs(usage.requests.avgDurationMs)}</b>
+              </div>
+              <div>
+                <span>整图 计划 / 实际</span>
+                <b>
+                  {usage.runs.plannedCalls} / {usage.runs.actualCalls}
+                </b>
+              </div>
+              <div>
+                <span>Agent 用量</span>
+                <b>{usage.agentTokens} tokens</b>
+              </div>
+            </div>
+            {usage.byModel.length > 0 && (
+              <div className="usage-models">
+                {usage.byModel.slice(0, 6).map((m) => (
+                  <div key={m.modelKey} className="usage-model-row">
+                    <span className="usage-model-name" title={m.modelKey}>
+                      {m.service ? `${m.service} · ` : ""}
+                      {m.label}
+                    </span>
+                    <span className="muted">
+                      {m.total} 次
+                      {m.failed ? ` · ${m.failed} 失败` : ""}
+                      {m.avgDurationMs != null ? ` · 均 ${fmtMs(m.avgDurationMs)}` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="usage-note">{usage.cost.note}</div>
+          </>
+        )}
       </div>
 
       <div className="prompt-toolbar">

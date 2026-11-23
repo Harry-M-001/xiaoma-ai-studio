@@ -1661,6 +1661,34 @@ export interface UpdateRunResult {
   message: string;
 }
 
+// ---- 用量 ----
+
+export interface UsageSummary {
+  since: string;
+  days: number;
+  requests: {
+    total: number;
+    completed: number;
+    failed: number;
+    running: number;
+    avgDurationMs: number | null;
+  };
+  byKind: { kind: string; total: number; failed: number }[];
+  byModel: {
+    modelKey: string;
+    label: string;
+    service: string;
+    total: number;
+    failed: number;
+    avgDurationMs: number | null;
+  }[];
+  /** 整图受理时的预估 vs 实际：对账用 */
+  runs: { count: number; plannedCalls: number; actualCalls: number };
+  /** 上游回报的 Agent 用量（供应商没回就是 0，不猜） */
+  agentTokens: number;
+  cost: { ready: boolean; currency: string; estimate: number | null; note: string };
+}
+
 // ---- 工作流模板 ----
 
 export interface WorkflowTemplateMeta {

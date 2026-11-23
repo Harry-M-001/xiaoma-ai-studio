@@ -63,6 +63,7 @@ import type {
   ShotTable,
   WorkflowTemplateMeta,
   TemplatePreflight,
+  UsageSummary,
   SchemaRow,
   SetupStatus,
   SpeechResult,
@@ -560,6 +561,13 @@ export const api = {
     request<{ shotId: string; status: string }>(
       `/api/canvas/${projectId}/shots/${encodeURIComponent(shotId)}`,
       { method: "PATCH", body: json({ status }) },
+    ),
+
+  // ---- 用量 ----
+  /** 近 N 天的实际请求 / 成败 / 耗时 / 计划与实际对账 / Agent 用量 */
+  getUsage: (days = 7, projectId?: number) =>
+    request<UsageSummary>(
+      `/api/stats/usage?days=${days}${projectId ? `&project_id=${projectId}` : ""}`,
     ),
 
   // ---- 工作流模板 ----
