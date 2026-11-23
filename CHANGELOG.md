@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **桌面版（MVP）**：新增 `desktop/launcher.py`，用 pywebview（WebView2）开一个原生窗口，内部仍是同一套后端与前端：找到 `runtime\python.exe` 与 `backend\` 起 uvicorn（只监听 127.0.0.1），等 `/api/health` 就绪后把窗口指过去，关窗即停后端。支持 `--port` / `--data-dir` / `--portable` / `--no-window` / `--debug`；默认数据在 `%APPDATA%\XiaomaAIStudio\data`，`--portable` 用程序目录下的 `backend\data`。同名互斥量保证只开一个实例，再次双击会把已有窗口提到前面。`desktop/build_exe.py` 复用便携包产物打成 `dist/desktop/app/XiaomaAIStudio.exe`（onedir）并生成 `dist/xiaoma-ai-studio-v<版本>-win64-desktop.zip`。
+- **Agent 卡在失败动作上会自查一次**：工具返回错误后，如果模型直接收尾，会再提醒它一次（「换个参数 / 补查 / 查提交状态，或说清卡点」），不再把失败当成功汇报；空回复也会补一次「要行动就调工具，否则给出可交付答复」。同一个只读查询最多连查两次（原来是三次），成功写入后清空计数，改完仍可用同一查询回查验证。
 - **发版做成一条命令**：新增 `backend/tools/release.py`，预检（版本号三处一致、CHANGELOG 有说明、分支为 main、工作区干净、便携包存在）→ 推 main 与 tag 到两个远程 → 双平台建 Release 并上传 → 回下载两个附件校验 sha256。Gitee 配额不足时会自动清理最早的一批旧便携包（保留 tag 与说明），并把「最新 Release」顺序修回本次版本。支持 `--build`（先打包）与 `--dry-run`（只预检）。脚本不进便携包。
 
 ## v2.2.3 · 2026-11-23

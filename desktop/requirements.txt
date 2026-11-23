@@ -1,0 +1,2 @@
+# 桌面版运行依赖（窗口壳）。后端依赖仍由 backend/requirements.txt 负责。
+pywebview>=6.2
