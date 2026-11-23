@@ -1654,3 +1654,34 @@ export interface UpdateRunResult {
   changed?: string[];
   message: string;
 }
+
+// ---- 备份与恢复 ----
+
+export interface BackupItem {
+  name: string;
+  size: number;
+  kind: string;
+  reason?: string;
+  createdAt?: string;
+  alembicRevision?: string;
+  assets?: number;
+  /** manifest 读不出来（包损坏或不是本应用的备份） */
+  broken?: boolean;
+}
+
+export interface BackupInspectResult {
+  ok: boolean;
+  kind: string;
+  createdAt: string;
+  appVersion: string;
+  alembicRevision: string;
+  currentRevision: string;
+  /** 「来自更早版本，恢复后会自动迁移」这类提示 */
+  hint: string;
+  containsSecrets: boolean;
+  totals: Record<string, number>;
+  needsRestart: boolean;
+  restored?: boolean;
+  restoredFiles?: number;
+  message?: string;
+}

@@ -58,6 +58,8 @@ import type {
   CameraMoveTable,
   OllamaStatus,
   QuickSetupResult,
+  BackupItem,
+  BackupInspectResult,
   SchemaRow,
   SetupStatus,
   SpeechResult,
@@ -72,7 +74,6 @@ import type {
   UpscaleOptions,
   UpscaleRequest,
 } from "./types";
-
 const TOKEN_KEY = "xm_token";
 
 export const authToken = {
@@ -599,6 +600,29 @@ export const api = {
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),
   checkUpdate: () => request<UpdateStatus>("/api/update/check", { method: "POST" }),
   runUpdate: () => request<UpdateRunResult>("/api/update/run", { method: "POST" }),
+
+  // ---- 备份与恢复 ----
+  listBackups: () => request<BackupItem[]>("/api/admin/backup/list"),
+  createLightBackup: () => request<BackupItem>("/api/admin/backup/light", { method: "POST" }),
+  createFullBackup: () => request<BackupItem>("/api/admin/backup/full", { method: "POST" }),
+  /** 只校验不落盘：这个备份包能不能恢复、会不会触发迁移 */
+  inspectBackup: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<BackupInspectResult>("/api/admin/backup/inspect", { method: "POST", body: fd });
+  },
+  restoreBackup: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return request<BackupInspectResult>("/api/admin/backup/restore", { method: "POST", body: fd });
+  },
+  /** 备份文件直链（走 query 带 token：`<a>` 加不了 Authorization 头） */
+  backupDownloadUrl: (name: string) => {
+    const t = authToken.get();
+    return `/api/admin/backup/download/${encodeURIComponent(name)}${
+      t ? `?access_token=${encodeURIComponent(t)}` : ""
+    }`;
+  },
 
   // ---- 日志与诊断 ----
   logsStatus: () => request<LogsStatus>("/api/logs/status"),

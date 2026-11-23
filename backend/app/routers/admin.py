@@ -21,13 +21,17 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_db, require_auth
 from app.registry.schema_registry import SCHEMA_REGISTRY, TableSpec
+from app.services import backup_service
 from app.services import config_center_service as config_center
 from app.services import config_transfer_service as config_transfer
 
@@ -89,6 +93,81 @@ async def import_config(
         return await config_transfer.import_snapshot(db, payload, dry_run=dryRun)
     except config_center.ConfigError as e:
         raise _fail(e) from e
+
+
+# ---------- 备份与恢复 ----------
+
+
+@router.get("/backup/list")
+async def list_backups() -> list[dict]:
+    """已有备份（新→旧）。只读目录，不碰数据库。"""
+    return backup_service.list_backups()
+
+
+@router.post("/backup/light")
+async def create_light_backup() -> dict:
+    """轻备份：数据库快照 + 素材清单 + 校验和 + 迁移版本。几秒钟就好。"""
+    try:
+        return backup_service.create_light_backup("manual")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/backup/full")
+async def create_full_backup() -> dict:
+    """全量备份：连生成产物一起打包。先检查磁盘余量，不够直接拒绝。"""
+    try:
+        return backup_service.create_full_backup()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/backup/download/{name}")
+async def download_backup(name: str) -> FileResponse:
+    try:
+        path = backup_service.backup_path(name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return FileResponse(path, media_type="application/zip", filename=path.name)
+
+
+async def _receive_upload(file: UploadFile) -> Path:
+    """把上传的备份存到备份目录下的临时文件（恢复要按真实路径读）。"""
+    suffix = Path(file.filename or "backup.zip").suffix or ".zip"
+    fd, tmp = tempfile.mkstemp(prefix=".upload-", suffix=suffix, dir=backup_service.backup_dir())
+    path = Path(tmp)
+    try:
+        with open(fd, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                out.write(chunk)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+@router.post("/backup/inspect")
+async def inspect_backup(file: UploadFile = File(...)) -> dict:
+    """只校验不落盘：这个包能不能恢复、会不会触发迁移、含不含密钥。"""
+    path = await _receive_upload(file)
+    try:
+        return backup_service.inspect_backup(path)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@router.post("/backup/restore")
+async def restore_backup(file: UploadFile = File(...)) -> dict:
+    """恢复备份。会先把当前库另存一份，然后换库并覆盖素材；**完成后需要重启应用**。"""
+    path = await _receive_upload(file)
+    try:
+        return await backup_service.restore_backup(path)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        path.unlink(missing_ok=True)
 
 
 @router.get("/schema/{table}")

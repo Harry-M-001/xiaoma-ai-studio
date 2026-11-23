@@ -88,6 +88,10 @@ LOCAL_CLOCK_OK = {
     "app/services/share_service.py": "分享快照里的 createdAt 同样是带时区的展示值，不是入库时间",
     "app/services/storage.py": "媒体按月分目录，按**本地**月份分，用户照自己的日历才找得到",
     "app/services/update_service.py": "更新检查时间只以字符串直接展示，不经浏览器做时区换算",
+    "app/services/backup_service.py": (
+        "备份文件名按**本地**时间命名（用户照自己的日历才找得到），"
+        "manifest 里的 createdAt 是给人看的展示值，两者都不写入时间列"
+    ),
 }
 
 

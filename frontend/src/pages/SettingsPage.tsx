@@ -14,6 +14,8 @@ import {
 import { api, ApiError } from "../api";
 import type {
   AuditLog,
+  BackupInspectResult,
+  BackupItem,
   ConfigImportResult,
   ConfigScopesMeta,
   ConfigSnapshot,
@@ -25,7 +27,7 @@ import type {
   UpdateStatus,
 } from "../types";
 import SchemaTable from "../components/SchemaTable";
-import { Empty, Modal, Spinner } from "../components/common";
+import { Empty, formatSize, Modal, Spinner } from "../components/common";
 import { useToast } from "../components/Toast";
 
 const AUDIT_TAB = "__audit__";
@@ -1149,6 +1151,8 @@ function AboutPanel() {
         )}
       </div>
 
+      <BackupCard />
+
       <div className="card" style={{ padding: 20, marginTop: 16 }}>
         <div className="about-head">
           <div className="about-title">日志与诊断</div>
@@ -1262,6 +1266,192 @@ function AboutPanel() {
         </Modal>
       )}
     </>
+  );
+}
+
+/** 备份与恢复：轻备份几秒就好（升级前会自动做），全量连生成产物一起打包；恢复后必须重启。 */
+function BackupCard() {
+  const toast = useToast();
+  const [items, setItems] = useState<BackupItem[]>([]);
+  const [busy, setBusy] = useState("");
+  const [pending, setPending] = useState<{ file: File; info: BackupInspectResult } | null>(null);
+  const [restored, setRestored] = useState<BackupInspectResult | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const load = async () => {
+    try {
+      setItems(await api.listBackups());
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "读取备份列表失败");
+    }
+  };
+
+  useEffect(() => {
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const make = async (kind: "light" | "full") => {
+    setBusy(kind);
+    try {
+      const made = kind === "light" ? await api.createLightBackup() : await api.createFullBackup();
+      toast.success(`已生成备份 ${made.name}`);
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "备份失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy("inspect");
+    try {
+      const info = await api.inspectBackup(file);
+      setPending({ file, info });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "这个备份包不能用");
+    } finally {
+      setBusy("");
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
+  const doRestore = async () => {
+    if (!pending) return;
+    setBusy("restore");
+    try {
+      const res = await api.restoreBackup(pending.file);
+      setPending(null);
+      setRestored(res);
+      toast.success("恢复完成，请重启应用");
+      await load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "恢复失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <div className="card" style={{ padding: 20, marginTop: 16 }}>
+      <div className="about-head">
+        <div>
+          <div className="about-title">备份与恢复</div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+            轻备份：数据库快照 + 素材清单 + 校验和 + 迁移版本（每次一键更新前会自动做一份）；
+            全量备份：连生成产物一起打包，文件多时耗时较久，会先检查磁盘余量。
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-ghost btn-sm" onClick={() => void make("light")} disabled={!!busy}>
+            {busy === "light" ? <Spinner /> : <Save size={14} />}
+            轻备份
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={() => void make("full")} disabled={!!busy}>
+            {busy === "full" ? <Spinner /> : <Download size={14} />}
+            全量备份
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => fileRef.current?.click()}
+            disabled={!!busy}
+          >
+            {busy === "inspect" ? <Spinner /> : <Upload size={14} />}
+            从备份恢复
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".zip"
+            style={{ display: "none" }}
+            onChange={(e) => void pick(e.target.files?.[0])}
+          />
+        </div>
+      </div>
+
+      <div className="about-note">
+        备份包里<strong>不含 API Key</strong>（数据库快照里的密钥字段已清空，`secret.key` 从不打包），
+        恢复到另一台机器后到「模型服务」重新填 Key 即可。恢复会先把当前数据库另存一份到
+        <code>data/backups/pre-restore-*.db</code>，但<strong>恢复完成后必须重启应用</strong>。
+      </div>
+
+      {restored && (
+        <div className="about-state has-update" style={{ marginTop: 10 }}>
+          {restored.message || "恢复完成，请重启应用。"}
+        </div>
+      )}
+
+      {items.length === 0 ? (
+        <div className="about-note" style={{ marginTop: 10 }}>
+          还没有备份。升级前会自动生成轻备份，也可以现在点上面的按钮。
+        </div>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          {items.map((b) => (
+            <div
+              key={b.name}
+              className="about-item"
+              style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}
+            >
+              <span className={`badge ${b.kind === "full" ? "badge-primary" : ""}`}>
+                {b.kind === "full" ? "全量" : b.kind === "light" ? "轻备份" : "备份"}
+              </span>
+              <span className="about-v about-v-mono" style={{ flex: 1, minWidth: 220 }}>
+                {b.name}
+              </span>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {b.createdAt ? b.createdAt.replace("T", " ") : ""} · {formatSize(b.size)}
+                {b.reason === "pre-update" ? " · 升级前自动" : ""}
+              </span>
+              <a className="btn btn-ghost btn-xs" href={api.backupDownloadUrl(b.name)} download>
+                下载
+              </a>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pending && (
+        <Modal
+          title="确认恢复这个备份"
+          onClose={() => setPending(null)}
+          footer={
+            <>
+              <button className="btn btn-ghost" onClick={() => setPending(null)}>
+                取消
+              </button>
+              <button className="btn btn-primary" onClick={() => void doRestore()} disabled={busy === "restore"}>
+                {busy === "restore" ? <Spinner light /> : <RotateCcw size={14} />}
+                恢复并覆盖当前数据
+              </button>
+            </>
+          }
+        >
+          <div style={{ fontSize: 13.5, lineHeight: 1.8 }}>
+            <div>备份时间：{pending.info.createdAt?.replace("T", " ") || "—"}</div>
+            <div>应用版本：{pending.info.appVersion || "—"}</div>
+            <div>
+              迁移版本：{pending.info.alembicRevision || "—"}（当前 {pending.info.currentRevision}）
+            </div>
+            <div>
+              素材 {pending.info.totals?.assets ?? 0} 条
+              {pending.info.totals?.files ? ` · 打包文件 ${pending.info.totals.files} 个` : ""}
+            </div>
+            {pending.info.hint && (
+              <div className="about-note about-note-warn" style={{ marginTop: 10 }}>
+                {pending.info.hint}
+              </div>
+            )}
+            <div className="about-note" style={{ marginTop: 10 }}>
+              恢复会覆盖当前数据库（全量包还会覆盖同名素材文件），当前数据库会先另存一份。
+              恢复后请重启应用。
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
   );
 }
 

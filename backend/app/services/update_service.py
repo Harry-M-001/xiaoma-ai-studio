@@ -387,6 +387,23 @@ async def run_update() -> dict[str, Any]:
     steps: list[dict[str, Any]] = []
     before = state.get("commit") or ""
 
+    # 升级前自动做一份轻备份：更新换的是代码，但用户的数据库与作品不该跟着冒险。
+    # 备份失败（例如磁盘满）不阻断更新，但要在步骤里如实写出来，不能悄悄跳过。
+    from app.services import backup_service
+
+    try:
+        info = await asyncio.to_thread(backup_service.create_light_backup, "pre-update")
+        steps.append(
+            {
+                "name": "升级前轻备份",
+                "ok": True,
+                "output": f"{info['name']}（{info['size']} 字节，素材清单 {info['assets']} 条）",
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("升级前轻备份失败：%s", e)
+        steps.append({"name": "升级前轻备份", "ok": False, "output": str(e)})
+
     async def step(name: str, args: list[str], cwd: Path) -> tuple[bool, str]:
         code, out = await _run_cmd(args, cwd)
         ok = code == 0

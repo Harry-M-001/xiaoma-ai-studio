@@ -87,3 +87,11 @@
 - **CI 基线**：新增 `.github/workflows/ci.yml`，在全新空库执行迁移（并打印建出的表）、跑后端全量测试、前端 `npm ci` + 构建。
 - 附带修复：伪造令牌的 base64 非法时 `verify_auth_token` 会抛异常（500），改为返回 False；`.js` 的 MIME 断言兼容 `text/javascript` 与 `application/javascript`（Windows / Linux 取值不同）。
 
+### 第 1 步落地记录（2026-11-23）
+
+- **整图运行恢复**：新增 `canvas_runs` / `run_steps`（迁移 `0028_run_steps`）。每个节点在**提交上游之前**落库输入指纹（节点数据 + 上游正文 + 上游产物 id）与这一跑派出的任务。重启时 `runner.recover()` 接回有远程 ID 的任务、把还停在 `pending` 的重新入队、把 `processing` 却拿不到远程 ID 的标为「不确定」；随后 `canvas_runner.resume_runs()` 按检查点接着走：同输入且已完成的节点直接复用（不重派），输入改过的按新输入重派，`unknown` / `failed` 挡住下游。`unknown` 不自动重发，任务中心会写明「可能已计费、确认后手动重跑」。
+- **备份与恢复**：新增 `backend/app/services/backup_service.py`。轻备份 = SQLite 在线快照 + 素材清单 + 校验和 + 迁移版本，一键更新前自动做；全量备份连生成产物一起打包，动手前检查磁盘余量。两条包都不含 API Key（快照落地即清空 `api_key_enc`，`secret.key` 从不打包）。恢复前校验校验和与迁移版本：更早的版本允许恢复并自动迁移，更新的版本直接拒绝；恢复完需重启。设置 →「关于与更新」新增「备份与恢复」卡片（轻备份 / 全量备份 / 从备份恢复 / 下载）。
+- 验证：全新空库迁移到 `0028_run_steps`；全量测试 **1,291 项通过**（2:51）；真实服务上 `/api/admin/backup/{list,light,inspect}` 均正常；浏览器实测「备份与恢复」卡片渲染、点「轻备份」后列表出现 `light-*.zip` 且无报错。
+- 未做：真实「跑到一半杀进程」的端到端演练（本轮用单测覆盖对账与复用路径）；恢复后的自动重启（按设计由用户手动重启）。
+
+
