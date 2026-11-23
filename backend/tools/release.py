@@ -1,11 +1,14 @@
 """一条命令发版：预检 → 推 tag → 双平台 Release → 上传 → 回下载校验。
 
 它只做「发版后半段」：版本号、CHANGELOG、提交由人负责（预检会检查一致性），
-打包可以加 `--build` 交给 make_portable.py。
+打包可以加 `--build` 交给 make_portable.py 与 desktop/build_exe.py。
+
+一个 Release 带两个附件：便携包（解压即用）与桌面版（原生窗口）。
+不想发桌面版时加 `--skip-desktop`。
 
 用法：
     backend\\venv\\Scripts\\python.exe backend\\tools\\release.py            # 用当前版本号发版
-    backend\\venv\\Scripts\\python.exe backend\\tools\\release.py --build    # 先打包再发
+    backend\\venv\\Scripts\\python.exe backend\\tools\\release.py --build    # 先打两个包再发
     backend\\venv\\Scripts\\python.exe backend\\tools\\release.py --dry-run  # 只做预检
 
 凭证：
@@ -49,7 +52,8 @@ GT_BASE = f"https://gitee.com/api/v5/repos/{GT_OWNER}/{GT_REPO}"
 GH_BASE = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}"
 
 UA = "xiaoma-release"
-ZIP_SUFFIX = "win64-portable.zip"
+# 我们自己发出去的附件后缀。源码包（如 v1.0.0.zip）不算，清理时不能碰。
+PACKAGE_SUFFIXES = ("win64-portable.zip", "win64-desktop.zip")
 # 配额不足时一次清几个：太少要反复试，太多会白删还能用的旧包
 PRUNE_BATCH = 5
 MAX_PRUNE = 15
@@ -182,18 +186,27 @@ def upload_multipart(url: str, path: Path) -> tuple[int, bytes]:
     ))
 
 
-def zip_asset(rel: dict) -> dict | None:
+def is_package_asset(name: str) -> bool:
+    """是不是我们自己打出去的包（便携 / 桌面），而不是 Gitee 自动附的源码包。"""
+    return str(name or "").endswith(PACKAGE_SUFFIXES)
+
+
+def package_assets(rel: dict) -> list[dict]:
+    return [a for a in (rel.get("assets") or []) if is_package_asset(a.get("name", ""))]
+
+
+def asset_named(rel: dict, name: str) -> dict | None:
     for a in rel.get("assets") or []:
-        if str(a.get("name") or "").endswith(ZIP_SUFFIX):
+        if a.get("name") == name:
             return a
     return None
 
 
 def pick_prune_candidates(releases: list[dict], keep_tag: str) -> list[dict]:
-    """挑出「最老、且还挂着便携包」的 Release；不含本次要发的那个。"""
+    """挑出「最老、且还挂着我们打的包」的 Release；不含本次要发的那个。"""
     out = [
         r for r in releases
-        if r.get("tag_name") != keep_tag and zip_asset(r) is not None
+        if r.get("tag_name") != keep_tag and package_assets(r)
     ]
     return sorted(out, key=lambda r: int(r.get("id") or 0))
 
@@ -238,14 +251,22 @@ class Gitee:
         return rel
 
     def upload(self, rel: dict, path: Path) -> None:
-        if zip_asset(rel) is not None:
-            print("Gitee 已有同名便携包，跳过上传")
+        if asset_named(rel, path.name) is not None:
+            print(f"Gitee 已有 {path.name}，跳过上传")
             return
         status, raw = upload_multipart(
             self._url(f"/releases/{rel['id']}/attach_files"), path
         )
         if status in (200, 201):
-            print("Gitee 便携包已上传")
+            # 把新附件记回内存里的 rel，同一个 Release 传第二个包时不会重复上传
+            try:
+                asset = json.loads(raw or b"null")
+            except json.JSONDecodeError:
+                asset = None
+            if not isinstance(asset, dict):
+                asset = {"name": path.name}
+            rel.setdefault("assets", []).append(asset)
+            print(f"Gitee 已上传 {path.name}")
             return
         raise _QuotaError(raw.decode("utf-8", "replace"))
 
@@ -265,7 +286,7 @@ class Gitee:
         ok = isinstance(new, dict) and new.get("id")
         print(f"  已清理 {tag} 的便携包（Release 重建 {'成功' if ok else '失败'}）")
 
-    def ensure_latest(self, tag: str, name: str, body: str, path: Path) -> None:
+    def ensure_latest(self, tag: str, name: str, body: str, paths: list[Path]) -> None:
         """重建旧 Release 会把它顶到「最新」，这里把本次 Release 重建回来。"""
         _, latest = self.get("/releases/latest")
         if isinstance(latest, dict) and latest.get("tag_name") == tag:
@@ -279,7 +300,8 @@ class Gitee:
         })
         if status not in (200, 201) or not isinstance(rel, dict) or not rel.get("id"):
             raise SystemExit(f"重建本次 Release 失败 {status}: {rel}")
-        self.upload(rel, path)
+        for path in paths:
+            self.upload(rel, path)
         _, latest2 = self.get("/releases/latest")
         if not isinstance(latest2, dict) or latest2.get("tag_name") != tag:
             raise SystemExit("重建后 latest 仍不是本次版本，请手工检查 Gitee")
@@ -290,35 +312,32 @@ class _QuotaError(Exception):
     pass
 
 
-def publish_gitee(tag: str, name: str, body: str, zip_path: Path) -> dict:
+def publish_gitee(tag: str, name: str, body: str, paths: list[Path]) -> dict:
     gt = Gitee(gitee_token())
     rel = gt.ensure_release(tag, name, body)
-    try:
-        gt.upload(rel, zip_path)
-    except _QuotaError as e:
-        text = str(e)
-        if "配额" not in text:
-            raise SystemExit(f"Gitee 上传失败：{text[:300]}")
-        print("Gitee 附件配额不足，开始清理最老的便携包 …")
-        pruned = 0
-        while pruned < MAX_PRUNE:
+    pending = list(paths)
+    pruned = 0
+    while pending:
+        path = pending[0]
+        try:
+            gt.upload(rel, path)
+        except _QuotaError as e:
+            text = str(e)
+            if "配额" not in text:
+                raise SystemExit(f"Gitee 上传失败：{text[:300]}")
+            if pruned >= MAX_PRUNE:
+                raise SystemExit("清理到上限仍上传失败，请手工检查 Gitee 配额")
+            print(f"Gitee 附件配额不足（还剩 {len(pending)} 个包没传），开始清理最老的旧包 …")
             candidates = pick_prune_candidates(gt.releases(), tag)
             batch = candidates[:PRUNE_BATCH]
             if not batch:
-                raise SystemExit("没有可清理的旧便携包了，但配额仍不足")
+                raise SystemExit("没有可清理的旧包了，但配额仍不足")
             for old in batch:
                 gt.prune_one(old)
                 pruned += 1
-            try:
-                gt.upload(rel, zip_path)
-                break
-            except _QuotaError as again:
-                if "配额" not in str(again):
-                    raise SystemExit(f"Gitee 上传失败：{str(again)[:300]}")
-                print("  仍然不足，继续清理下一批 …")
-        else:
-            raise SystemExit("清理到上限仍上传失败，请手工检查 Gitee 配额")
-    gt.ensure_latest(tag, name, body, zip_path)
+            continue  # 清完再重试同一个文件
+        pending.pop(0)
+    gt.ensure_latest(tag, name, body, paths)
     return {"id": rel["id"]}
 
 
@@ -327,7 +346,7 @@ def publish_gitee(tag: str, name: str, body: str, zip_path: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
-def publish_github(tag: str, name: str, body: str, zip_path: Path) -> dict:
+def publish_github(tag: str, name: str, body: str, paths: list[Path]) -> dict:
     token = os.environ.get("GH_TOKEN", "")
     if not token:
         raise SystemExit("没有 GH_TOKEN 环境变量，无法发 GitHub Release")
@@ -344,21 +363,22 @@ def publish_github(tag: str, name: str, body: str, zip_path: Path) -> dict:
     else:
         print("GitHub Release 已存在，复用")
 
-    for a in rel.get("assets") or []:
-        if a.get("name") == zip_path.name:
-            json_call(f"{GH_BASE}/releases/assets/{a['id']}", "DELETE", headers=headers)
-            print("GitHub 旧同名资产已删除")
+    for path in paths:
+        old = asset_named(rel, path.name)
+        if old is not None:
+            json_call(f"{GH_BASE}/releases/assets/{old['id']}", "DELETE", headers=headers)
+            print(f"GitHub 旧同名资产已删除：{path.name}")
 
-    upload_base = rel["upload_url"].split("{", 1)[0]
-    status, raw = call(urllib.request.Request(
-        f"{upload_base}?name={urllib.parse.quote(zip_path.name)}",
-        data=zip_path.read_bytes(),
-        headers={**headers, "Content-Type": "application/zip"},
-        method="POST",
-    ))
-    if status not in (200, 201):
-        raise SystemExit(f"GitHub 上传失败 {status}: {raw[:300]}")
-    print("GitHub 便携包已上传")
+        upload_base = rel["upload_url"].split("{", 1)[0]
+        status, raw = call(urllib.request.Request(
+            f"{upload_base}?name={urllib.parse.quote(path.name)}",
+            data=path.read_bytes(),
+            headers={**headers, "Content-Type": "application/zip"},
+            method="POST",
+        ))
+        if status not in (200, 201):
+            raise SystemExit(f"GitHub 上传 {path.name} 失败 {status}: {raw[:300]}")
+        print(f"GitHub 已上传 {path.name}")
     return rel
 
 
@@ -385,14 +405,11 @@ def download(url: str, dst: Path) -> None:
             f.write(chunk)
 
 
-def verify(tag: str, zip_path: Path) -> None:
+def verify(tag: str, paths: list[Path]) -> None:
     token = gitee_token()
     _, gt = json_call(f"{GT_BASE}/releases/latest?access_token={token}", "GET")
     if not (isinstance(gt, dict) and gt.get("tag_name") == tag):
         raise SystemExit(f"Gitee latest 不是 {tag}：{gt.get('tag_name') if isinstance(gt, dict) else gt}")
-    gt_asset = zip_asset(gt)
-    if gt_asset is None:
-        raise SystemExit("Gitee latest 上没有便携包")
 
     gh_headers = {
         "Authorization": f"Bearer {os.environ.get('GH_TOKEN','')}",
@@ -401,36 +418,41 @@ def verify(tag: str, zip_path: Path) -> None:
     _, gh = json_call(f"{GH_BASE}/releases/latest", "GET", headers=gh_headers)
     if not (isinstance(gh, dict) and gh.get("tag_name") == tag):
         raise SystemExit(f"GitHub latest 不是 {tag}")
-    gh_asset = zip_asset(gh)
-    if gh_asset is None:
-        raise SystemExit("GitHub latest 上没有便携包")
 
-    local = sha256_file(zip_path)
+    jobs: list[tuple[str, str, Path]] = []
+    local_by_label: dict[str, Path] = {}
+    for platform, rel in (("gitee", gt), ("github", gh)):
+        for path in paths:
+            asset = asset_named(rel, path.name)
+            if asset is None:
+                raise SystemExit(f"{platform} latest 上缺少 {path.name}")
+            label = f"{platform}:{path.name}"
+            jobs.append((label, asset["browser_download_url"], path))
+            local_by_label[label] = path
+
     results: dict[str, tuple[int, str]] = {}
 
-    def fetch(name: str, url: str) -> None:
-        tmp = Path(tempfile.gettempdir()) / f"verify-{name}-{tag}.zip"
+    def fetch(label: str, url: str, local: Path) -> None:
+        tmp = Path(tempfile.gettempdir()) / f"verify-{label.replace(':', '-')}-{tag}.zip"
         download(url, tmp)
-        results[name] = (tmp.stat().st_size, sha256_file(tmp))
+        results[label] = (tmp.stat().st_size, sha256_file(tmp))
         tmp.unlink(missing_ok=True)
 
-    threads = [
-        threading.Thread(target=fetch, args=("gitee", gt_asset["browser_download_url"])),
-        threading.Thread(target=fetch, args=("github", gh_asset["browser_download_url"])),
-    ]
+    threads = [threading.Thread(target=fetch, args=job) for job in jobs]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
     ok = True
-    for name, (size, digest) in sorted(results.items()):
-        match = digest == local and size == zip_path.stat().st_size
+    for label, (size, digest) in sorted(results.items()):
+        local_path = local_by_label[label]
+        match = digest == sha256_file(local_path) and size == local_path.stat().st_size
         ok = ok and match
-        print(f"  {name}: {size} bytes, sha256 {'一致' if match else '不一致！'}")
+        print(f"  {label}: {size} bytes, sha256 {'一致' if match else '不一致！'}")
     if not ok:
         raise SystemExit("回下载校验失败：附件与本地包不一致")
-    print(f"校验通过：{local[:12]}…")
+    print(f"校验通过：{len(jobs)} 个附件")
 
 
 # --------------------------------------------------------------------------
@@ -446,23 +468,37 @@ def build_portable() -> None:
     )
 
 
+def build_desktop() -> None:
+    print("打包桌面版（复用便携包）…")
+    subprocess.run(
+        [str(VENV_PY), str(ROOT / "desktop" / "build_exe.py"), "--skip-portable"],
+        cwd=str(ROOT), check=True,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="一条命令发版（预检 + 双平台 Release）")
-    parser.add_argument("--build", action="store_true", help="发版前先打便携包")
+    parser.add_argument("--build", action="store_true", help="发版前先打便携包与桌面包")
     parser.add_argument("--dry-run", action="store_true", help="只做预检，不推送、不发 Release")
     parser.add_argument("--skip-verify", action="store_true", help="跳过回下载 sha256 校验")
+    parser.add_argument("--skip-desktop", action="store_true", help="只发便携包，不发桌面版")
     args = parser.parse_args()
 
     back, _ = read_version()
     tag = f"v{back}"
-    zip_path = DIST / f"xiaoma-ai-studio-{tag}-win64-portable.zip"
+    paths = [DIST / f"xiaoma-ai-studio-{tag}-win64-portable.zip"]
+    if not args.skip_desktop:
+        paths.append(DIST / f"xiaoma-ai-studio-{tag}-win64-desktop.zip")
 
     preflight(tag)
     if args.build:
         build_portable()
-    if not zip_path.is_file():
-        raise SystemExit(f"找不到便携包 {zip_path}，先跑 make_portable.py 或加 --build")
-    print(f"便携包：{zip_path.name}（{zip_path.stat().st_size / 1048576:.1f} MB）")
+        if not args.skip_desktop:
+            build_desktop()
+    for path in paths:
+        if not path.is_file():
+            raise SystemExit(f"找不到 {path.name}，先打包或加 --build")
+        print(f"附件：{path.name}（{path.stat().st_size / 1048576:.1f} MB）")
     if args.dry_run:
         print("dry-run：预检完成，未做任何推送")
         return
@@ -472,12 +508,12 @@ def main() -> None:
 
     name = f"{tag} · 小马AI工坊"
     body = changelog_section(tag)
-    publish_gitee(tag, name, body, zip_path)
-    publish_github(tag, name, body, zip_path)
+    publish_gitee(tag, name, body, paths)
+    publish_github(tag, name, body, paths)
 
     if not args.skip_verify:
-        print("回下载校验两个附件 …")
-        verify(tag, zip_path)
+        print(f"回下载校验 {len(paths) * 2} 个附件 …")
+        verify(tag, paths)
 
     print("\n发版完成：")
     print(f"  GitHub: https://github.com/{GH_OWNER}/{GH_REPO}/releases/tag/{tag}")

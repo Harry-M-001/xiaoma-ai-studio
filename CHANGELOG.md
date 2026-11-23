@@ -2,11 +2,14 @@
 
 本项目遵循「一个版本 = 一个 git tag + 一份 GitHub/Gitee Release」。应用内的「系统设置 → 关于与更新」读的就是 Release 里的说明。
 
-## 未发布
+## v2.2.4 · 2026-11-23
 
-- **桌面版（MVP）**：新增 `desktop/launcher.py`，用 pywebview（WebView2）开一个原生窗口，内部仍是同一套后端与前端：找到 `runtime\python.exe` 与 `backend\` 起 uvicorn（只监听 127.0.0.1），等 `/api/health` 就绪后把窗口指过去，关窗即停后端。支持 `--port` / `--data-dir` / `--portable` / `--no-window` / `--debug`；默认数据在 `%APPDATA%\XiaomaAIStudio\data`，`--portable` 用程序目录下的 `backend\data`。同名互斥量保证只开一个实例，再次双击会把已有窗口提到前面。`desktop/build_exe.py` 复用便携包产物打成 `dist/desktop/app/XiaomaAIStudio.exe`（onedir）并生成 `dist/xiaoma-ai-studio-v<版本>-win64-desktop.zip`。
+- **新增桌面版**：同一套后端与前端，用 pywebview（WebView2）装进一个原生窗口，不用开浏览器、不用记端口。内置启动器会先找到 `runtime\python.exe` 与 `backend\` 起服务（只监听 127.0.0.1），等 `/api/health` 就绪后把窗口指过去，关窗即停服务。默认数据在 `%APPDATA%\XiaomaAIStudio\data`，加 `--portable` 则用程序目录下的 `backend\data`；同名互斥量保证只开一个实例，再次双击会把已有窗口提到前面。本版 Release 同时提供**便携包**（解压即用）与**桌面版**（解压后双击 `XiaomaAIStudio.exe`）两个附件。
+- **新增两个本地渲染视频工具，不调模型、不花钱**：`render_motion_video` 用 FFmpeg 按分幕生成片头 / 比例条形图 / 分步教程 / 促销卡 / 倒计时（16:9、9:16、1:1，每幕 1–6 秒，最多 6 幕），文字只从本地文件读入、不进滤镜串；`render_showcase_video` 提供「水上乐园 / 中性笔 / 乡村晨景」三个插画模板，10 秒横屏，带程序化配乐与音效，产物直接进资产库。Agent 会按需加载 motion-video / scene-showcase / canvas-delivery 三个技能，对话里能直接播放和下载成片。Python 依赖新增 Pillow 与 numpy，Docker 镜像补装 ffmpeg。
+- **整图交付以「本次运行」为准**：`wait_for_tasks` 可以只传 `project_id + run_id`，返回任务数、失败数、取消数、产物数以及产物的 URL / 尺寸 / 时长；运行状态按项目隔离，不会把上一跑的作品当成本次产物。Agent 提示词同步要求证据齐全就直接交付，只有缺证据或要定位失败时才另查 `canvas_status` / `list_assets` / `get_task`。
+- **技能可以直接点用**：Agent 页的技能列表从「只显示 load_skill」改成带「使用」按钮，点一下就把「加载并使用某技能」填进输入框；渲染出的视频在工具结果下方直接内嵌播放器。
 - **Agent 卡在失败动作上会自查一次**：工具返回错误后，如果模型直接收尾，会再提醒它一次（「换个参数 / 补查 / 查提交状态，或说清卡点」），不再把失败当成功汇报；空回复也会补一次「要行动就调工具，否则给出可交付答复」。同一个只读查询最多连查两次（原来是三次），成功写入后清空计数，改完仍可用同一查询回查验证。
-- **发版做成一条命令**：新增 `backend/tools/release.py`，预检（版本号三处一致、CHANGELOG 有说明、分支为 main、工作区干净、便携包存在）→ 推 main 与 tag 到两个远程 → 双平台建 Release 并上传 → 回下载两个附件校验 sha256。Gitee 配额不足时会自动清理最早的一批旧便携包（保留 tag 与说明），并把「最新 Release」顺序修回本次版本。支持 `--build`（先打包）与 `--dry-run`（只预检）。脚本不进便携包。
+- **发版做成一条命令**：新增 `backend/tools/release.py`，预检（版本号三处一致、CHANGELOG 有说明、分支为 main、工作区干净、两个包都存在）→ 推 main 与 tag 到两个远程 → 双平台建 Release 并上传便携包与桌面包 → 回下载四个附件校验 sha256。Gitee 配额不足时会自动清理最早的一批旧包（保留 tag 与说明），并把「最新 Release」顺序修回本次版本。支持 `--build`（先打两个包）、`--dry-run`（只预检）与 `--skip-desktop`（只发便携包）。脚本不进便携包。
 
 ## v2.2.3 · 2026-11-23
 
