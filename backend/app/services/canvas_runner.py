@@ -1658,10 +1658,10 @@ def _finish_run(run_id: str) -> None:
         _ACTIVE_RUNS[run_id]["done"] = True
 
 
-def run_progress(run_id: str) -> dict:
+def run_progress(run_id: str, *, project_id: int | None = None) -> dict:
     """这一跑还在进行吗、受理时估了多少次（不是这一跑就当作早已结束）。"""
     state = _ACTIVE_RUNS.get(run_id)
-    if state is None:
+    if state is None or (project_id is not None and state["projectId"] != project_id):
         return {"active": False, "expected": 0}
     return {"active": not state["done"], "expected": state["expected"]}
 

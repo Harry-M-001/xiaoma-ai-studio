@@ -17,6 +17,9 @@ ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/app/data
 
 COPY backend/requirements.txt /app/requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY backend/ /app/

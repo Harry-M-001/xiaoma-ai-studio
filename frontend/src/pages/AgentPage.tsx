@@ -1001,7 +1001,26 @@ export default function AgentPage({
                   <div className="agent-tools-title">技能（按需加载，{meta?.skills.length}）</div>
                   {(meta?.skills || []).map((s) => (
                     <div key={s.key} className="agent-tool-row">
-                      <code>load_skill({s.key})</code>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-xs"
+                        aria-label={`使用${s.name}技能`}
+                        disabled={busy || goalRunning}
+                        onClick={() => {
+                          const instruction = `请先加载并使用 ${s.key} 技能。`;
+                          setInput((draft) => {
+                            const text = draft.trimEnd();
+                            if (!text) return `${instruction}任务：`;
+                            if (SLASH_ITEMS.some(({ key }) => text === `/${key}`)) {
+                              return `${text} ${instruction}任务：`;
+                            }
+                            return `${text}\n\n${instruction}`;
+                          });
+                          inputRef.current?.focus();
+                        }}
+                      >
+                        使用
+                      </button>
                       <span>{s.name}</span>
                       <span className="agent-tool-desc">{s.description}</span>
                     </div>
@@ -1158,6 +1177,10 @@ function ToolRow({
   const hint = typeof result.hint === "string" ? result.hint : "";
   const error = typeof result.error === "string" ? result.error : "";
   const autoApproved = Boolean(result.autoApproved);
+  const asset = asRecord(result.data);
+  const rendersVideo = step.toolName === "render_motion_video" || step.toolName === "render_showcase_video";
+  const videoUrl = rendersVideo && step.status === "ok"
+    && typeof asset.url === "string" && asset.url.startsWith("/media/") ? asset.url : null;
   return (
     <div className="agent-tool-block">
       <details className={`agent-tool ${step.status === "error" ? "bad" : ""}`}>
@@ -1180,6 +1203,12 @@ function ToolRow({
           <pre>{pretty(step.toolResult)}</pre>
         </div>
       </details>
+      {videoUrl && (
+        <div className="agent-rendered-video">
+          <video src={videoUrl} controls preload="metadata" aria-label={String(asset.name || "程序化视频")} />
+          <a href={videoUrl} download>{String(asset.name || "程序化视频")} · 下载 MP4</a>
+        </div>
+      )}
       <CanvasActivityCard
         step={step}
         schemas={schemas}

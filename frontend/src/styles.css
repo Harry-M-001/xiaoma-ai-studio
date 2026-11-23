@@ -2504,6 +2504,8 @@ input, textarea, select { font-family: inherit; }
 /* ---------- 画布活动：Agent 在动哪张画布，直接在对话里看得见 ---------- */
 
 .agent-tool-block { display: flex; flex-direction: column; gap: 6px; }
+.agent-rendered-video { display: grid; gap: 6px; justify-items: start; }
+.agent-rendered-video video { display: block; width: min(100%, 420px); max-height: 360px; border-radius: 8px; }
 
 .agent-canvas-monitor {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;

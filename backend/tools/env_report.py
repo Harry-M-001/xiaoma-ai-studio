@@ -47,10 +47,12 @@ RUNTIME_DEPS = [
     "httpx",
     "python-multipart",
     "cryptography",
+    "Pillow",
+    "numpy",
 ]
 
 # 包名与导入名不一致的例外（大多数只是把 - 换成 _）
-_IMPORT_NAME = {"python-multipart": "multipart"}
+_IMPORT_NAME = {"python-multipart": "multipart", "pillow": "PIL"}
 
 OK, WARN, ERR = "OK", "警告", "错误"
 

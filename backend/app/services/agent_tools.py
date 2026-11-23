@@ -18,11 +18,14 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import AgentProject, AgentSession, AgentStep, Asset, Project, Prompt, Task
 from app.providers.base import AdapterError
 from app.registry.canvas_nodes import (
@@ -34,7 +37,7 @@ from app.registry.canvas_nodes import (
     validate_document,
 )
 from app.services import agent_skills, canvas_agent, canvas_runner, engine_install, local_engines
-from app.services import provider_store
+from app.services import motion_video, provider_store
 
 logger = logging.getLogger("xiaoma.agent")
 
@@ -934,7 +937,7 @@ async def _run_canvas(ctx: ToolContext, args: dict) -> dict:
     return {
         "ok": True,
         "data": {"project_id": project.id, "run_id": run_id},
-        "hint": "任务已经派出去，用 list_tasks 或 canvas_status 看进度；**不要**再说一遍「已经跑完了」。",
+        "hint": "已派发。下一步用 wait_for_tasks(project_id=此项目ID, run_id=本次运行ID) 等候产物。",
     }
 
 
@@ -1018,6 +1021,9 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
     raw_pid = args.get("project_id")
     pid = int(raw_pid) if raw_pid not in (None, "") else ctx.project_id
     node_id = str(args.get("node_id") or "").strip()
+    run_id = str(args.get("run_id") or "").strip()
+    if run_id and (not pid or explicit_ids or node_id):
+        raise ToolError("按整图运行等待时，请只提供 project_id 和 run_id。")
     if not explicit_ids and not pid:
         raise ToolError(
             "要等哪些任务？给 task_ids，或给 project_id（可再加 node_id）。",
@@ -1047,27 +1053,24 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
         if ctx.cancel is not None and ctx.cancel.is_set():
             cancelled = True
             break
-        ids = explicit_ids or await _scope_ids()
-        if ids:
-            # 列查询绕过 identity map：同一个会话对象不会把旧状态缓存住
-            rows = (await ctx.db.execute(
-                select(Task.id, Task.kind, Task.status, Task.progress, Task.error)
-                .where(Task.id.in_(ids))
-            )).all()
-            # **必须结束读事务**，否则 SQLite 的读快照不会更新，等的就是自己。
-            # 这里用 commit 而不是 rollback：rollback 会 expire 调用方持有的 ORM 对象
-            # （session / project），紧接着访问 session.id 就会 MissingGreenlet。
-            await ctx.db.commit()
-            busy = any(r.status in ("pending", "processing") for r in rows)
-        else:
-            busy = False
+        stmt = select(Task.id, Task.kind, Task.status, Task.progress, Task.error, Task.canvas_node_id)
+        filters = (
+            (Task.canvas_project_id == pid, Task.run_id == run_id)
+            if run_id else (Task.id.in_(explicit_ids or await _scope_ids()),)
+        )
+        # 列查询绕过 identity map，避免同一个会话对象缓存旧状态。
+        rows = (await ctx.db.execute(stmt.where(*filters).order_by(Task.id))).all()
+        busy = any(r.status in ("pending", "processing") for r in rows)
 
+        # 连这次没有查到任务也要释放读快照，才能看到后台后续派发的第一条任务。
+        await ctx.db.commit()
         # 「已有的任务都停了」不等于「这一跑结束了」：整图是边跑边派下游的。
         # 项目级等待要跟着 run 的活跃状态走，否则第一个节点跑完就回报「完事了」，
         # 模型会以为整条链跑完了（实测就是这么误判的）。
-        waiting_for_run = bool(
-            pid and not node_id and canvas_runner.active_run_for(pid)
-        )
+        if run_id:
+            waiting_for_run = canvas_runner.run_progress(run_id, project_id=pid)["active"]
+        else:
+            waiting_for_run = bool(pid and not node_id and canvas_runner.active_run_for(pid))
         if not busy and not waiting_for_run:
             break
         if time.monotonic() - started >= timeout:
@@ -1078,16 +1081,42 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
         r.status in ("pending", "processing") for r in rows
     )
     timed_out = not done and not cancelled
+    if run_id and done and not rows and not cancelled:
+        raise ToolError("此项目的本次运行没有任务记录。", hint="核对 run_canvas 返回的 project_id 和 run_id。")
+    visible_rows = sorted(rows, key=lambda r: r.status not in ("failed", "cancelled"))[:8] if run_id else rows
     tasks = [
         {
             "id": r.id,
             "kind": r.kind,
             "status": r.status,
             "progress": r.progress,
-            "error": r.error or "",
+            "error": (r.error or "")[:160] if run_id else (r.error or ""),
+            "node_id": r.canvas_node_id,
         }
-        for r in rows
+        for r in visible_rows
     ]
+    evidence: dict = {}
+    if run_id:
+        asset_rows = [] if not rows else (await ctx.db.execute(
+            select(Asset.id, Asset.kind, Asset.filename, Asset.task_id, Asset.duration, Asset.width, Asset.height)
+            .join(Task, Asset.task_id == Task.id)
+            .where(Task.run_id == run_id, Task.canvas_project_id == pid)
+            .order_by(Asset.id)
+        )).all()
+        if rows:
+            await ctx.db.commit()
+        evidence = {
+            "run_id": run_id,
+            "task_count": len(rows),
+            "failed_count": sum(r.status == "failed" for r in rows),
+            "cancelled_count": sum(r.status == "cancelled" for r in rows),
+            "asset_count": len(asset_rows),
+            "assets": [
+                {"id": a.id, "kind": a.kind, "url": f"/media/{a.filename}",
+                 "task_id": a.task_id, "seconds": a.duration, "width": a.width, "height": a.height}
+                for a in asset_rows[:6]
+            ],
+        }
     if cancelled:
         hint = "已按用户要求停止等待。"
     elif timed_out and waiting_for_run:
@@ -1102,6 +1131,7 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
     return {
         "ok": True,
         "data": {
+            **evidence,
             "done": done and not cancelled,
             "timed_out": timed_out,
             "cancelled": cancelled,
@@ -1111,6 +1141,79 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
         },
         "hint": hint,
     }
+
+
+async def _render_motion_video(ctx: ToolContext, args: dict) -> dict:
+    try:
+        spec = motion_video.MotionVideo.model_validate(args)
+    except ValidationError as exc:
+        issues = [f"{'.'.join(map(str, item['loc']))}：{item['msg']}" for item in exc.errors()]
+        raise ToolError("视频参数有误：" + "；".join(issues[:4]),
+                        hint="加载 motion-video 技能，修正分幕参数后重试。") from exc
+
+    try:
+        output, meta = await motion_video.render(spec, ctx.cancel)
+    except RuntimeError as exc:
+        raise ToolError(str(exc), hint="检查本机 FFmpeg、FFprobe 和 drawtext 滤镜支持。") from exc
+
+    timeline = [
+        scene.model_dump(include={"layout", "title", "seconds", "bars", "step", "price", "cta"},
+                         exclude_none=True)
+        | ({"countdown": {"from": scene.seconds, "to": 1, "interval_seconds": 1}}
+           if scene.layout == "countdown" else {})
+        for scene in spec.scenes
+    ]
+    return await _store_rendered_video(ctx, output, meta, spec.name, spec.model_dump_json(),
+                                       {"scenes": len(timeline), "timeline": timeline})
+
+
+async def _render_showcase_video(ctx: ToolContext, args: dict) -> dict:
+    try:
+        from app.services import motion_showcase
+    except ImportError as exc:
+        raise ToolError("当前运行环境缺少本地插画渲染依赖。", hint="安装本版本的后端 requirements.txt。") from exc
+    try:
+        spec = motion_showcase.ShowcaseVideo.model_validate(args)
+    except ValidationError as exc:
+        issues = [f"{'.'.join(map(str, item['loc']))}：{item['msg']}" for item in exc.errors()]
+        raise ToolError("有声场景参数有误：" + "；".join(issues[:4]),
+                        hint="加载 scene-showcase 技能，选择受支持的模板和标题。") from exc
+    try:
+        output, meta = await motion_showcase.render(spec, ctx.cancel)
+    except RuntimeError as exc:
+        raise ToolError(str(exc)) from exc
+    return await _store_rendered_video(ctx, output, meta, spec.name, spec.model_dump_json(), {
+        "template": spec.template, "audio_codec": meta["audio_codec"], "audio_channels": meta["audio_channels"],
+        "sound_elements": motion_showcase.RENDERERS[spec.template][2],
+        "title": spec.title, "closing_title": spec.closing_title,
+    })
+
+
+async def _store_rendered_video(
+    ctx: ToolContext, output: Path, meta: dict, name: str, spec_json: str, details: dict
+) -> dict:
+    try:
+        rel = output.resolve().relative_to(settings.storage_dir.resolve()).as_posix()
+        asset = Asset(
+            kind="video", source="generated", filename=rel, original_name=f"{name}.mp4",
+            name=name, content_type="video/mp4", size=output.stat().st_size,
+            width=meta["width"], height=meta["height"], duration=round(meta["duration"]),
+            prompt=spec_json,
+        )
+        ctx.db.add(asset)
+        await ctx.db.flush()
+        data = {
+            "id": asset.id, "kind": "video", "url": f"/media/{rel}", "name": asset.name,
+            "width": asset.width, "height": asset.height, "seconds": meta["duration"],
+            "fps": meta["fps"], "codec": meta["codec"], **details,
+        }
+        await ctx.db.commit()
+    except BaseException:
+        output.unlink(missing_ok=True)
+        await ctx.db.rollback()
+        raise
+    return {"ok": True, "data": data,
+            "hint": "成片已由 FFprobe 校验，已加入资产库。若返回数据满足要求，直接交付；无需再调 get_asset。"}
 
 
 # ============================================================ 注册表
@@ -1269,15 +1372,62 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "wait_for_tasks", "等任务完成",
         "等一批任务跑完再返回（最多 120 秒）。想看进度 / 等结果就用它，"
-        "**不要**连续调 get_task 轮询。可以给 task_ids，也可以给 project_id（可再加 node_id）。",
+        "整图运行用 project_id + run_id，可直接获取这次的资产 ID、URL 和失败数。"
+        "单节点用 task_ids。**不要**连续调 get_task 轮询。",
         TIER_READ,
         _obj({
             "task_ids": {"type": "array", "items": {"type": "integer"}},
             "project_id": {"type": "integer"},
+            "run_id": {"type": "string", "description": "run_canvas 返回的本次运行 ID"},
             "node_id": {"type": "string"},
             "timeout_seconds": {"type": "integer", "description": "最多等多少秒，5–120，默认 60"},
         }),
         _wait_for_tasks,
+    ),
+    ToolSpec(
+        "render_motion_video", "本地程序化视频",
+        "按结构化分幕用本机 FFmpeg 合成 MP4 并加入资产库。支持片头、比例条形图、编号步骤、"
+        "价格与行动按钮、真实逐秒倒计时。无需画布或生成模型。首次用先加载 motion-video 技能。",
+        TIER_WRITE,
+        _obj({
+            "name": {"type": "string"},
+            "ratio": {"type": "string", "enum": ["16:9", "9:16", "1:1"]},
+            "scenes": {
+                "type": "array", "minItems": 1, "maxItems": 6,
+                "items": _obj({
+                    "title": {"type": "string", "maxLength": 40},
+                    "subtitle": {"type": "string", "maxLength": 70},
+                    "seconds": {"type": "integer", "minimum": 1, "maximum": 6},
+                    "background": {"type": "string", "description": "#RRGGBB"},
+                    "accent": {"type": "string", "description": "#RRGGBB"},
+                    "motion": {"type": "string", "enum": ["fade", "rise", "none"]},
+                    "layout": {"type": "string", "enum": ["title", "bars", "step", "offer", "countdown"],
+                               "description": "默认 title；按用户需要选图形布局，避免用正文模拟。"},
+                    "bars": {"type": "array", "minItems": 2, "maxItems": 4,
+                             "items": _obj({
+                                 "label": {"type": "string", "maxLength": 12},
+                                 "value": {"type": "integer", "minimum": 0, "maximum": 1_000_000},
+                             }, ["label", "value"])},
+                    "step": {"type": "integer", "minimum": 1, "maximum": 99},
+                    "price": {"type": "string", "maxLength": 16},
+                    "cta": {"type": "string", "maxLength": 16},
+                }, ["title"]),
+            },
+        }, ["scenes"]),
+        _render_motion_video,
+    ),
+    ToolSpec(
+        "render_showcase_video", "本地有声场景短片",
+        "使用本地插画与立体声合成 10 秒横屏场景，支持水上乐园宣传、中性笔产品宣传与乡村小镇晨景。"
+        "可填开场与结尾标题。画面和音乐、环境或动作音效随模板生成。首次用先加载 scene-showcase 技能。",
+        TIER_WRITE,
+        _obj({
+            "template": {"type": "string", "enum": ["water_park", "gel_pen", "rural_town"]},
+            "name": {"type": "string", "maxLength": 80},
+            "title": {"type": "string", "maxLength": 16},
+            "closing_title": {"type": "string", "maxLength": 16},
+        }, ["template"]),
+        _render_showcase_video,
     ),
     ToolSpec(
         "run_canvas", "执行整图", "执行整张画布。**不可逆、会花钱**，系统会先让用户确认。",
