@@ -48,6 +48,7 @@ from app.routers import (
     system,
     update,
     upscale,
+    workflows,
 )
 from app.services import (
     canvas_runner,
@@ -140,6 +141,7 @@ app.include_router(comfy.router)
 app.include_router(update.router)
 app.include_router(logs.router)
 app.include_router(admin.router)
+app.include_router(workflows.router)
 
 
 @app.exception_handler(AdapterError)

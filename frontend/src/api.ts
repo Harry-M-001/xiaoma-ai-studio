@@ -61,6 +61,8 @@ import type {
   BackupItem,
   BackupInspectResult,
   ShotTable,
+  WorkflowTemplateMeta,
+  TemplatePreflight,
   SchemaRow,
   SetupStatus,
   SpeechResult,
@@ -558,6 +560,34 @@ export const api = {
     request<{ shotId: string; status: string }>(
       `/api/canvas/${projectId}/shots/${encodeURIComponent(shotId)}`,
       { method: "PATCH", body: json({ status }) },
+    ),
+
+  // ---- 工作流模板 ----
+  listWorkflowTemplates: () => request<WorkflowTemplateMeta[]>("/api/workflows/templates"),
+  createWorkflowTemplate: (payload: {
+    name: string;
+    description?: string;
+    nodes: CanvasDoc["nodes"];
+    edges: CanvasDoc["edges"];
+    inputs?: { key: string; label: string; hint?: string }[];
+  }) => request<WorkflowTemplateMeta>("/api/workflows/templates", {
+    method: "POST",
+    body: json(payload),
+  }),
+  preflightWorkflowTemplate: (template: string) =>
+    request<TemplatePreflight>("/api/workflows/preflight", {
+      method: "POST",
+      body: json({ template }),
+    }),
+  insertWorkflowTemplate: (
+    projectId: number,
+    template: string,
+    values: Record<string, string> = {},
+    baseRevision?: number,
+  ) =>
+    request<{ ok: boolean; template: string; nodeIds: string[]; revision: number }>(
+      `/api/workflows/projects/${projectId}/insert`,
+      { method: "POST", body: json({ template, values, baseRevision: baseRevision ?? null }) },
     ),
   // 分镜静态体检：零成本检查镜头语言（纯读，不建任务、不调模型）
   lintCanvas: (projectId: number) =>

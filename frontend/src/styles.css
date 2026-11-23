@@ -458,6 +458,21 @@ input, textarea, select { font-family: inherit; }
   .shot-row > :nth-child(4), .shot-row > :nth-child(6) { display: none; }
 }
 
+/* 工作流模板：存选区 / 预检 / 插入 */
+.tpl-save { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.tpl-save .input { flex: 1; min-width: 220px; }
+.tpl-list { display: flex; flex-direction: column; gap: 10px; }
+.tpl-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.tpl-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tpl-head b { font-size: 13.5px; margin-right: 6px; }
+.tpl-desc { color: var(--text-2); font-size: 12.5px; }
+.tpl-inputs { display: flex; gap: 10px; flex-wrap: wrap; }
+.tpl-inputs label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-3); flex: 1; min-width: 200px; }
+.tpl-check { font-size: 12px; border-radius: 8px; padding: 6px 9px; }
+.tpl-check.ok { background: var(--success-soft); color: var(--success); }
+.tpl-check.warn { background: var(--warning-soft); color: var(--warning); }
+.tpl-actions { display: flex; gap: 6px; }
+
 .canvas-layout { flex: 1; display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 0; position: relative; }
 .canvas-layout.palette-collapsed { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 900px) {

@@ -409,6 +409,32 @@ class ComfyWorkflow(Base):
     )
 
 
+class WorkflowTemplate(Base):
+    """可复用的画布片段（工作流模板）。
+
+    **一个模板就是一小段画布**：节点 + 连线 + 输入说明。插进别的项目时重新分配节点 id、
+    整体往右让开已有内容，再把 `{{输入名}}` 替换成用户填的值——复用一条成熟工作流，
+    不用从零搭一遍。内置的三份（图文广告 / 漫剧分镜 / 逐镜成片）由代码提供，不占这张表。
+    """
+
+    __tablename__ = "workflow_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # {"nodes": [...], "edges": [...]}
+    doc_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # [{"key": "prompt", "label": "你的想法", "hint": "..."}]
+    inputs_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    # {"modalities": ["text","image"], "workflows": [1]}
+    requirements_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 # ============================================================
 # Agent 工作台（2.0）：项目 → 会话（任务）→ 步骤
 # ============================================================

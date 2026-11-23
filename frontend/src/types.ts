@@ -1661,6 +1661,29 @@ export interface UpdateRunResult {
   message: string;
 }
 
+// ---- 工作流模板 ----
+
+export interface WorkflowTemplateMeta {
+  /** `builtin:key` 或 `custom:<id>` */
+  id: string;
+  source: "builtin" | "custom";
+  name: string;
+  description: string;
+  inputs: { key: string; label: string; hint?: string }[];
+  nodeCount: number;
+  version: number;
+  requirements: { modalities?: string[]; workflows?: number[] };
+}
+
+export interface TemplatePreflight {
+  ok: boolean;
+  name: string;
+  required: { modalities?: string[]; workflows?: number[] };
+  available: string[];
+  missingModalities: string[];
+  missingNodes: { nodeId: string; label: string; model: string }[];
+}
+
 // ---- 镜头工作台 ----
 
 export interface ShotCandidate {

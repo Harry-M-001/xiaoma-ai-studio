@@ -40,6 +40,7 @@ import {
   ImageIcon,
   Images,
   Keyboard,
+  LayoutTemplate,
   PanelLeftClose,
   PanelLeftOpen,
   Play,
@@ -60,6 +61,7 @@ import {
 } from "lucide-react";
 import { api, ApiError, thumbUrl } from "../api";
 import ShotWorkbench from "../components/ShotWorkbench";
+import WorkflowTemplates from "../components/WorkflowTemplates";
 import type {
   AgentMeta,
   Asset,
@@ -2915,6 +2917,9 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   // 运行整图的口径：默认增量（只派输入变过的节点），勾选后全量重做
   const [fullRun, setFullRun] = useState(false);
   const [shotsOpen, setShotsOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  /** 插入模板 / 外部改动后重新拉一次画布（+1 触发加载 effect） */
+  const [reloadKey, setReloadKey] = useState(0);
   const [running, setRunning] = useState(false);
   // 整图运行前的预估结果（非 null 时弹确认框）
   const [runPreview, setRunPreview] = useState<CanvasPreview | null>(null);
@@ -3028,7 +3033,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       void reloadWorkflows();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, reloadKey]);
 
   // 有运行中节点时轮询状态
   useEffect(() => {
@@ -3771,7 +3776,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   /** 有弹层时，单键快捷键让位（弹窗自己的 Esc 由 Dialog 管） */
   const overlayOpen = Boolean(
     addMenu || lightbox || pickerFor || editorFor || studio3d || agentOpen || shareOpen ||
-    runPreview || lintReport || runReport || shortcutsOpen || shotsOpen
+    runPreview || lintReport || runReport || shortcutsOpen || shotsOpen || templatesOpen
   );
 
   useEffect(() => {
@@ -4244,6 +4249,15 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             </button>
             <button
               className="btn btn-ghost btn-sm"
+              onClick={() => setTemplatesOpen(true)}
+              disabled={!loaded}
+              title="工作流模板：把选中的一段存成模板，或把内置模板插进画布"
+            >
+              <LayoutTemplate size={14} />
+              模板
+            </button>
+            <button
+              className="btn btn-ghost btn-sm"
               onClick={() => setShotsOpen(true)}
               disabled={!loaded}
               title="镜头工作台：按镜查看首帧与视频候选、审核、只补跑某一镜"
@@ -4580,6 +4594,23 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
         {shotsOpen && (
           <ShotWorkbench projectId={projectId} onClose={() => setShotsOpen(false)} />
+        )}
+
+        {templatesOpen && (
+          <WorkflowTemplates
+            projectId={projectId}
+            revision={revisionRef.current}
+            nodes={nodes}
+            edges={edges}
+            onClose={() => setTemplatesOpen(false)}
+            onInserted={(rev) => {
+              // 模板改的是服务端画布：本地这份已经落后，重拉一次
+              revisionRef.current = rev;
+              setTemplatesOpen(false);
+              setDirty(false);
+              setReloadKey((k) => k + 1);
+            }}
+          />
         )}
 
         {runReport && (
