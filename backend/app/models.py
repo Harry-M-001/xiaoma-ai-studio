@@ -360,6 +360,33 @@ class Project(Base):
     )
 
 
+class ProjectShot(Base):
+    """项目里的一个镜头（镜头工作台的身份与审核状态）。
+
+    `shot_id` 是**稳定身份**：第一次在分镜表里见到「镜头 N」时分配，之后一直跟着它，
+    任务参数里也带着它——这样按镜补跑、按镜审核不会因为任务重新生成而换号。
+    老项目不迁移内容：第一次列工作台或第一次出片时按镜号补号。
+    """
+
+    __tablename__ = "project_shots"
+    __table_args__ = (UniqueConstraint("project_id", "shot_no", name="uq_project_shots_no"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # 分镜表里的镜号（字符串：可能是 "1"、"12"、"2A"）
+    shot_no: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 稳定身份：uuid 短串，任务参数与审核记录都用它
+    shot_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    heading: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    dialogue: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # pending | approved | rejected
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ComfyWorkflow(Base):
     """ComfyUI 工作流（workflow_api.json 上传后存档）。
 

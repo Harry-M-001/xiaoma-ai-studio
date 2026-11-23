@@ -29,7 +29,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
-from app.models import Asset, CanvasRun, ComfyWorkflow, Project, ProviderService, RunStep, Task
+from app.models import (
+    Asset,
+    CanvasRun,
+    ComfyWorkflow,
+    Project,
+    ProjectShot,
+    ProviderService,
+    RunStep,
+    Task,
+)
 from app.providers.base import AdapterError
 from app.registry.canvas_nodes import (
     NODE_SCHEMAS,
@@ -66,6 +75,7 @@ _POLL_INTERVAL = 2.0
 _NODE_WAIT_TIMEOUT = 900  # 单节点等待上限（秒），视频任务轮询由 runner 自己推进
 _PER_TASK_WAIT_EXTRA = 120  # 批量节点每多一个任务追加的等待预算（秒）
 _MAX_TASKS_PER_NODE = 200  # 单节点最多回溯多少个历史任务（资产链批量运行后产物很多）
+_MAX_PROJECT_TASKS = 2000  # 镜头工作台一次最多回看多少个任务（一个项目几十镜也只有几百条）
 # 角色提及注入一次最多挂几张参考图：挂太多会稀释主体，也容易触发上游模型的参考图数量上限
 MAX_MENTION_REFS = 3
 
@@ -142,6 +152,8 @@ def asset_view(asset: Asset, params: dict | None = None) -> dict:
         # 分组规则只在后端有一份（candidate_key），前端不重写一遍——
         # 两处各判一次的话，会出现「界面上分在一组的，后端其实不是一组」。
         "candidateKey": candidate_key(data),
+        # 视频候选在工作台里要标时长；其余类型本来就有尺寸/时长列
+        "duration": asset.duration,
     }
 
 
@@ -671,6 +683,52 @@ async def _create_asset_image_tasks(
     return tasks
 
 
+async def _sync_shots(
+    db: AsyncSession, project_id: int, shots: list, dry_run: bool = False
+) -> None:
+    """把这次解析到的镜头登记成项目镜头（首次见到时分配稳定 shot_id）。
+
+    `dry_run`（预览）**不写库**：预估必须保持纯读，否则每点一次预览都会给项目补号。
+    老项目不迁移内容：第一次出片 / 第一次打开工作台时按镜号补号。
+    """
+    if dry_run or db is None or not shots:
+        # 预览（dry_run）与只做参数校验的调用（db=None）都不写库
+        return
+    nos = [str(getattr(s, "no", "") or "") for s in shots]
+    nos = [n for n in nos if n]
+    if not nos:
+        return
+    rows = await db.execute(
+        select(ProjectShot).where(
+            ProjectShot.project_id == project_id, ProjectShot.shot_no.in_(nos)
+        )
+    )
+    known = {r.shot_no: r for r in rows.scalars().all()}
+    for shot in shots:
+        no = str(getattr(shot, "no", "") or "")
+        if not no:
+            continue
+        heading = str(getattr(shot, "heading", "") or "")
+        dialogue = str(getattr(shot, "dialogue", "") or "")
+        row = known.get(no)
+        if row is None:
+            db.add(
+                ProjectShot(
+                    project_id=project_id,
+                    shot_no=no,
+                    shot_id=uuid.uuid4().hex[:10],
+                    heading=heading,
+                    dialogue=dialogue,
+                )
+            )
+        else:
+            if heading:
+                row.heading = heading
+            if dialogue:
+                row.dialogue = dialogue
+    await db.commit()
+
+
 async def _create_image_group_tasks(
     db: AsyncSession,
     project_id: int,
@@ -681,6 +739,7 @@ async def _create_image_group_tasks(
     *,
     label: str,
     dry_run: bool = False,
+    shot_no: str | None = None,
 ) -> list[Task]:
     """逐行扇出：解析上游表格 → 每行建一个图片任务。
 
@@ -711,6 +770,12 @@ async def _create_image_group_tasks(
     shots = _dedupe_shots(
         storyboard_sheet.limit_shots(shots, int(data.get("shotLimit") or 0)), label
     )
+    # 先登记全部镜头（无论这次是不是只补跑某一镜），再把范围收窄到那一镜
+    await _sync_shots(db, project_id, shots, dry_run=dry_run)
+    if shot_no:
+        shots = [s for s in shots if str(getattr(s, "no", "")) == str(shot_no)]
+        if not shots:
+            raise ValueError(f"「{label}」的分镜表里找不到镜头 {shot_no}")
 
     model_key = str(data.get("model_key") or "")
     if not model_key:
@@ -923,6 +988,7 @@ async def _create_shot_video_tasks(
     upstream_text: str,
     images: list[Asset],
     dry_run: bool = False,
+    shot_no: str | None = None,
 ) -> list[Task]:
     """视频节点逐镜出片：每一镜用它自己的分镜图当首帧，可选与下一镜首尾相连。
 
@@ -950,6 +1016,12 @@ async def _create_shot_video_tasks(
     shots = _dedupe_shots(
         storyboard_sheet.limit_shots(shots, int(data.get("shotLimit") or 0)), label
     )
+    # 先登记全部镜头（无论这次是不是只补跑某一镜），再把范围收窄到那一镜
+    await _sync_shots(db, project_id, shots, dry_run=dry_run)
+    if shot_no:
+        shots = [s for s in shots if str(getattr(s, "no", "")) == str(shot_no)]
+        if not shots:
+            raise ValueError(f"「{label}」的分镜表里找不到镜头 {shot_no}")
 
     model_key = str(data.get("model_key") or "")
     if not model_key:
@@ -1525,6 +1597,7 @@ async def _build_node_tasks(
     node: dict,
     upstream: list[tuple[str, dict, list[Asset]]],
     dry_run: bool = False,
+    shot_no: str | None = None,
 ) -> list[Task]:
     """把一个画布节点翻译成待执行的任务列表。
 
@@ -1561,15 +1634,26 @@ async def _build_node_tasks(
         card = await style_service.load_card(db, str(data.get("styleKey") or ""))
         label = str((NODE_SCHEMAS.get(ntype) or {}).get("label") or "图片组")
         return await _create_image_group_tasks(
-            db, project_id, node, upstream_text, manual, card, label=label, dry_run=dry_run
+            db,
+            project_id,
+            node,
+            upstream_text,
+            manual,
+            card,
+            label=label,
+            dry_run=dry_run,
+            shot_no=shot_no,
         )
 
     # 视频节点逐镜出片（D 期）：分镜图节点已经逐镜出好图，这里一镜一段送进生视频。
     # 放在普通分支之前，因为它同样要一次建出多个任务。
     if _is_shot_video(node):
         return await _create_shot_video_tasks(
-            db, project_id, node, upstream_text, images, dry_run=dry_run
+            db, project_id, node, upstream_text, images, dry_run=dry_run, shot_no=shot_no
         )
+
+    if shot_no:
+        raise ValueError("这个节点不是逐镜节点，不能按镜补跑")
 
     injected: list[str] = []
     # 角色提及注入：提示词里提到资产名就自动挂设定图（可在节点上关掉）
@@ -1622,6 +1706,175 @@ async def run_single_node(project_id: int, node_id: str, run_id: str = "") -> li
         # 队列满时由 runner 把这条任务标失败并写明原因（提示口径统一在 runner 里）
         await runner.start_or_fail(task.kind, task.id)
     return tasks
+
+
+_SHOT_STATUSES = {"pending", "approved", "rejected"}
+
+
+def _shot_nodes(doc: dict) -> tuple[dict | None, dict | None]:
+    """画布上的逐镜节点：视频（开了逐镜出片）与分镜图 / 图片组。"""
+    video: dict | None = None
+    image: dict | None = None
+    for n in doc.get("nodes", []):
+        if video is None and _is_shot_video(n):
+            video = n
+        if image is None and is_fanout_image(str(n.get("type") or "")):
+            image = n
+    return video, image
+
+
+def _shot_sort_key(no: str) -> tuple[int, str]:
+    digits = "".join(ch for ch in str(no) if ch.isdigit())
+    return (int(digits) if digits else 10**6, str(no))
+
+
+async def run_shot(
+    project_id: int, shot_no: str, node_id: str = "", run_id: str = ""
+) -> list[Task]:
+    """按镜补跑：只给这一镜派任务。
+
+    其余镜头不重做、已选结果也不动——这正是「改第 7 镜不重跑 12 镜」的落点。
+    `node_id` 不传时按「逐镜视频 → 分镜图」的顺序找第一个能逐镜出片的节点。
+    """
+    run_id = run_id or new_run_id()
+    async with SessionLocal() as db:
+        project = await db.get(Project, project_id)
+        if project is None or not project.canvas_json:
+            raise ValueError("画布不存在")
+        doc = json.loads(project.canvas_json)
+        nodes = {str(n["id"]): n for n in doc.get("nodes", [])}
+        video, image = _shot_nodes(doc)
+        node = nodes.get(node_id) if node_id else (video or image)
+        if node is None:
+            raise ValueError("画布上没有可逐镜出片的节点")
+        upstream = await _resolve_upstream(db, project_id, doc, str(node["id"]))
+        missing = _missing_upstream_labels(upstream)
+        if missing:
+            raise ValueError(f"上游节点（{'、'.join(missing)}）还没有产物，请先运行它们")
+        tasks = await _build_node_tasks(
+            db, project_id, doc, node, upstream, shot_no=str(shot_no)
+        )
+        await _stamp_run(db, tasks, run_id)
+        row = (
+            await db.execute(
+                select(ProjectShot).where(
+                    ProjectShot.project_id == project_id,
+                    ProjectShot.shot_no == str(shot_no),
+                )
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            # 出了新候选，审核状态回到待审：旧的「通过」不能替新片背书
+            row.status = "pending"
+            await db.commit()
+
+    for task in tasks:
+        await runner.start_or_fail(task.kind, task.id)
+    return tasks
+
+
+async def list_shots(db: AsyncSession, project_id: int) -> dict:
+    """镜头工作台的数据：每镜的身份、审核状态、首帧候选、视频候选与对白。
+
+    老项目第一次调用时从逐镜节点的上游分镜表**按顺序补号**，不改写任何分镜内容。
+    """
+    project = await db.get(Project, project_id)
+    if project is None:
+        raise ValueError("项目不存在")
+    doc = json.loads(project.canvas_json) if project.canvas_json else {}
+    video, image = _shot_nodes(doc)
+
+    rows = (
+        await db.execute(select(ProjectShot).where(ProjectShot.project_id == project_id))
+    ).scalars().all()
+    if not rows:
+        for node in (video, image):
+            if node is None:
+                continue
+            try:
+                upstream = await _resolve_upstream(db, project_id, doc, str(node["id"]))
+                _prompt, _images, _videos, upstream_text = await _node_inputs(
+                    db, doc, node, upstream
+                )
+                parsed = storyboard_sheet.parse_storyboard(upstream_text)
+            except Exception:  # noqa: BLE001 - 补号失败不该让工作台打不开
+                continue
+            if parsed:
+                await _sync_shots(db, project_id, parsed)
+                rows = (
+                    await db.execute(
+                        select(ProjectShot).where(ProjectShot.project_id == project_id)
+                    )
+                ).scalars().all()
+                break
+
+    tasks = (
+        await db.execute(
+            select(Task)
+            .where(Task.canvas_project_id == project_id)
+            .order_by(Task.id.desc())
+            .limit(_MAX_PROJECT_TASKS)
+        )
+    ).scalars().all()
+    assets_by_task: dict[int, list[Asset]] = {}
+    if tasks:
+        arows = await db.execute(
+            select(Asset).where(Asset.task_id.in_([t.id for t in tasks]))
+        )
+        for a in arows.scalars().all():
+            assets_by_task.setdefault(a.task_id or 0, []).append(a)
+
+    images_by_no: dict[str, list[dict]] = {}
+    videos_by_no: dict[str, list[dict]] = {}
+    for t in tasks:
+        params = read_task_params(t)
+        no = str(params.get("shot_no") or "")
+        if not no:
+            continue
+        for a in assets_by_task.get(t.id, []):
+            if a.kind == "image":
+                images_by_no.setdefault(no, []).append(asset_view(a, params))
+            elif a.kind == "video":
+                videos_by_no.setdefault(no, []).append(asset_view(a, params))
+
+    shots = []
+    for r in sorted(rows, key=lambda x: _shot_sort_key(x.shot_no)):
+        shots.append(
+            {
+                "shotId": r.shot_id,
+                "no": r.shot_no,
+                "heading": r.heading,
+                "dialogue": r.dialogue,
+                "status": r.status,
+                "images": images_by_no.get(r.shot_no, [])[:4],
+                "videos": videos_by_no.get(r.shot_no, [])[:4],
+            }
+        )
+    return {
+        "shots": shots,
+        "videoNodeId": str(video["id"]) if video else "",
+        "imageNodeId": str(image["id"]) if image else "",
+    }
+
+
+async def set_shot_status(
+    db: AsyncSession, project_id: int, shot_id: str, status: str
+) -> dict:
+    """人工审核：通过 / 驳回 / 待审。只影响这一镜的标记，不触发任何生成。"""
+    if status not in _SHOT_STATUSES:
+        raise ValueError("审核状态只能是 pending / approved / rejected")
+    row = (
+        await db.execute(
+            select(ProjectShot).where(
+                ProjectShot.project_id == project_id, ProjectShot.shot_id == shot_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ValueError("镜头不存在")
+    row.status = status
+    await db.commit()
+    return {"shotId": row.shot_id, "status": row.status}
 
 
 def new_run_id() -> str:

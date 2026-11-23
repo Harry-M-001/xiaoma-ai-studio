@@ -423,6 +423,41 @@ input, textarea, select { font-family: inherit; }
 }
 .canvas-conflict span { flex: 1; min-width: 240px; }
 
+/* 镜头工作台：一行一镜（首帧 / 视频候选 / 对白 / 审核 / 操作） */
+.shot-table { display: flex; flex-direction: column; gap: 4px; }
+.shot-row {
+  display: grid; gap: 10px; align-items: center;
+  grid-template-columns: 130px 88px 220px minmax(0, 1fr) 72px 176px;
+  padding: 7px 4px; border-bottom: 1px solid var(--border); font-size: 12.5px;
+}
+.shot-head { color: var(--text-3); font-weight: 700; font-size: 11.5px; border-bottom: 1px solid var(--border); }
+.shot-no { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.shot-no span { color: var(--text-3); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shot-frame {
+  position: relative; width: 88px; height: 50px; border-radius: 6px; overflow: hidden;
+  background: var(--surface-3); display: flex; align-items: center; justify-content: center;
+}
+.shot-frame img { width: 100%; height: 100%; object-fit: cover; }
+.shot-frame em, .shot-video em {
+  position: absolute; right: 4px; bottom: 3px; font-style: normal; font-size: 10px;
+  color: #fff; background: rgba(0, 0, 0, 0.55); padding: 0 4px; border-radius: 4px;
+}
+.shot-frames { display: flex; gap: 6px; flex-wrap: wrap; }
+.shot-video {
+  position: relative; width: 68px; height: 44px; border-radius: 6px; overflow: hidden;
+  background: var(--surface-3); display: inline-flex;
+}
+.shot-video img { width: 100%; height: 100%; object-fit: cover; }
+.shot-dialogue {
+  color: var(--text-2); overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.shot-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+@media (max-width: 860px) {
+  .shot-row { grid-template-columns: 96px 72px 150px 60px; }
+  .shot-row > :nth-child(4), .shot-row > :nth-child(6) { display: none; }
+}
+
 .canvas-layout { flex: 1; display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 0; position: relative; }
 .canvas-layout.palette-collapsed { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 900px) {

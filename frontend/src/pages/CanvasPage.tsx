@@ -59,6 +59,7 @@ import {
   X,
 } from "lucide-react";
 import { api, ApiError, thumbUrl } from "../api";
+import ShotWorkbench from "../components/ShotWorkbench";
 import type {
   AgentMeta,
   Asset,
@@ -2913,6 +2914,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [conflict, setConflict] = useState(false);
   // 运行整图的口径：默认增量（只派输入变过的节点），勾选后全量重做
   const [fullRun, setFullRun] = useState(false);
+  const [shotsOpen, setShotsOpen] = useState(false);
   const [running, setRunning] = useState(false);
   // 整图运行前的预估结果（非 null 时弹确认框）
   const [runPreview, setRunPreview] = useState<CanvasPreview | null>(null);
@@ -3769,7 +3771,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   /** 有弹层时，单键快捷键让位（弹窗自己的 Esc 由 Dialog 管） */
   const overlayOpen = Boolean(
     addMenu || lightbox || pickerFor || editorFor || studio3d || agentOpen || shareOpen ||
-    runPreview || lintReport || runReport || shortcutsOpen
+    runPreview || lintReport || runReport || shortcutsOpen || shotsOpen
   );
 
   useEffect(() => {
@@ -4240,6 +4242,15 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             >
               <Keyboard size={14} />
             </button>
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => setShotsOpen(true)}
+              disabled={!loaded}
+              title="镜头工作台：按镜查看首帧与视频候选、审核、只补跑某一镜"
+            >
+              <Clapperboard size={14} />
+              镜头台
+            </button>
             {/* 体检放在「花钱之前」的位置：它零成本，但能省下一整轮逐镜生成的钱 */}
             <button
               className="btn btn-ghost btn-sm"
@@ -4565,6 +4576,10 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
             onConfirm={confirmRunAll}
             onClose={() => setRunPreview(null)}
           />
+        )}
+
+        {shotsOpen && (
+          <ShotWorkbench projectId={projectId} onClose={() => setShotsOpen(false)} />
         )}
 
         {runReport && (

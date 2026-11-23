@@ -1661,6 +1661,39 @@ export interface UpdateRunResult {
   message: string;
 }
 
+// ---- 镜头工作台 ----
+
+export interface ShotCandidate {
+  id: number;
+  url: string;
+  kind: string;
+  name: string;
+  category?: string;
+  label: string;
+  title: string;
+  candidateKey: string;
+  duration?: number | null;
+}
+
+export interface ShotRow {
+  shotId: string;
+  /** 分镜表里的镜号（"1" / "12" …） */
+  no: string;
+  heading: string;
+  dialogue: string;
+  /** pending | approved | rejected */
+  status: string;
+  images: ShotCandidate[];
+  videos: ShotCandidate[];
+}
+
+export interface ShotTable {
+  shots: ShotRow[];
+  /** 画布上逐镜出片的节点（按镜补跑默认用它） */
+  videoNodeId: string;
+  imageNodeId: string;
+}
+
 // ---- 备份与恢复 ----
 
 export interface BackupItem {

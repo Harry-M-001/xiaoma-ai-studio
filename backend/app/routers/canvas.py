@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
-from app.models import Asset, Project, Task
+from app.models import Asset, Project, ProjectShot, Task
 from app.registry.canvas_nodes import (
     CANVAS_SCHEMA_VERSION,
     NODE_SCHEMAS,
@@ -56,6 +56,15 @@ class RunNodeIn(BaseModel):
 class AgentPlanIn(BaseModel):
     brief: str = ""
     model_key: str = ""
+
+
+class ShotStatusIn(BaseModel):
+    status: str
+
+
+class ShotRunIn(BaseModel):
+    # 不传 = 自动挑「逐镜视频 → 分镜图」里第一个能逐镜出片的节点
+    node_id: str | None = None
 
 
 @router.get("/contract")
@@ -287,6 +296,60 @@ async def run_canvas(
         "taskIds": [],
         "taskCount": 0,
         "estimate": {"calls": estimate_calls, "incremental": incremental},
+    }
+
+
+@router.get("/{project_id}/shots")
+async def list_shots(project_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """镜头工作台：每镜的身份、审核状态、首帧与视频候选、对白。
+
+    老项目第一次调用时按分镜表顺序补号（不改写分镜内容）。
+    """
+    try:
+        return await canvas_runner.list_shots(db, project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.patch("/{project_id}/shots/{shot_id}")
+async def set_shot_status(
+    project_id: int, shot_id: str, payload: ShotStatusIn, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """人工审核：通过 / 驳回 / 待审。不触发任何生成。"""
+    try:
+        return await canvas_runner.set_shot_status(db, project_id, shot_id, payload.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{project_id}/shots/{shot_id}/run")
+async def run_shot(
+    project_id: int,
+    shot_id: str,
+    payload: ShotRunIn | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """按镜补跑：只给这一镜派任务，其余镜头与已选结果都不动。"""
+    row = (
+        await db.execute(
+            select(ProjectShot).where(
+                ProjectShot.project_id == project_id, ProjectShot.shot_id == shot_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="镜头不存在")
+    try:
+        tasks = await canvas_runner.run_shot(
+            project_id, row.shot_no, node_id=(payload.node_id if payload else "") or ""
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "shotId": shot_id,
+        "shotNo": row.shot_no,
+        "taskIds": [t.id for t in tasks],
+        "taskCount": len(tasks),
     }
 
 

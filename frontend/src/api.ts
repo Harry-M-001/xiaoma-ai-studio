@@ -60,6 +60,7 @@ import type {
   QuickSetupResult,
   BackupItem,
   BackupInspectResult,
+  ShotTable,
   SchemaRow,
   SetupStatus,
   SpeechResult,
@@ -544,6 +545,20 @@ export const api = {
   // `full=true` 才是「全部重做」的账；默认按增量口径算
   previewCanvas: (projectId: number, full = false) =>
     request<CanvasPreview>(`/api/canvas/${projectId}/preview${full ? "?full=true" : ""}`),
+  /** 镜头工作台：每镜的身份、审核状态、首帧与视频候选、对白 */
+  listShots: (projectId: number) => request<ShotTable>(`/api/canvas/${projectId}/shots`),
+  /** 按镜补跑：只给这一镜派任务，其余镜头不动 */
+  runShot: (projectId: number, shotId: string, nodeId?: string) =>
+    request<{ shotId: string; shotNo: string; taskIds: number[]; taskCount: number }>(
+      `/api/canvas/${projectId}/shots/${encodeURIComponent(shotId)}/run`,
+      { method: "POST", body: json({ node_id: nodeId ?? null }) },
+    ),
+  /** 人工审核：pending | approved | rejected */
+  setShotStatus: (projectId: number, shotId: string, status: string) =>
+    request<{ shotId: string; status: string }>(
+      `/api/canvas/${projectId}/shots/${encodeURIComponent(shotId)}`,
+      { method: "PATCH", body: json({ status }) },
+    ),
   // 分镜静态体检：零成本检查镜头语言（纯读，不建任务、不调模型）
   lintCanvas: (projectId: number) =>
     request<CanvasLint>(`/api/canvas/${projectId}/lint`),
