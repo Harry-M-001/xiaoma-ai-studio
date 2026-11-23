@@ -59,6 +59,15 @@ NUDGE_TEXT = (
     "现在直接调用对应的工具，拿到结果再汇报。）"
 )
 
+RECOVERY_NUDGE = (
+    "（收尾检查）上一项工具操作没有成功。重新对照用户目标和已完成的步骤。"
+    "还有授权范围内的安全办法时，修正参数、补查必要信息或换一个工具继续。"
+    "付费提交结果不明时先查状态。确实无法推进时，说明已完成什么、"
+    "具体卡在哪里，以及需要用户提供什么。不要宣称失败的操作成功。"
+)
+
+EMPTY_REPLY_NUDGE = "（继续这一轮）上一轮没有给出结果。需要行动就调用工具，否则给出可交付的答复或具体阻塞。"
+
 #: 收尾话里出现这些词，说明它把「下一步」写成了结束语。
 _PLAN_MARKERS = (
     "我现在", "我这就", "我这就去", "我马上", "我准备", "我接着", "我先", "我再",
@@ -279,7 +288,7 @@ def build_system_prompt(
             + "。项目内的任务是这个项目的一部分；**别的项目的会话你看不到，也不要假装知道**。"
         )
     else:
-        where = "这次会话还没归入任何 Agent 项目（未归档）。如果用户要做一件新的事，建议先建一个项目。"
+        where = "这次会话还没归入任何 Agent 项目（未归档）。"
     mode_block = f"\n\n当前模式：{MODE_RULES[mode]}" if mode in MODE_RULES else ""
     return f"""你是「小马AI工坊」里的通用 Agent。你能调用工坊自己的工具：读画布、搭画布、改节点、连线、预估成本、执行。
 
@@ -288,13 +297,14 @@ def build_system_prompt(
 2. **改之前先读**：动某张画布前先 get_canvas；改完用返回的 id 回查一次（get_canvas 或 canvas_status）再说结论。跑整图之后用 canvas_status 看节点级进度，**不要**凭感觉说「快好了」「已经完成」。确认模型是否存在时**只调一次** list_models（不传 modality 就返回全部），不要按能力分两三次查。
 3. {approval_rule(session)}
 4. **每次只调一个工具**，看一眼结果再决定下一步。不要一口气连调五个。**看任务进度用 wait_for_tasks 等**（一次最多等两分钟），不要连续调 get_task 轮询——同一个查询连叫三次会被系统挡回。
-5. {bound}。用户没说是哪张时，先 list_projects；一张都没有就 create_project。
+5. {bound}。只有任务依赖画布且没有明确目标画布时，才用 list_projects。用户确实需要新画布时才 create_project。
 6. 节点类型：{kinds}。
 7. 要搭画布用 draft_canvas（它会再调一次模型生成草稿，可能慢几秒），落定用 apply_canvas_draft。
 8. {where}
 9. 回答用中文、短句，说清「做了什么 / 对象 id / 下一步」。不要输出大段 JSON 或代码。
 10. **说了就要做**：不要在回复里写「我现在去…」「接下来…」「先做…」然后结束这一轮。真要调用工具就在这一轮直接调，拿到结果再汇报；只有已经查过 / 跑过，才能下结论。收尾前自查：最后一句如果是在宣布下一步，那就还没结束。
-11. 用户要「整条链跑完 / 做完直到成品」时，用 **run_canvas** 一次派发（执行顺序由画布按依赖决定），再用 **wait_for_tasks** 等结果；只有用户点名某个节点时才用 run_node。一个节点一个节点跑又慢又费轮数。**wait_for_tasks 会跟住整图**：还在后台派下游节点时会继续等（单次上限 2 分钟，超时再调一次即可）。**它返回 done=true 时，结果里的 tasks 就是最终状态——直接据此汇报，不要再调 canvas_status / get_task / list_assets 重复查同一件事**。preview_canvas 的 calls 只是**下界**，pendingNodes 要等上游跑完才知道。**中途某个节点失败时，用 run_node 只重跑那一个**，不要用 run_canvas 把已完成的节点全部重做一遍。{mode_block}
+11. 用户要「整条链跑完 / 做完直到成品」时，用 **run_canvas** 派发，再用 **wait_for_tasks** 等结果。**wait_for_tasks 会跟住整图**（单次上限 2 分钟）。它返回 done=true 时，等待已经结束，逐项看 tasks 的成功、失败与取消状态，再判断用户目标是否完成。preview_canvas 的 calls 只是**下界**，pendingNodes 要等上游跑完才知道。局部失败时先判断原因，能修复就只处理失败节点和仍缺产物的下游。付费提交结果不明时先查状态，不盲目重发。
+12. **以交付物为目标**：先区分用户在问问题、要方案，还是授权执行。简单问题直接回答；多步任务先明确交付物、约束和验收条件，优先复用现有项目和产物。根据每次工具结果调整下一步。缺信息时先用低成本、可逆的手段查证；最后只问会改变结果或需要授权的问题。收尾用工具证据区分已完成、运行中和受阻。{mode_block}
 {agent_skills.prompt_block()}
 """
 
@@ -451,6 +461,7 @@ async def run_loop(
     thinking_on = bool(session.thinking) and adapter.supports_thinking(model_name)
     rounds = 0
     nudges = 0
+    recovery_reviewed = False
     tool_calls_seen = 0
     write_calls_seen = 0
     call_counts: dict[str, int] = {}
@@ -486,6 +497,33 @@ async def run_loop(
             # 也要落库——下一轮带 tools 的请求必须把它原样回传，否则上游 400。
             reasoning = str(result.get("reasoning") or "").strip()
             calls = result.get("tool_calls") or []
+            if not calls:
+                # 只检查本条用户消息后的工具。旧任务的错误不该影响新的问题。
+                latest_tool = next(
+                    (step for step in reversed(rows) if step.role in ("user", "tool")), None
+                )
+                if nudges < MAX_NUDGES:
+                    if not text:
+                        nudge = EMPTY_REPLY_NUDGE
+                    elif mode not in ("spec", "plan") and looks_like_unfinished_plan(text):
+                        nudge = NUDGE_TEXT
+                    elif (
+                        mode not in ("spec", "plan") and not recovery_reviewed
+                        and latest_tool is not None and latest_tool.role == "tool"
+                        and latest_tool.status == "error"
+                    ):
+                        nudge = RECOVERY_NUDGE
+                        recovery_reviewed = True
+                    if nudge is not None:
+                        # 候选收尾只发回本轮模型，避免在时间线留下未兑现的承诺。
+                        nudges += 1
+                        if text:
+                            nudge = f"上一次拟回复：{text[:MAX_RESULT_CHARS]}\n\n{nudge}"
+                        continue
+                if not text:
+                    text = "模型没有返回可用答复。已执行的工具及结果可以在这轮时间线查看。"
+                elif mode not in ("spec", "plan") and looks_like_unfinished_plan(text):
+                    text = f"有步骤尚未执行，以下是模型最后给出的进度与计划：\n\n{text}"
             if text or reasoning:
                 usage = result.get("usage") or {}
                 await add_step(
@@ -493,12 +531,6 @@ async def run_loop(
                     tokens=int(usage.get("total_tokens") or 0),
                 )
             if not calls:
-                # 「我现在去做 X」然后收尾，是最像暂停的一种失败：用户看到的是
-                # 一句将要执行的宣告，之后什么都没有。这里替它续跑一次（最多两次）。
-                if nudges < MAX_NUDGES and looks_like_unfinished_plan(text):
-                    nudges += 1
-                    nudge = NUDGE_TEXT
-                    continue
                 return {
                     "status": "done",
                     "reply": text,
@@ -565,35 +597,31 @@ async def run_loop(
                     )
                     continue
 
-                # 同一个只读查询连续叫了三次：结果不会因为再查一次而变。
-                # 这是实测里最费轮数的一种空转（连点 get_task 等一个 processing 的任务）。
+                # 没有成功写入时，重复查询最多执行两次。写入后允许用同一查询回查。
                 call_key = f"{name}:{json.dumps(args, ensure_ascii=False, sort_keys=True)}"
-                call_counts[call_key] = call_counts.get(call_key, 0) + 1
-                if (
-                    spec.tier == TIER_READ
-                    and name != "wait_for_tasks"
-                    and call_counts[call_key] >= 3
-                ):
+                tracked_read = spec.tier == TIER_READ and name != "wait_for_tasks"
+                if tracked_read and call_counts.get(call_key, 0) >= 2:
+                    hint = (
+                        "任务仍在运行时用 wait_for_tasks 等状态变化。"
+                        if name in ("get_task", "canvas_status")
+                        else "用已经查到的结果推进；如果缺少信息，换一个查询范围或工具。"
+                    )
                     await add_step(
                         db, session.id, role="tool", tool_name=name,
                         tool_args=json.dumps(args, ensure_ascii=False),
                         tool_result=json.dumps(
                             {
                                 "ok": False,
-                                "error": "同一个查询连着调了多次，再查一次结果也不会变。",
-                                "hint": "要等任务完成请调用 wait_for_tasks(task_ids=[...], timeout_seconds=60)；"
-                                        "不要连续调 get_task。",
+                                "error": "同一个查询已经执行两次，本轮暂时跳过重复查询。",
+                                "hint": hint,
                             },
                             ensure_ascii=False,
                         ),
                         tier=spec.tier, reasoning=turn_reasoning, status="error",
                     )
                     continue
-
-                if spec.tier != TIER_READ:
-                    # 只有会改变状态 / 花钱的调用才算「它还在干活」；
-                    # 只读查询（canvas_status 等）只是核对，不该让 /goal 无限续下去
-                    write_calls_seen += 1
+                if tracked_read:
+                    call_counts[call_key] = call_counts.get(call_key, 0) + 1
 
                 if needs_human_approval(spec.tier, bool(session.auto_approve)):
                     # 先把代价算好再停下来：确认弹窗不该只有「要花钱」四个字
@@ -649,6 +677,9 @@ async def run_loop(
 
                 started = time.monotonic()
                 outcome = await agent_tools.execute(ctx, name, args)
+                if spec.tier != TIER_READ and outcome.get("ok"):
+                    write_calls_seen += 1
+                    call_counts.clear()
                 if auto_irreversible:
                     outcome = {**outcome, "autoApproved": True, "preview": auto_preview}
                 await add_step(

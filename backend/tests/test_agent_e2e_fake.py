@@ -357,6 +357,60 @@ def test_repeated_get_task_calls_are_blocked():
     _run(case)
 
 
+def test_agent_reconsiders_a_failed_action_before_finishing():
+    async def case():
+        async with Harness(with_canvas=True) as h:
+            responses = iter([
+                _reply(name="update_node", args={"node_id": "missing", "prompt": "新开场"}),
+                _reply("改好了。"),
+                _reply(name="get_canvas"),
+                _reply(name="update_node", args={"node_id": "n1", "prompt": "新开场"}),
+                _reply(name="get_canvas"),
+                _reply("已核对，开场节点已更新。"),
+            ])
+            adapter, original = _install_model(lambda _: next(responses))
+            try:
+                sid = await h.new_session()
+                body = await h.send(sid, "把开场节点的提示词改为新开场")
+                assert body["run"]["reply"] == "已核对，开场节点已更新。"
+                assert body["run"]["writeCalls"] == 1
+                assert adapter.calls == 6
+                tools = [s for s in body["steps"] if s["role"] == "tool"]
+                assert [(s["toolName"], s["status"]) for s in tools] == [
+                    ("update_node", "error"), ("get_canvas", "ok"),
+                    ("update_node", "ok"), ("get_canvas", "ok"),
+                ]
+                assert all(s["content"] != "改好了。" for s in body["steps"])
+            finally:
+                _restore_model(original)
+
+    _run(case)
+
+
+def test_successful_edit_allows_verifying_with_the_same_query():
+    async def case():
+        async with Harness(with_canvas=True) as h:
+            responses = iter([
+                _reply(),
+                _reply(name="get_canvas"),
+                _reply(name="get_canvas"),
+                _reply(name="update_node", args={"node_id": "n1", "prompt": "新开场"}),
+                _reply(name="get_canvas"),
+                _reply("已核对。"),
+            ])
+            _, original = _install_model(lambda _: next(responses))
+            try:
+                sid = await h.new_session()
+                body = await h.send(sid, "调整开场并检查结果")
+                assert body["run"]["reply"] == "已核对。"
+                reads = [s for s in body["steps"] if s["toolName"] == "get_canvas"]
+                assert [s["status"] for s in reads] == ["ok", "ok", "ok"]
+            finally:
+                _restore_model(original)
+
+    _run(case)
+
+
 def test_stop_button_interrupts_a_wait_and_ends_the_goal():
     async def case():
         async with Harness(with_canvas=True) as h:

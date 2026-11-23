@@ -1096,8 +1096,8 @@ async def _wait_for_tasks(ctx: ToolContext, args: dict) -> dict:
         hint = "等满这次上限还没跑完；再调一次 wait_for_tasks 继续等，不要连点 get_task。"
     else:
         hint = (
-            "已经跑完：直接按上面的 tasks 汇报结果即可。**不要再调 list_assets / get_asset / "
-            "canvas_status 重复查同一批产物**——产物卡片就在界面上；只有 failed 时才需要修那个节点。"
+            "等待已结束。按 tasks 的实际状态判断交付物是否完成；空列表不代表有产物。"
+            "有失败或取消时，只查询定位问题所需的任务或节点；全部成功且证据充足时直接汇报。"
         )
     return {
         "ok": True,
