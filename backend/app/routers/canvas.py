@@ -9,7 +9,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
@@ -38,6 +38,10 @@ class CanvasDocIn(BaseModel):
     nodes: list[dict] = []
     edges: list[dict] = []
     viewport: dict = {}
+    # 前端保存时带上「我基于第几版改的」。与库里不一致就拒绝覆盖（409），
+    # 避免两个标签页同时打开时，晚到的那次保存悄悄盖掉别人刚改的内容。
+    # 不传 = 老调用方，按「强制覆盖」处理，保持兼容。
+    baseRevision: int | None = None
 
 
 class RunNodeIn(BaseModel):
@@ -45,6 +49,8 @@ class RunNodeIn(BaseModel):
     # 预算闸：整图运行超限时，客户端要把预览里的调用次数回传过来表示「已确认」。
     # 不传（=0）时只要没超限照样放行，所以老调用方不受影响。
     ack_calls: int = 0
+    # 显式全量重跑：默认只派输入变过的节点，勾了这个才把已有产物也重做一遍
+    full: bool = False
 
 
 class AgentPlanIn(BaseModel):
@@ -100,12 +106,20 @@ async def get_canvas(project_id: int, db: AsyncSession = Depends(get_db)) -> dic
     if project is None:
         raise HTTPException(status_code=404, detail="项目不存在")
     if not project.canvas_json:
-        return {"schemaVersion": CANVAS_SCHEMA_VERSION, "nodes": [], "edges": [], "viewport": {}}
+        return {
+            "schemaVersion": CANVAS_SCHEMA_VERSION,
+            "nodes": [],
+            "edges": [],
+            "viewport": {},
+            "revision": project.canvas_revision,
+        }
     doc = json.loads(project.canvas_json)
     # 旧类型归一（imageEdit → image），前端契约表里已无旧键
     for n in doc.get("nodes", []):
         if isinstance(n, dict) and n.get("type"):
             n["type"] = normalize_type(n["type"])
+    # 修订号以数据库列为准（老画布的 JSON 里没有这个字段）
+    doc["revision"] = project.canvas_revision
     return doc
 
 
@@ -124,21 +138,41 @@ async def save_canvas(project_id: int, doc: CanvasDocIn, db: AsyncSession = Depe
         nodes, edges = validate_document(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    project.canvas_json = json.dumps(
-        {**payload, "nodes": nodes, "edges": edges}, ensure_ascii=False
+    body = json.dumps({**payload, "nodes": nodes, "edges": edges}, ensure_ascii=False)
+
+    # 比较并交换：把「版本没变」写进 WHERE，两个请求同时到也不会都成功。
+    # 先读后写会有窗口——两个标签页都读到第 3 版，后到的那个照样能覆盖。
+    stmt = (
+        update(Project)
+        .where(Project.id == project_id)
+        .values(canvas_json=body, canvas_revision=Project.canvas_revision + 1)
     )
+    if doc.baseRevision is not None:
+        stmt = stmt.where(Project.canvas_revision == int(doc.baseRevision))
+    result = await db.execute(stmt)
     await db.commit()
-    return {"ok": True}
+    if result.rowcount == 0:
+        await db.refresh(project)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"画布已在别处被修改（服务端现在是第 {project.canvas_revision} 版），"
+                "本地这份没有保存。请重新加载最新版本，或以本地这份为准强制覆盖。"
+            ),
+        )
+    await db.refresh(project)
+    return {"ok": True, "revision": project.canvas_revision}
 
 
 @router.get("/{project_id}/preview")
-async def preview_canvas(project_id: int) -> dict:
+async def preview_canvas(project_id: int, full: bool = False) -> dict:
     """整图执行前的预估：会派多少任务、花多少次调用、哪些节点已有产物会被重做。
 
-    给「运行整图」的二次确认弹窗用。纯读：不建任务、不写库、不调模型。
+    默认按**增量**口径算（输入没变的节点直接复用，不进任务数）；
+    `?full=true` 才是「全部重做」的账。
     """
     try:
-        return await canvas_runner.preview_graph(project_id)
+        return await canvas_runner.preview_graph(project_id, incremental=not full)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -228,7 +262,8 @@ async def run_canvas(
     # 预算闸：整图运行是「一次点击派出几十次调用」的入口。
     # 这里**重新算一遍**预估而不是信前端传来的数字——预览之后用户可能又改了画布，
     # 拿过期的确认值放行等于没设闸。只在超限时才要求回传（ack=0 的老调用方照旧可用）。
-    preview = await canvas_runner.preview_graph(project_id)
+    incremental = not payload.full
+    preview = await canvas_runner.preview_graph(project_id, incremental=incremental)
     state = preview.get("gate") or {}
     if state.get("exceeds") and int(payload.ack_calls or 0) < int(state.get("calls") or 0):
         raise HTTPException(
@@ -241,7 +276,9 @@ async def run_canvas(
         )
 
     estimate_calls = (preview.get("totals") or {}).get("calls", 0)
-    run_id = canvas_runner.start_full_graph(project_id, expected=estimate_calls)
+    run_id = canvas_runner.start_full_graph(
+        project_id, expected=estimate_calls, incremental=incremental
+    )
     return {
         "mode": "graph",
         "nodeId": None,
@@ -249,7 +286,7 @@ async def run_canvas(
         "taskId": None,
         "taskIds": [],
         "taskCount": 0,
-        "estimate": {"calls": estimate_calls},
+        "estimate": {"calls": estimate_calls, "incremental": incremental},
     }
 
 

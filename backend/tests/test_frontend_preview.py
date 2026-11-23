@@ -116,7 +116,7 @@ def test_api_and_route_agree():
     page = _page()
 
     assert "previewCanvas:" in api_src, "api.ts 里没有 previewCanvas"
-    assert "`/api/canvas/${projectId}/preview`" in api_src, "previewCanvas 没打到预览端点"
+    assert "`/api/canvas/${projectId}/preview" in api_src, "previewCanvas 没打到预览端点"
     # router 自己带 prefix="/api/canvas"，所以文件里只写后半截
     assert '@router.get("/{project_id}/preview")' in router, "后端没有预览路由"
     assert "api.previewCanvas(" in page, "没有任何页面在用 previewCanvas（死代码）"

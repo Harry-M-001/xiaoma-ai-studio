@@ -58,7 +58,7 @@ import {
   Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
-import { api, thumbUrl } from "../api";
+import { api, ApiError, thumbUrl } from "../api";
 import type {
   AgentMeta,
   Asset,
@@ -1511,23 +1511,29 @@ function AnimaticSection({ id, data }: { id: string; data: CanvasNodeData }) {
 function RunConfirmDialog({
   preview,
   busy,
+  full,
+  onToggleFull,
   onConfirm,
   onClose,
 }: {
   preview: CanvasPreview;
   busy: boolean;
-  onConfirm: (ackCalls: number) => void;
+  /** 当前是不是「全量重跑」（默认增量：只派输入变过的节点） */
+  full: boolean;
+  onToggleFull: (full: boolean) => void;
+  onConfirm: (ackCalls: number, full: boolean) => void;
   onClose: () => void;
 }) {
   const { totals, gate } = preview;
   const [acked, setAcked] = useState(false);
-  // 只列需要解释的节点：一次多条（批量扇出）、已有产物（会被重做）、必挂、条数待定
+  // 只列需要解释的节点：一次多条（批量扇出）、已有产物（会被重做）、被增量跳过、必挂、条数待定
   const rows = preview.nodes.filter(
     (n) => n.error || n.count === null || (n.count ?? 0) > 1 || n.hasOutput
   );
   const detail: Record<string, string> = {};
   rows.forEach((n) => {
-    if (n.error) detail[n.id] = "现在就会失败";
+    if (n.skipped) detail[n.id] = "输入没变，直接复用";
+    else if (n.error) detail[n.id] = "现在就会失败";
     else if (n.count === null) detail[n.id] = "条数待定";
     else detail[n.id] = `${n.count} 条 · ${kindSummary(n.kinds)}`;
   });
@@ -1548,6 +1554,19 @@ function RunConfirmDialog({
         </div>
 
         <div className="run-confirm-body">
+          <label className="run-confirm-gate">
+            <input
+              type="checkbox"
+              checked={full}
+              onChange={(e) => onToggleFull(e.target.checked)}
+              disabled={busy}
+            />
+            <span>
+              <b>全量重跑</b>：把已有产物也重做一遍。不勾选时只派<b>输入变过</b>的节点，
+              其余直接复用已有产物、不重新调用。
+            </span>
+          </label>
+
           <div className="run-confirm-total">
             这一跑会执行 <b>{totals.steps}</b> 个节点
             {totals.calls > 0 ? (
@@ -1557,6 +1576,9 @@ function RunConfirmDialog({
             ) : null}
             {totals.pendingNodes > 0 ? (
               <>，另有 {totals.pendingNodes} 个节点的次数要等上游跑完才知道</>
+            ) : null}
+            {(totals.skippedNodes ?? 0) > 0 ? (
+              <>；另有 {totals.skippedNodes} 个节点输入没变，直接复用</>
             ) : null}
             。
           </div>
@@ -1590,7 +1612,9 @@ function RunConfirmDialog({
                 <div key={n.id} className={`run-confirm-row${n.error ? " bad" : ""}`}>
                   <span className="run-confirm-label">{n.label}</span>
                   <span className="run-confirm-detail">{detail[n.id]}</span>
-                  {n.hasOutput ? (
+                  {n.skipped ? (
+                    <span className="run-confirm-badge">跳过，不重新调用</span>
+                  ) : n.hasOutput ? (
                     <span className="run-confirm-badge">已有 {n.outputCount} 个产物，会重做</span>
                   ) : null}
                 </div>
@@ -1613,7 +1637,7 @@ function RunConfirmDialog({
           <button
             type="button"
             className="btn btn-primary btn-sm"
-            onClick={() => onConfirm(needAck ? gate.ack : 0)}
+            onClick={() => onConfirm(needAck ? gate.ack : 0, full)}
             disabled={busy || (needAck && !acked)}
           >
             {busy ? <Spinner /> : <Play size={14} />}
@@ -2884,6 +2908,11 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedTick, setSavedTick] = useState(0);
+  // 服务端修订号：保存时带回去，落后就 409；冲突时停掉自动保存，等人选「重新加载」还是「以本地为准」
+  const revisionRef = useRef(0);
+  const [conflict, setConflict] = useState(false);
+  // 运行整图的口径：默认增量（只派输入变过的节点），勾选后全量重做
+  const [fullRun, setFullRun] = useState(false);
   const [running, setRunning] = useState(false);
   // 整图运行前的预估结果（非 null 时弹确认框）
   const [runPreview, setRunPreview] = useState<CanvasPreview | null>(null);
@@ -2981,6 +3010,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
       // 空画布也要显式清空：否则从有节点的画布切到空画布时会留着上一张的节点
       setNodes(loadedNodes);
       setEdges((doc.edges || []) as Edge[]);
+      revisionRef.current = doc.revision ?? 0;
+      setConflict(false);
       setLoaded(true);
       // 基线从这里开始：下一次真正的编辑才会被记进撤销栈
       loadGuard.current = false;
@@ -3231,7 +3262,7 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     [schemas]
   );
 
-  const saveDoc = useCallback(async (): Promise<boolean> => {
+  const saveDoc = useCallback(async (force = false): Promise<boolean> => {
     setSaving(true);
     try {
       const doc: CanvasDoc = {
@@ -3248,11 +3279,19 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
         })),
         viewport: toObject().viewport as Viewport,
       };
-      await api.saveCanvas(projectId, doc);
+      // force = 用户确认「以本地为准覆盖」：不带走版本号，服务端按强制保存处理
+      const r = await api.saveCanvas(projectId, doc, force ? undefined : revisionRef.current);
+      revisionRef.current = r.revision;
+      setConflict(false);
       setDirty(false);
       setSavedTick(Date.now());
       return true;
     } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // 另一个标签页已经保存过：停在这里等人决定，别悄悄覆盖别人刚改的内容
+        setConflict(true);
+        return false;
+      }
       toast.error(e instanceof Error ? e.message : "保存失败");
       return false;
     } finally {
@@ -3262,7 +3301,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
   // 自动保存：编辑停止 1s 后落库（业界惯例 debounce 1000ms，Langflow 同款）
   useEffect(() => {
-    if (!dirty || !loaded || saving) return;
+    // 版本冲突时停下来：继续重试只会一直 409，还会把「未保存」的状态来回刷
+    if (!dirty || !loaded || saving || conflict) return;
     const t = window.setTimeout(() => {
       void saveDoc().then((ok) => {
         // 刚切过产物版本：这一版交付什么由后端按已保存的画布算，所以要补刷一次状态
@@ -3346,15 +3386,22 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
 
   /**
    * 点「运行整图」：先让后端算一遍这一跑的形状（纯读），再弹确认框。
-   * 整图会把已有产物也重做一遍 —— 这属于「花出去就回不来」的动作，先给人看一眼。
+   *
+   * 默认按**增量**口径预估（只派输入变过的节点）；要全部重做由确认框里的勾选框切换。
+   * 这属于「花出去就回不来」的动作，先给人看一眼。
    */
-  const runAll = async () => {
+  const runAll = async (full = fullRun) => {
     if (dirty && !(await saveDoc())) return;
     setRunning(true);
     try {
-      const preview = await api.previewCanvas(projectId);
+      const preview = await api.previewCanvas(projectId, full);
       if (preview.totals.steps === 0) {
-        toast.info("画布上还没有可执行的节点");
+        const skipped = preview.totals.skippedNodes ?? 0;
+        toast.info(
+          skipped > 0
+            ? "所有节点的输入都没有变化，这一跑不会重做任何东西；需要重跑请在确认框里勾选「全量重跑」"
+            : "画布上还没有可执行的节点"
+        );
         return;
       }
       setRunPreview(preview);
@@ -3365,10 +3412,24 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
     }
   };
 
-  const confirmRunAll = async (ackCalls: number) => {
+  /** 确认框里切换「全量重跑」：按新口径重新预估，保证看到的就是将要跑的 */
+  const toggleFullRun = async (full: boolean) => {
+    setFullRun(full);
     setRunning(true);
     try {
-      const r = await api.runCanvas(projectId, undefined, ackCalls);
+      const preview = await api.previewCanvas(projectId, full);
+      setRunPreview(preview);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "预估失败");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const confirmRunAll = async (ackCalls: number, full = fullRun) => {
+    setRunning(true);
+    try {
+      const r = await api.runCanvas(projectId, undefined, ackCalls, full);
       setRunPreview(null);
       toast.success("整图执行已启动");
       await refreshStatus();
@@ -4219,12 +4280,36 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
               {saving ? <Spinner light /> : <Save size={14} />}
               保存
             </button>
-            <button className="btn btn-primary btn-sm" onClick={runAll} disabled={running || !loaded}>
+            <button className="btn btn-primary btn-sm" onClick={() => void runAll()} disabled={running || !loaded}>
               {running ? <Spinner light /> : <Play size={14} />}
               运行整图
             </button>
           </div>
         </div>
+
+        {conflict && (
+          <div className="canvas-conflict">
+            <span>
+              这份画布已在别处被修改（可能是另一个标签页），本地改动还没有保存。
+              重新加载会丢弃本地改动；以本地为准则会覆盖对端的保存。
+            </span>
+            <button
+              className="btn btn-ghost btn-xs"
+              onClick={() => window.location.reload()}
+              title="丢弃本地改动，读服务端最新版本"
+            >
+              重新加载最新版本
+            </button>
+            <button
+              className="btn btn-primary btn-xs"
+              onClick={() => void saveDoc(true)}
+              disabled={saving}
+              title="用本地这份覆盖服务端（对端的改动会丢）"
+            >
+              以本地为准覆盖
+            </button>
+          </div>
+        )}
 
         <div className={`canvas-layout ${paletteOpen ? "" : "palette-collapsed"}`}>
           {paletteOpen && (
@@ -4475,6 +4560,8 @@ function CanvasInner({ projectId, projectName, onBack }: { projectId: number; pr
           <RunConfirmDialog
             preview={runPreview}
             busy={running}
+            full={fullRun}
+            onToggleFull={(v) => void toggleFullRun(v)}
             onConfirm={confirmRunAll}
             onClose={() => setRunPreview(null)}
           />

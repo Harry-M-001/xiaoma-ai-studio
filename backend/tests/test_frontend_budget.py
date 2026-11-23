@@ -50,13 +50,13 @@ def test_exceeding_the_budget_needs_a_checkbox_not_a_second_click():
 def test_the_ack_value_is_sent_back_to_the_api():
     """只在前端拦住等于没拦：确认值必须真的回传，服务端会再核一遍。"""
     dialog = _section(_text(CANVAS), "function RunConfirmDialog", "function RunReportDialog")
-    assert "onConfirm(needAck ? gate.ack : 0)" in dialog, "确认值没有回传"
+    assert "onConfirm(needAck ? gate.ack : 0, full)" in dialog, "确认值没有回传"
 
     src = _text(CANVAS)
-    assert "api.runCanvas(projectId, undefined, ackCalls)" in src, "运行接口没有带上确认值"
+    assert "api.runCanvas(projectId, undefined, ackCalls, full)" in src, "运行接口没有带上确认值"
     api = _text(API)
     assert "ack_calls: ackCalls" in api, "请求体里没有 ack_calls"
-    assert "runCanvas: (projectId: number, nodeId?: string, ackCalls = 0)" in api
+    assert "runCanvas: (projectId: number, nodeId?: string, ackCalls = 0, full = false)" in api
 
 
 def test_budget_gate_shows_the_numbers_and_where_to_change_it():
@@ -74,7 +74,7 @@ def test_run_estimate_comes_from_the_server_response():
     # 刷新过页面就没有响应里那个数了，要回落到这一跑自己记着的预估
     assert "estimate={runEstimate || runReport.expected}" in src, "没有回落用的预估"
     api = _text(API)
-    assert "estimate?: { calls: number }" in api
+    assert "estimate?: { calls: number; incremental?: boolean }" in api
 
 
 def test_polling_stops_in_every_case():

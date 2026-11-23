@@ -860,6 +860,8 @@ export interface CanvasDoc {
   nodes: CanvasNode[];
   edges: CanvasEdge[];
   viewport: { x?: number; y?: number; zoom?: number };
+  /** 服务端修订号：保存时带回去，落后了就拒绝覆盖（409） */
+  revision?: number;
 }
 
 /** 整图执行前的预估（「运行整图」二次确认弹窗用） */
@@ -877,6 +879,8 @@ export interface CanvasPreviewNode {
   waiting: string[];
   /** 已经能判定必挂的原因 */
   error: string;
+  /** 增量模式：输入没变，这一跑直接复用、不会重新调用 */
+  skipped?: boolean;
 }
 
 export interface CanvasPreviewNote {
@@ -895,6 +899,8 @@ export interface CanvasPreview {
     pendingNodes: number;
     rerunNodes: number;
     blockedNodes: number;
+    /** 增量模式下输入没变、直接复用的节点数 */
+    skippedNodes?: number;
     /** 逐镜对白会额外做几次语音合成（不计在 calls 里，但那是真花钱的调用） */
     dialogueCalls?: number;
   };

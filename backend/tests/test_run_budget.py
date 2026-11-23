@@ -400,8 +400,8 @@ def test_router_rechecks_the_estimate_instead_of_trusting_the_client():
     """闸门必须在服务端重算：预览之后用户可能又改了画布，拿过期的确认值放行等于没设闸。"""
     body = _body("run_canvas", ROUTER_SRC)
     assert "ack_calls" in body and "status_code=409" in body
-    assert "preview_graph(project_id)" in body, "服务端没有重算预估"
-    assert "start_full_graph(project_id" in body
+    assert "preview_graph(project_id" in body, "服务端没有重算预估"
+    assert "start_full_graph(" in body and "project_id" in body
     # 重算出来的那个数要顺手交给这一跑记着：刷新页面后前端靠它把预估带回来
     assert "expected=estimate_calls" in body, "预估没有记到这一跑上"
 
@@ -459,7 +459,7 @@ def test_a_graph_that_blows_up_still_gets_marked_finished():
         canvas_runner._ACTIVE_RUNS.clear()
         real = canvas_runner._walk_graph
 
-        async def boom(_project_id, _run_id):  # noqa: ANN001, ANN202
+        async def boom(_project_id, _run_id, **_kw):  # noqa: ANN001, ANN202
             raise RuntimeError("炸了")
 
         canvas_runner._walk_graph = boom  # type: ignore[assignment]

@@ -497,18 +497,30 @@ export const api = {
     request<CanvasAgentDraft>("/api/canvas/agent/plan", { method: "POST", body: json(payload) }),
   getCanvas: (projectId: number) =>
     request<CanvasDoc>(`/api/canvas/${projectId}`),
-  saveCanvas: (projectId: number, doc: CanvasDoc) =>
-    request<{ ok: boolean }>(`/api/canvas/${projectId}`, {
+  /**
+   * 保存画布。
+   *
+   * `baseRevision` 是「我基于第几版改的」：服务端版本已经往前走就返回 409，
+   * 不覆盖别人刚保存的内容；不传则按强制覆盖处理（老调用方/迁移场景）。
+   */
+  saveCanvas: (projectId: number, doc: CanvasDoc, baseRevision?: number) =>
+    request<{ ok: boolean; revision: number }>(`/api/canvas/${projectId}`, {
       method: "PUT",
-      body: JSON.stringify({ nodes: doc.nodes, edges: doc.edges, viewport: doc.viewport }),
+      body: JSON.stringify({
+        nodes: doc.nodes,
+        edges: doc.edges,
+        viewport: doc.viewport,
+        baseRevision: baseRevision ?? null,
+      }),
     }),
   /**
    * 运行节点 / 整图。
    *
    * `ackCalls` 只在整图运行超过配额上限时才需要：把确认弹窗里看到的调用次数回传过去。
    * 服务端会**按此刻的画布重算一遍**再比（预览之后改过画布的话，旧数字挡不住）。
+   * `full=true` 是显式全量重跑；默认增量，只派输入变过的节点。
    */
-  runCanvas: (projectId: number, nodeId?: string, ackCalls = 0) =>
+  runCanvas: (projectId: number, nodeId?: string, ackCalls = 0, full = false) =>
     request<{
       mode: string;
       nodeId: string | null;
@@ -518,10 +530,10 @@ export const api = {
       /** 资产设定图一次会派发多个任务（一行资产一个） */
       taskIds?: number[];
       taskCount?: number;
-      estimate?: { calls: number };
+      estimate?: { calls: number; incremental?: boolean };
     }>(`/api/canvas/${projectId}/run`, {
       method: "POST",
-      body: JSON.stringify({ node_id: nodeId ?? null, ack_calls: ackCalls }),
+      body: JSON.stringify({ node_id: nodeId ?? null, ack_calls: ackCalls, full }),
     }),
   /** 跑完之后对一次账：这一跑实际调用几次、成了几条、失败几条、出了多少产物 */
   runSummary: (projectId: number, runId: string) =>
@@ -529,8 +541,9 @@ export const api = {
       `/api/canvas/${projectId}/run-summary?run_id=${encodeURIComponent(runId)}`,
     ),
   // 整图执行前的预估：会派多少任务、花多少次调用（纯读，不建任务）
-  previewCanvas: (projectId: number) =>
-    request<CanvasPreview>(`/api/canvas/${projectId}/preview`),
+  // `full=true` 才是「全部重做」的账；默认按增量口径算
+  previewCanvas: (projectId: number, full = false) =>
+    request<CanvasPreview>(`/api/canvas/${projectId}/preview${full ? "?full=true" : ""}`),
   // 分镜静态体检：零成本检查镜头语言（纯读，不建任务、不调模型）
   lintCanvas: (projectId: number) =>
     request<CanvasLint>(`/api/canvas/${projectId}/lint`),

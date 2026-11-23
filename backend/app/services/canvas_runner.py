@@ -1780,7 +1780,9 @@ async def _settle_step(run_id: str, node_id: str, status: str, error: str = "") 
         logger.exception("运行 %s 节点 %s 的检查点收口失败", run_id, node_id)
 
 
-async def _persist_run_start(run_id: str, project_id: int, expected: int) -> None:
+async def _persist_run_start(
+    run_id: str, project_id: int, expected: int, incremental: bool = True
+) -> None:
     if not run_id:
         return
     async with SessionLocal() as db:
@@ -1792,12 +1794,14 @@ async def _persist_run_start(run_id: str, project_id: int, expected: int) -> Non
                     project_id=project_id,
                     expected=max(0, int(expected or 0)),
                     status="running",
+                    incremental=bool(incremental),
                 )
             )
         else:
             row.project_id = project_id
             row.expected = max(0, int(expected or 0))
             row.status = "running"
+            row.incremental = bool(incremental)
         await db.commit()
 
 
@@ -1809,6 +1813,28 @@ async def _persist_run_finish(run_id: str) -> None:
         if row is not None and row.status != "finished":
             row.status = "finished"
             await db.commit()
+
+
+async def _reusable_success(
+    db: AsyncSession, project_id: int, node_id: str, input_hash: str
+) -> bool:
+    """这个项目这个节点「最近一次成功」的输入，是不是就是这一份（跨 run 判断）。
+
+    只认最近一次成功：中途跑过别的输入（改稿又改回来）也不复用更早的结果——
+    产物顺序和用户眼前看到的那一版容易对不上，省下来的钱不值得这份困惑。
+    """
+    rows = await db.execute(
+        select(RunStep)
+        .where(
+            RunStep.project_id == project_id,
+            RunStep.node_id == node_id,
+            RunStep.status == "succeeded",
+        )
+        .order_by(RunStep.id.desc())
+        .limit(1)
+    )
+    step = rows.scalar_one_or_none()
+    return step is not None and step.input_hash == input_hash
 
 
 # 一张素材被这一跑引用这么多次以上，才值得在确认弹窗里点名（更低的次数属正常搭配）
@@ -1865,7 +1891,7 @@ async def _input_warnings(
     return out
 
 
-async def preview_graph(project_id: int) -> dict:
+async def preview_graph(project_id: int, incremental: bool = True) -> dict:
     """整图执行前的预估：这一跑会派多少任务、花多少次调用、谁已经有产物。
 
     **纯读**：不建任务、不写库、不调模型（模型解析只查本机配置），可以随便点。
@@ -1889,6 +1915,8 @@ async def preview_graph(project_id: int) -> dict:
         rerun: list[str] = []  # 已经有产物、这一跑会重做的节点
         blocked: list[str] = []  # 已经能判定必挂的节点
         pinned: list[str] = []  # 回滚到旧版本的节点（整图会重跑它们，按最新算）
+        skipped: list[str] = []  # 增量模式下输入没变、直接复用的节点
+        will_run: set[str] = set()  # 这一跑会产出新东西的节点（下游不能按旧输入复用）
         billable = False  # 是否会真实调用外部模型（workflow 走本机 ComfyUI，不扣额度）
         dialogue_calls = 0  # 逐镜对白会额外做几次语音合成（它们不出现在任务数里）
 
@@ -1896,11 +1924,6 @@ async def preview_graph(project_id: int) -> dict:
             node = nodes[nid]
             if not is_runnable(node["type"]):
                 continue
-            step_nodes += 1
-            if normalize_type(node["type"]) not in ("workflow", "film"):
-                # 非 workflow 节点一律要真调模型（workflow 走本机 ComfyUI，不扣额度）
-                # 成片只跑本地 ffmpeg，既不是模型调用也不花钱
-                billable = True
             label = NODE_SCHEMAS[node["type"]]["label"]
             if version_pin_of(node):
                 pinned.append(label)
@@ -1915,6 +1938,40 @@ async def preview_graph(project_id: int) -> dict:
             existing = await _latest_task_assets(
                 db, project_id, nid, version_pin_of(node), picks_of(node)
             )
+            input_hash = node_input_hash(node, upstream)
+            upstream_ids = {sid for sid, _node, _assets in upstream}
+
+            # 增量：输入没变、上游也不在重跑、产物还在 → 这一跑不会碰它
+            if (
+                incremental
+                and not (upstream_ids & will_run)
+                and existing
+                and await _reusable_success(db, project_id, nid, input_hash)
+            ):
+                skipped.append(label)
+                items.append(
+                    {
+                        "id": nid,
+                        "type": node["type"],
+                        "label": label,
+                        "count": 0,
+                        "kinds": {},
+                        "hasOutput": True,
+                        "outputCount": len(existing),
+                        "waiting": [],
+                        "error": "",
+                        "warnings": [],
+                        "skipped": True,
+                    }
+                )
+                continue
+
+            will_run.add(nid)
+            step_nodes += 1
+            if normalize_type(node["type"]) not in ("workflow", "film"):
+                # 非 workflow 节点一律要真调模型（workflow 走本机 ComfyUI，不扣额度）
+                # 成片只跑本地 ffmpeg，既不是模型调用也不花钱
+                billable = True
 
             item: dict = {
                 "id": nid,
@@ -2039,6 +2096,16 @@ async def preview_graph(project_id: int) -> dict:
                 "（段与段之间补一点点静音，所以拼完比各句之和略长）。",
             }
         )
+    if skipped:
+        notes.append(
+            {
+                "level": "info",
+                "text": "增量运行："
+                + "、".join(f"「{x}」" for x in skipped)
+                + " 的输入没有变化，这一跑直接复用已有产物，不会重新调用。"
+                "要强制全部重做，请在确认弹窗里勾选「全量重跑」。",
+            }
+        )
     if reused:
         top = "、".join(f"「{r['name']}」{r['count']} 次" for r in reused[:5])
         notes.append({"level": "info", "text": f"本次会复用已有素材：{top}。"})
@@ -2056,6 +2123,8 @@ async def preview_graph(project_id: int) -> dict:
             "pendingNodes": len(pending),
             "rerunNodes": len(rerun),
             "blockedNodes": len(blocked),
+            # 增量模式下输入没变、直接复用的节点数
+            "skippedNodes": len(skipped),
             # 逐镜对白的额外语音合成次数（不属于「调用次数」那一栏，也还没排进任务）
             "dialogueCalls": dialogue_calls,
         },
@@ -2382,17 +2451,19 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
             return record, report
 
 
-async def _run_full_graph(project_id: int, run_id: str = "", expected: int = 0) -> None:
+async def _run_full_graph(
+    project_id: int, run_id: str = "", expected: int = 0, incremental: bool = True
+) -> None:
     """整图执行：后台协程按拓扑序逐节点跑，上游失败则下游跳过。"""
     try:
         # 先登记「这一跑在跑」再动手：进程正好在第一个节点之前被杀时，
         # 重启后才知道有这么一跑需要接着走（见 resume_runs）
         try:
-            await _persist_run_start(run_id, project_id, expected)
+            await _persist_run_start(run_id, project_id, expected, incremental)
         except Exception:  # noqa: BLE001
             # 登记失败不该拦住这一次生成；代价只是这一次重启后续不上
             logger.exception("运行 %s 登记失败，继续执行", run_id)
-        await _walk_graph(project_id, run_id)
+        await _walk_graph(project_id, run_id, incremental=incremental)
     finally:
         # 不管中间炸成什么样，都要把这一跑标成「结束了」——
         # 漏了这一步，前端会一直以为还在跑，永远不弹那一跑的实际账。
@@ -2404,7 +2475,7 @@ async def _run_full_graph(project_id: int, run_id: str = "", expected: int = 0) 
             logger.exception("运行 %s 收尾落库失败", run_id)
 
 
-async def _walk_graph(project_id: int, run_id: str) -> None:
+async def _walk_graph(project_id: int, run_id: str, incremental: bool = True) -> None:
     async with SessionLocal() as db:
         project = await db.get(Project, project_id)
         if project is None or not project.canvas_json:
@@ -2414,6 +2485,9 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
         order = _topo_order(doc.get("nodes", []), doc.get("edges", []))
 
     failed: set[str] = set()
+    # 这一跑里会产出新东西的节点。上游在其中的节点不能按「旧输入」复用：
+    # 等上游跑完，它的输入就变了，现在复用等于拿上一版结果顶替。
+    will_run: set[str] = set()
     for nid in order:
         node = nodes[nid]
         if not is_runnable(node["type"]):
@@ -2453,6 +2527,20 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
                     "画布 %s 节点 %s 上次未成功（%s），跳过并停止下游", project_id, nid, step.status
                 )
                 continue
+            upstream_ids = {sid for sid, _node, _assets in upstream}
+            if (
+                incremental
+                and step is None
+                and not (upstream_ids & will_run)
+                and await _reusable_success(db, project_id, nid, input_hash)
+                and await _latest_task_assets(
+                    db, project_id, nid, version_pin_of(node), picks_of(node)
+                )
+            ):
+                # 增量：输入没变、产物还在——直接复用，不重派、不重新付费
+                logger.info("画布 %s 节点 %s 输入未变，复用已有产物", project_id, nid)
+                continue
+            will_run.add(nid)
             try:
                 if same_inputs and step is not None and step.status == "submitted":
                     # 重启前这一跑已经给这个节点派过任务：找回来接着等，不新建
@@ -2522,15 +2610,20 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
             await _settle_step(run_id, nid, "succeeded")
 
 
-def start_full_graph(project_id: int, expected: int = 0) -> str:
+def start_full_graph(
+    project_id: int, expected: int = 0, incremental: bool = True
+) -> str:
     """启动整图执行（不阻塞请求），返回这一跑的 run_id。
 
     `expected` 是受理时算出来的预估调用次数。要在这里记下来，是因为整图**边跑边派**：
     只按已存在的任务判断「跑完了没有」会在第一个节点结束时误判（见 `_ACTIVE_RUNS`）。
+    `incremental=True` 时只派输入变过的节点；显式全量重跑传 False。
     """
     run_id = new_run_id()
     _register_run(run_id, project_id, expected)
-    asyncio.get_event_loop().create_task(_run_full_graph(project_id, run_id, expected))
+    asyncio.get_event_loop().create_task(
+        _run_full_graph(project_id, run_id, expected, incremental)
+    )
     return run_id
 
 
@@ -2598,10 +2691,10 @@ async def resume_runs() -> int:
         rows = (
             await db.execute(select(CanvasRun).where(CanvasRun.status == "running"))
         ).scalars().all()
-        runs = [(r.run_id, r.project_id, r.expected) for r in rows]
+        runs = [(r.run_id, r.project_id, r.expected, bool(r.incremental)) for r in rows]
 
     resumed = 0
-    for run_id, project_id, expected in runs:
+    for run_id, project_id, expected, incremental in runs:
         try:
             cont = await _reconcile_run(run_id, project_id)
         except Exception:  # noqa: BLE001
@@ -2611,7 +2704,9 @@ async def resume_runs() -> int:
             await _persist_run_finish(run_id)
             continue
         _register_run(run_id, project_id, expected)
-        asyncio.get_event_loop().create_task(_run_full_graph(project_id, run_id, expected))
+        asyncio.get_event_loop().create_task(
+            _run_full_graph(project_id, run_id, expected, incremental)
+        )
         resumed += 1
     if resumed:
         logger.info("已接着跑 %s 次中断的整图运行", resumed)

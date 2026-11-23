@@ -351,6 +351,9 @@ class Project(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     # 画布文档（JSON），画布模块重做后启用；v1 恒为空
     canvas_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 画布修订号：每次保存 +1。前端保存时带上自己看到的版本，落后了就拒绝覆盖——
+    # 两个标签页同时开着时，晚到的那次保存不该悄悄盖掉别人刚改的内容。
+    canvas_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
@@ -489,6 +492,9 @@ class CanvasRun(Base):
     expected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # running | finished
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
+    # 这一跑是不是「增量」：增量只派输入变过的节点。要落库是因为重启续跑时
+    # 必须沿用当时的模式，否则「全量重跑」跑到一半重启会变成增量，少跑一半。
+    incremental: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
