@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -466,4 +466,67 @@ class AgentStep(Base):
     # （实测 DeepSeek：round 2 报 "`reasoning_content` ... must be passed back to the API"）。
     reasoning: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+# ============================================================
+# 整图运行检查点：进程重启后能接着跑、已完成节点不重复花钱
+# ============================================================
+
+
+class CanvasRun(Base):
+    """一次整图运行。
+
+    以前「这一跑还在不在」只存在进程内存里（`canvas_runner._ACTIVE_RUNS`），
+    服务一重启就无从得知。落到库里之后，重启时才知道「有哪些跑没跑完」，
+    进而按 `RunStep` 接着走，而不是让用户从头再点一次、把已经出过的图重新付一遍钱。
+    """
+
+    __tablename__ = "canvas_runs"
+
+    run_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # 受理时的预估调用次数；重启后仍要能告诉前端「这一跑本来估了多少」
+    expected: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # running | finished
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+
+class RunStep(Base):
+    """一次运行里的一个节点：**提交上游之前**落库的检查点。
+
+    为什么必须有它：整图是边跑边派任务的，进程一死，内存里的「跑到第几个节点」就没了；
+    再点一次运行会把所有节点重派一遍——已经出过图的也照付。这里记下每个节点这一跑的
+    输入指纹（`input_hash`）与它派出的任务，重启后：
+
+    - `succeeded`：直接复用，不再派任务（不重复付费）；
+    - `submitted` 且任务还 pending：补入队（上游从没收到过，安全）；
+    - `submitted` 但任务已在处理却拿不到远程 ID：标 `unknown`，**不自动重发**，
+      因为那种情况下上游可能已经受理并计费，只能由人确认；
+    - `unknown` / `failed`：下游按「上游没成」处理，不拿半成品继续花下游的钱。
+    """
+
+    __tablename__ = "run_steps"
+    __table_args__ = (
+        UniqueConstraint("run_id", "node_id", "input_hash", name="uq_run_steps_run_node_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    project_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    node_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 输入指纹：节点数据 + 上游产物 id。同一个 run 里同节点同输入 = 同一件事
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    # submitted | succeeded | failed | unknown
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="submitted")
+    # 这一跑给这个节点派了哪些任务（JSON 数组）：恢复时按它找回来，不重新派
+    task_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
 

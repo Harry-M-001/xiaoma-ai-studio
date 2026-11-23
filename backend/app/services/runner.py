@@ -4,7 +4,8 @@
 - 视频：提交异步任务后周期轮询，成功下载视频到本地；
 - 工作流：提交 ComfyUI /prompt 后轮询 /history，产物逐个下载落库；
 - 文本（自动链文档）：调 LLM 生成 Markdown，超长内容按块续写后合并落盘；
-- 服务重启时，有上游任务 ID 的视频/工作流任务自动重新挂接轮询，其余标记失败；
+- 服务重启时，有上游任务 ID 的视频/工作流任务自动重新挂接轮询；还停在 pending 的
+  重新入队；进了 processing 却拿不到远程 ID 的标为「不确定」，不自动重发；
 - **跑着的时候**由运行巡检兜底：轮询协程一旦静默结束，任务行会永远停在 processing，
   巡检按「进程内没人推进 + 长时间没有任何写入」把它重连或收口（见 services/patrol.py）。
 """
@@ -30,6 +31,14 @@ from app.services import doc_service, ffmpeg_service, log_service, patrol, provi
 from app.services.comfy_workflow_service import apply_params
 
 logger = logging.getLogger("xiaoma.runner")
+
+# 进程重启时，任务已经进了 processing 却拿不到远程任务 ID：上游到底收没收到、要不要计费
+# 都无从确认。这类任务只能标成「不确定」并让人看一眼，**不能自动重发**——
+# 自动重发一份可能已经计费的请求，比让用户多点一次糟得多。
+RESTART_UNKNOWN_ERROR = (
+    "服务已重启，无法确认上游是否已受理（可能已计费）。这条不会自动重发；"
+    "确认后可在任务中心手动重跑。"
+)
 
 
 def _config_int(key: str, default: int) -> int:
@@ -979,7 +988,18 @@ class TaskRunner:
             self._patrol_reattaches.pop(next(iter(self._patrol_reattaches)))
 
     async def recover(self) -> None:
-        """启动时恢复未完成任务。"""
+        """启动时恢复未完成任务。
+
+        三种情况分开处理：
+
+        1. 视频 / 工作流有远程任务 ID：续挂轮询，上游那笔钱已经在花了，接回来最省；
+        2. 还停在 `pending`：说明队列根本没轮到它，上游从没收到过请求——重新入队，
+           不花钱也不会重复计费；
+        3. 其余（`processing` 却没有远程 ID）：提交到一半死在半路，上游可能已经受理。
+           标成 **不确定**（`RESTART_UNKNOWN_ERROR`），由人确认后再手动重跑，
+           绝不自动重发。
+        """
+        requeue: list[Task] = []
         async with SessionLocal() as db:
             rows = await db.execute(
                 select(Task).where(Task.status.in_(["pending", "processing"]))
@@ -992,11 +1012,19 @@ class TaskRunner:
                 elif task.kind == "workflow" and task.remote_job_id:
                     logger.info("reattach comfy task %s -> %s", task.id, task.remote_job_id)
                     self.reattach_comfy(task.id)
+                elif task.status == "pending":
+                    # 从没提交过：重新入队是安全的（见上面第 2 条）
+                    requeue.append(task)
                 else:
                     task.status = "failed"
-                    task.error = "服务已重启，该任务未完成，请重新发起"
+                    task.error = RESTART_UNKNOWN_ERROR
                     task.completed_at = utcnow()
             await db.commit()
+
+        for task in requeue:
+            logger.info("requeue pending task %s after restart", task.id)
+            # 队列满等异常由 start_or_fail 统一标失败并写明原因
+            await self.start_or_fail(task.kind, task.id)
 
     # ---------- 超分（本机放大） ----------
 

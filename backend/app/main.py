@@ -50,6 +50,7 @@ from app.routers import (
     upscale,
 )
 from app.services import (
+    canvas_runner,
     config_center_service,
     engine_install,
     ffmpeg_service,
@@ -79,6 +80,9 @@ async def lifespan(app: FastAPI):
     log_service.setup_logging(force=True)
     await _seed_config()
     await runner.recover()
+    # 任务接回来之后，再让中断的整图接着走：已经跑完的节点按 run_steps 复用，
+    # 不再重新付一次钱；说不清是否已提交的节点标成 unknown，等人确认。
+    await canvas_runner.resume_runs()
     # 运行巡检：`recover()` 只在重启时兜一次，跑着的时候没人管「轮询协程静默结束、
     # 任务永远停在 processing」这个洞。循环跟着应用一起起、一起停。
     patrol_task = asyncio.create_task(runner.patrol_loop())

@@ -22,14 +22,16 @@ CANONICAL = {"pending", "processing", "completed", "failed", "cancelled"}
 # 前端展示层额外兼容的历史别名（不得出现在后端写入路径里）
 LEGACY_ALIASES = {"succeeded"}
 
-# 检查这些文件里 `status = "xxx"` 的写入
+# 检查这些文件里 `task.status = "xxx"` 的写入。
+# 只认任务行的写入：`run_steps` / `canvas_runs` 有自己的生命周期状态
+# （submitted / succeeded / unknown…），跟任务状态不是一套契约，混进来会误报。
 _SCAN_FILES = [
     BACKEND / "app" / "services" / "runner.py",
     BACKEND / "app" / "services" / "canvas_runner.py",
     BACKEND / "app" / "routers" / "canvas.py",
 ]
 
-_WRITE_RE = re.compile(r"""\bstatus\s*=\s*["']([a-z_]+)["']""")
+_WRITE_RE = re.compile(r"""\btask\.status\s*=\s*["']([a-z_]+)["']""")
 
 
 def _backend_written_statuses() -> set[str]:

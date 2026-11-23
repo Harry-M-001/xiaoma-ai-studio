@@ -18,6 +18,7 @@ canvas_project_id + canvas_node_id 关联，产物通过 Asset.task_id 回溯。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -28,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import SessionLocal
-from app.models import Asset, ComfyWorkflow, Project, ProviderService, Task
+from app.models import Asset, CanvasRun, ComfyWorkflow, Project, ProviderService, RunStep, Task
 from app.providers.base import AdapterError
 from app.registry.canvas_nodes import (
     NODE_SCHEMAS,
@@ -57,7 +58,7 @@ from app.services import (
     style_service,
 )
 from app.services.config_center_service import runtime_value
-from app.services.runner import runner
+from app.services.runner import RESTART_UNKNOWN_ERROR, runner
 
 logger = logging.getLogger(__name__)
 
@@ -1692,6 +1693,124 @@ async def _stamp_run(db: AsyncSession, tasks: list[Task], run_id: str) -> None:
     await db.commit()
 
 
+# ---------------------------------------------------------------- 运行检查点（canvas_runs / run_steps）
+
+
+def _step_task_ids(step: RunStep) -> list[int]:
+    try:
+        return [int(x) for x in json.loads(step.task_ids or "[]")]
+    except (TypeError, ValueError):
+        return []
+
+
+def node_input_hash(node: dict, upstream: list[tuple[str, dict, list[Asset]]]) -> str:
+    """节点这一跑的输入指纹：节点数据 + 上游产物 id。
+
+    只放「会改变结果」的东西（提示词、参数、模型、上游素材），不放位置/选中态；
+    上游产物的 id 足以代表版本——资产落盘后不可变，重跑会产出新 id。
+    """
+    payload = {
+        "type": node.get("type"),
+        "data": node.get("data") or {},
+        "upstream": [
+            # 上游节点的正文（例如分镜表 docText）也算输入：只比产物 id 的话，
+            # 「上游文本改了、产物还没变」会被误判成同一份输入而复用旧结果
+            [sid, s_node.get("data") or {}, [a.id for a in assets]]
+            for sid, s_node, assets in upstream
+        ],
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+async def _latest_step(db: AsyncSession, run_id: str, node_id: str) -> RunStep | None:
+    if not run_id:
+        return None
+    rows = await db.execute(
+        select(RunStep)
+        .where(RunStep.run_id == run_id, RunStep.node_id == node_id)
+        .order_by(RunStep.id.desc())
+        .limit(1)
+    )
+    return rows.scalar_one_or_none()
+
+
+async def _save_step(
+    db: AsyncSession,
+    run_id: str,
+    project_id: int,
+    node_id: str,
+    input_hash: str,
+    tasks: list[Task],
+) -> None:
+    """把「这一跑的哪个节点派了哪些任务」落库，**必须在提交上游之前**。
+
+    任务行与这一步都在 `runner.start_or_fail` 之前 commit，所以进程在任何一刻被杀，
+    重启后都能分辨「这个节点到底提交过没有」，而不是靠猜。
+    """
+    if not run_id:
+        return
+    db.add(
+        RunStep(
+            run_id=run_id,
+            project_id=project_id,
+            node_id=node_id,
+            input_hash=input_hash,
+            status="submitted",
+            task_ids=json.dumps([t.id for t in tasks]),
+        )
+    )
+    await db.commit()
+
+
+async def _settle_step(run_id: str, node_id: str, status: str, error: str = "") -> None:
+    """收口一个节点的检查点状态（成功后不再重派，失败/不确定则挡住下游）。"""
+    if not run_id:
+        return
+    try:
+        async with SessionLocal() as db:
+            step = await _latest_step(db, run_id, node_id)
+            if step is None or step.status != "submitted":
+                return
+            step.status = status
+            step.error = error or None
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        # 检查点写不进去不该打断整图执行：这一次的账记不上，比片子跑一半停下要好
+        logger.exception("运行 %s 节点 %s 的检查点收口失败", run_id, node_id)
+
+
+async def _persist_run_start(run_id: str, project_id: int, expected: int) -> None:
+    if not run_id:
+        return
+    async with SessionLocal() as db:
+        row = await db.get(CanvasRun, run_id)
+        if row is None:
+            db.add(
+                CanvasRun(
+                    run_id=run_id,
+                    project_id=project_id,
+                    expected=max(0, int(expected or 0)),
+                    status="running",
+                )
+            )
+        else:
+            row.project_id = project_id
+            row.expected = max(0, int(expected or 0))
+            row.status = "running"
+        await db.commit()
+
+
+async def _persist_run_finish(run_id: str) -> None:
+    if not run_id:
+        return
+    async with SessionLocal() as db:
+        row = await db.get(CanvasRun, run_id)
+        if row is not None and row.status != "finished":
+            row.status = "finished"
+            await db.commit()
+
+
 # 一张素材被这一跑引用这么多次以上，才值得在确认弹窗里点名（更低的次数属正常搭配）
 _REUSE_MIN_HITS = 2
 
@@ -2263,14 +2382,26 @@ async def render_animatic(project_id: int, node_id: str) -> tuple[Asset, dict]:
             return record, report
 
 
-async def _run_full_graph(project_id: int, run_id: str = "") -> None:
+async def _run_full_graph(project_id: int, run_id: str = "", expected: int = 0) -> None:
     """整图执行：后台协程按拓扑序逐节点跑，上游失败则下游跳过。"""
     try:
+        # 先登记「这一跑在跑」再动手：进程正好在第一个节点之前被杀时，
+        # 重启后才知道有这么一跑需要接着走（见 resume_runs）
+        try:
+            await _persist_run_start(run_id, project_id, expected)
+        except Exception:  # noqa: BLE001
+            # 登记失败不该拦住这一次生成；代价只是这一次重启后续不上
+            logger.exception("运行 %s 登记失败，继续执行", run_id)
         await _walk_graph(project_id, run_id)
     finally:
         # 不管中间炸成什么样，都要把这一跑标成「结束了」——
         # 漏了这一步，前端会一直以为还在跑，永远不弹那一跑的实际账。
         _finish_run(run_id)
+        try:
+            await _persist_run_finish(run_id)
+        except Exception:  # noqa: BLE001
+            # 收尾写库失败不该盖住真正的异常，也不该让调度协程挂掉
+            logger.exception("运行 %s 收尾落库失败", run_id)
 
 
 async def _walk_graph(project_id: int, run_id: str) -> None:
@@ -2289,6 +2420,7 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
             continue
         # 上游有失败/被跳过的节点则跳过本节点
         blocked = False
+        requeue: list[Task] = []
         async with SessionLocal() as db:
             for e in doc.get("edges", []):
                 if e.get("target") == nid and e.get("source") in failed:
@@ -2302,14 +2434,51 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
                 # 整图会把每个可执行节点都重跑一遍，所以忽略各节点上回滚的版本：
                 # 这一跑它们自己就会产出新版，下游该用新的
                 upstream = await _resolve_upstream(db, project_id, doc, nid, use_pins=False)
-                tasks = await _build_node_tasks(db, project_id, doc, node, upstream)
-                await _stamp_run(db, tasks, run_id)
+                input_hash = node_input_hash(node, upstream)
             except Exception as e:  # noqa: BLE001 - 单节点失败不中断整图
                 failed.add(nid)
                 logger.warning("画布 %s 节点 %s 准备失败：%s", project_id, nid, e)
                 continue
 
-        for task in tasks:
+            step = await _latest_step(db, run_id, nid)
+            same_inputs = step is not None and step.input_hash == input_hash
+            if same_inputs and step is not None and step.status == "succeeded":
+                # 这一跑已经把这个节点跑完了：直接复用，不重派、不重新付费
+                logger.info("画布 %s 节点 %s 本跑已完成，跳过", project_id, nid)
+                continue
+            if same_inputs and step is not None and step.status in ("failed", "unknown"):
+                # 重启前这个节点就没成（或无法确认是否已受理）：下游不能拿半成品继续花钱
+                failed.add(nid)
+                logger.info(
+                    "画布 %s 节点 %s 上次未成功（%s），跳过并停止下游", project_id, nid, step.status
+                )
+                continue
+            try:
+                if same_inputs and step is not None and step.status == "submitted":
+                    # 重启前这一跑已经给这个节点派过任务：找回来接着等，不新建
+                    ids = _step_task_ids(step)
+                    tasks = [t for t in [await db.get(Task, i) for i in ids] if t is not None]
+                    if not tasks:
+                        raise ValueError("这一跑的任务记录已不存在，无法确认是否已提交")
+                    requeue = [t for t in tasks if t.status == "pending"]
+                    logger.info(
+                        "画布 %s 节点 %s 接着上次的任务 %s 继续",
+                        project_id,
+                        nid,
+                        [t.id for t in tasks],
+                    )
+                else:
+                    # 没跑过，或者输入已经变了（用户改稿）：按新输入派一次，记新检查点
+                    tasks = await _build_node_tasks(db, project_id, doc, node, upstream)
+                    await _stamp_run(db, tasks, run_id)
+                    await _save_step(db, run_id, project_id, nid, input_hash, tasks)
+                    requeue = list(tasks)
+            except Exception as e:  # noqa: BLE001 - 单节点失败不中断整图
+                failed.add(nid)
+                logger.warning("画布 %s 节点 %s 准备失败：%s", project_id, nid, e)
+                continue
+
+        for task in requeue:
             await runner.start_or_fail(task.kind, task.id)
 
         # 轮询等待整批完成（runner 异步推进）
@@ -2318,24 +2487,39 @@ async def _walk_graph(project_id: int, run_id: str) -> None:
         task_ids = [t.id for t in tasks]
         budget = _NODE_WAIT_TIMEOUT + max(0, len(task_ids) - 1) * _PER_TASK_WAIT_EXTRA
         deadline = asyncio.get_event_loop().time() + budget
+        broken = False
+        unknown = False
         while asyncio.get_event_loop().time() < deadline:
             await asyncio.sleep(_POLL_INTERVAL)
             async with SessionLocal() as db:
-                finished, broken = 0, False
+                finished = 0
                 for tid in task_ids:
                     t = await db.get(Task, tid)
                     if t is None or t.status in ("failed", "cancelled"):
                         broken = True
                         finished += 1
+                        if t is not None and t.error == RESTART_UNKNOWN_ERROR:
+                            unknown = True
                     elif t.status == "completed":
                         finished += 1
                 if finished >= len(task_ids):
-                    if broken:
-                        failed.add(nid)
                     break
         else:
             failed.add(nid)
             logger.warning("画布 %s 节点 %s 等待超时", project_id, nid)
+            await _settle_step(run_id, nid, "failed", "等待任务完成超时")
+            continue
+
+        if unknown:
+            failed.add(nid)
+            await _settle_step(
+                run_id, nid, "unknown", "服务重启时无法确认上游是否受理，未自动重发"
+            )
+        elif broken:
+            failed.add(nid)
+            await _settle_step(run_id, nid, "failed", "有任务失败")
+        else:
+            await _settle_step(run_id, nid, "succeeded")
 
 
 def start_full_graph(project_id: int, expected: int = 0) -> str:
@@ -2346,8 +2530,92 @@ def start_full_graph(project_id: int, expected: int = 0) -> str:
     """
     run_id = new_run_id()
     _register_run(run_id, project_id, expected)
-    asyncio.get_event_loop().create_task(_run_full_graph(project_id, run_id))
+    asyncio.get_event_loop().create_task(_run_full_graph(project_id, run_id, expected))
     return run_id
+
+
+async def _reconcile_run(run_id: str, project_id: int) -> bool:
+    """把这一跑的检查点对到任务表的真实状态，返回「还需不需要接着走」。
+
+    对账只回答三件事：哪些节点已经成了（复用）、哪些还挂着能等（继续）、
+    哪些没法确认（`unknown`，不自动重发）。判断不看「任务数够不够」，
+    只看这一跑自己的 `run_steps`——别的跑留下的任务不算数。
+    """
+    async with SessionLocal() as db:
+        project = await db.get(Project, project_id)
+        doc = json.loads(project.canvas_json) if project and project.canvas_json else {}
+        runnable = [
+            n["id"] for n in doc.get("nodes", []) if is_runnable(str(n.get("type") or ""))
+        ]
+        rows = (
+            await db.execute(
+                select(RunStep).where(RunStep.run_id == run_id).order_by(RunStep.id.asc())
+            )
+        ).scalars().all()
+        latest: dict[str, RunStep] = {}
+        for step in rows:
+            latest[step.node_id] = step  # 后写的那条生效（同一节点可能因改稿有多条）
+
+        cont = False
+        for nid in runnable:
+            step = latest.get(nid)
+            if step is None:
+                cont = True  # 还没轮到它
+                continue
+            if step.status != "submitted":
+                continue
+            tasks = [t for t in [await db.get(Task, i) for i in _step_task_ids(step)] if t]
+            if not tasks:
+                step.status = "unknown"
+                step.error = "这一跑的任务记录已不存在，无法确认是否已提交"
+                continue
+            if all(t.status == "completed" for t in tasks):
+                step.status = "succeeded"
+                continue
+            if any(t.status == "processing" and not t.remote_job_id for t in tasks) or any(
+                t.status == "failed" and (t.error or "") == RESTART_UNKNOWN_ERROR for t in tasks
+            ):
+                step.status = "unknown"
+                step.error = "服务重启时无法确认上游是否受理，未自动重发"
+                continue
+            if any(t.status in ("failed", "cancelled") for t in tasks):
+                step.status = "failed"
+                step.error = "重启前该节点已有任务失败"
+                continue
+            cont = True  # 还有 pending（待入队）或已重连在轮询的任务
+        await db.commit()
+        return cont
+
+
+async def resume_runs() -> int:
+    """启动时接着跑没跑完的整图，返回恢复了几个。
+
+    调用时机在 `runner.recover()` 之后：那时有远程 ID 的任务已经接回轮询、
+    `pending` 的已经重新入队、说不清的已经标成失败。这里只按 `run_steps`
+    把进度对出来，然后让没跑完的整图接着走——已经跑完的节点不会再付一次钱。
+    """
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(select(CanvasRun).where(CanvasRun.status == "running"))
+        ).scalars().all()
+        runs = [(r.run_id, r.project_id, r.expected) for r in rows]
+
+    resumed = 0
+    for run_id, project_id, expected in runs:
+        try:
+            cont = await _reconcile_run(run_id, project_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("运行 %s 对账失败，跳过恢复", run_id)
+            continue
+        if not cont:
+            await _persist_run_finish(run_id)
+            continue
+        _register_run(run_id, project_id, expected)
+        asyncio.get_event_loop().create_task(_run_full_graph(project_id, run_id, expected))
+        resumed += 1
+    if resumed:
+        logger.info("已接着跑 %s 次中断的整图运行", resumed)
+    return resumed
 
 
 async def run_summary(project_id: int, run_id: str) -> dict:
