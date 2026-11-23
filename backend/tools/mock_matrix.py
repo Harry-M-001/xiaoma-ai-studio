@@ -168,35 +168,34 @@ def start_processes(tmp: Path) -> tuple[subprocess.Popen, subprocess.Popen]:
         raise SystemExit(f"端口 {APP_PORT} 已被占用，先停掉旧的测试实例")
 
     mock_log = tmp / "mock_requests.jsonl"
-    mock_out = open(tmp / "mock-server.log", "w", encoding="utf-8")
-    mock = subprocess.Popen(
-        [str(VENV_PY), str(TOOLS / "mock_model_server.py"),
-         "--port", str(MOCK_PORT), "--log", str(mock_log)],
-        cwd=str(BACKEND),
-        stdout=mock_out,
-        stderr=subprocess.STDOUT,
-    )
     env = {
         **os.environ,
         "DATA_DIR": str(tmp / "data"),
         "FRONTEND_DIST": str(ROOT / "frontend" / "webroot"),
         "PYTHONIOENCODING": "utf-8",
     }
-    app_out = open(tmp / "app.log", "w", encoding="utf-8")
-    app = subprocess.Popen(
-        [str(VENV_PY), "-m", "uvicorn", "app.main:app",
-         "--host", "127.0.0.1", "--port", str(APP_PORT)],
-        cwd=str(BACKEND),
-        env=env,
-        stdout=app_out,
-        stderr=subprocess.STDOUT,
-    )
+    processes: list[subprocess.Popen] = []
     try:
+        with (tmp / "mock-server.log").open("w", encoding="utf-8") as mock_out:
+            mock = subprocess.Popen(
+                [str(VENV_PY), str(TOOLS / "mock_model_server.py"),
+                 "--port", str(MOCK_PORT), "--log", str(mock_log)],
+                cwd=str(BACKEND), stdout=mock_out, stderr=subprocess.STDOUT,
+            )
+            processes.append(mock)
+        with (tmp / "app.log").open("w", encoding="utf-8") as app_out:
+            app = subprocess.Popen(
+                [str(VENV_PY), "-m", "uvicorn", "app.main:app",
+                 "--host", "127.0.0.1", "--port", str(APP_PORT)],
+                cwd=str(BACKEND), env=env, stdout=app_out, stderr=subprocess.STDOUT,
+            )
+            processes.append(app)
         wait_http(f"{MOCK_BASE}/healthz")
         wait_http(f"{APP}/api/health")
-    except Exception:
-        mock.terminate()
-        app.terminate()
+    except BaseException:
+        for process in reversed(processes):
+            process.terminate()
+            process.wait(timeout=15)
         raise
     return mock, app
 
@@ -360,7 +359,8 @@ def run_canvas_case(idx: int, task: dict, img: tuple[str, str], vid: tuple[str, 
 
 
 def run_agent_case(idx: int, task: dict, img: tuple[str, str], vid: tuple[str, str],
-                   keys: dict[str, str], agent_project_id: int, run_tag: str) -> dict:
+                   keys: dict[str, str], agent_project_id: int, run_tag: str, *,
+                   thinking: bool = False) -> dict:
     project = http("POST", "/api/projects", {
         "name": f"Agent 矩阵 {run_tag} #{idx:02d} {task['name']}",
         "description": "Agent 对照运行（本地模拟模型）",
@@ -370,7 +370,7 @@ def run_agent_case(idx: int, task: dict, img: tuple[str, str], vid: tuple[str, s
         "project_id": project["id"],
         "agent_project_id": agent_project_id,
         "auto_approve": True,
-        "thinking": False,
+        "thinking": thinking,
     })
     sid = session["session"]["id"]
     instruction = (
@@ -414,7 +414,7 @@ def run_agent_case(idx: int, task: dict, img: tuple[str, str], vid: tuple[str, s
         "steps": len(steps),
         "tool_steps": len(tool_steps),
         "tools": [s.get("toolName") for s in tool_steps],
-        "failed_tools": [s.get("toolName") for s in tool_steps if s.get("status") == "failed"],
+        "failed_tools": [s.get("toolName") for s in tool_steps if s.get("status") in ("error", "failed")],
         "details": [
             {
                 "seq": s.get("seq"),
