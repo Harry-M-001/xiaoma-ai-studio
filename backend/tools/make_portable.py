@@ -80,8 +80,12 @@ COPY_TREES: tuple[tuple[str, tuple[str, ...]], ...] = (
     # 就没法用这条路线（而源码版能用，又是「同一功能两种安装方式不一样」那类坑）。
     # 全部加起来约 53 KB，与「大文件不进包」不相干。
     # 排除手里的素材，不是给用户的说明书：toonflow-research.md 是另一个项目的架构调研；
-    # KIE.md 里放的是**真实 API Key**（已在 .gitignore 里），绝不能进分发包。
-    ("docs", ("toonflow-research.md", "KIE.md")),
+    # KIE.md 里放的是**真实 API Key**（已在 .gitignore 里），绝不能进分发包；
+    # 审查/矩阵报告是内部研发文档，也不该出现在用户包里。
+    ("docs", (
+        "toonflow-research.md", "KIE.md",
+        "project-audit-and-roadmap.md", "mock-matrix-report.md",
+    )),
 )
 
 # 进包的单个文件
