@@ -349,13 +349,14 @@ def test_resume_runs_picks_up_unfinished_graphs_and_closes_finished_ones():
     """启动恢复：该接的接上，已经没事可做的要把这一跑收尾，不能永远挂着 running。"""
     async def scenario(maker, started):  # noqa: ANN001
         doc = _doc([_image_node("n1")])
-        pid = await _seed_project(maker, doc)
+        done_pid = await _seed_project(maker, doc, name="已经跑完的项目")
+        doing_pid = await _seed_project(maker, doc, name="中断待续跑的项目")
         async with maker() as db:
-            db.add(CanvasRun(run_id="resume-me", project_id=pid, expected=1, status="running"))
-            db.add(CanvasRun(run_id="already-done", project_id=pid, expected=1, status="running"))
+            db.add(CanvasRun(run_id="resume-me", project_id=doing_pid, expected=1, status="running"))
+            db.add(CanvasRun(run_id="already-done", project_id=done_pid, expected=1, status="running"))
             await db.commit()
         # already-done 这一跑的唯一节点已经完成：恢复时应当直接收尾
-        await _add_completed_node(maker, pid, "already-done", "n1")
+        await _add_completed_node(maker, done_pid, "already-done", "n1")
 
         resumed = await canvas_runner.resume_runs()
         assert resumed == 1, f"应当只接上没跑完的那一跑，实际 {resumed}"
