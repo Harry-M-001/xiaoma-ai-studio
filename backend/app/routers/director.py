@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -117,14 +118,41 @@ async def import_video(
         raise HTTPException(status_code=400, detail="请上传视频文件（mp4 / webm / mov 等）")
 
     limit = _video_upload_limit() * 1024 * 1024
-    content = await file.read()
-    if len(content) > limit:
-        raise HTTPException(
-            status_code=413,
-            detail=f"视频超过大小上限 {_video_upload_limit()} MB，可在「系统设置 → 限制」调整",
-        )
+    too_large = HTTPException(
+        status_code=413,
+        detail=f"视频超过大小上限 {_video_upload_limit()} MB，可在「系统设置 → 限制」调整",
+    )
+    # 大小能提前知道就先拒绝，连一个字节都不写
+    if file.size is not None and file.size > limit:
+        raise too_large
 
-    rel = storage.save_bytes(content, ct)
+    # 边收边写：500 MB 的视频不再先整段读进内存，超限也能在中途立刻停下
+    tmp, rel = storage.new_stream_path(ct)
+    written = 0
+    try:
+        with tmp.open("wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > limit:
+                    raise too_large
+                fh.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="上传的视频是空文件")
+        os.replace(tmp, storage.abs_path(rel))
+    except HTTPException:
+        tmp.unlink(missing_ok=True)
+        raise
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        if storage.is_no_space(e):
+            raise HTTPException(
+                status_code=507, detail="磁盘空间不足，视频没有保存。清理磁盘后重试"
+            ) from None
+        raise HTTPException(status_code=500, detail=f"保存视频失败：{e}") from e
+
     path = storage.abs_path(rel)
     meta = await ffmpeg_service.probe(path)
     asset = Asset(
@@ -132,7 +160,7 @@ async def import_video(
         filename=rel,
         original_name=file.filename or "imported.mp4",
         content_type=ct,
-        size=len(content),
+        size=written,
         source="uploaded",
         width=meta.get("width"),
         height=meta.get("height"),

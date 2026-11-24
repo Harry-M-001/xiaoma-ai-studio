@@ -56,6 +56,7 @@ from app.services import (
     config_center_service,
     engine_install,
     ffmpeg_service,
+    keyed_tasks,
     log_service,
     mcp_gate,
     ollama_service,
@@ -175,9 +176,16 @@ async def media_thumb(rel: str, w: int = 320):
     width = max(64, min(int(w or 320), 1024))
     cache = settings.data_dir / "thumbnails" / f"{rel}.{width}.jpg"
     fresh = cache.is_file() and cache.stat().st_mtime >= src.stat().st_mtime
-    if not fresh and not await ffmpeg_service.make_thumbnail(src, cache, width):
-        # 缩不出来就退回原图：宁可多传一点，也不要给用户一堆碎图
-        return FileResponse(src)
+    if not fresh:
+        # single-flight：同一份原图 + 同一尺寸的并发请求只跑一次 ffmpeg，
+        # 其余请求等这次的结果。生成成功就返回缓存，失败再退回原图。
+        ok = await keyed_tasks.run_once(
+            f"thumb:{rel}:{width}",
+            lambda: ffmpeg_service.make_thumbnail(src, cache, width),
+        )
+        if not ok:
+            # 缩不出来就退回原图：宁可多传一点，也不要给用户一堆碎图
+            return FileResponse(src)
     return FileResponse(
         cache, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"}
     )

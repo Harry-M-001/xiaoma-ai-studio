@@ -327,6 +327,21 @@ def test_the_status_endpoint_uses_the_same_grouping():
         assert f'"{field}"' in block, f"状态里缺 {field}"
 
 
+def test_status_reads_only_assets_of_this_canvas():
+    """状态是每 2–3 秒一次的轮询：资产必须按本画布的任务过滤，不能扫全库。
+
+    以前这里查「全库所有图片 / 视频 / 文档」，别的项目攒到几万个资产后，
+    这张画布的状态接口会跟着一起变慢（压测：全库查询 1.3 秒 vs 按任务 7 毫秒）。
+    """
+    text = (BACKEND / "app" / "routers" / "canvas.py").read_text(encoding="utf-8")
+    start = text.index("async def canvas_status(")
+    block = text[start : text.index("async def node_versions(", start)]
+    assert "Asset.task_id.in_(task_ids)" in block, "状态接口没有按本画布的任务过滤资产"
+    assert 'Asset.kind.in_(["image", "video", "document"])' not in block, (
+        "状态接口又在扫全库资产了"
+    )
+
+
 def test_the_versions_endpoint_is_read_only():
     """回滚走的是「保存画布」那条路，不另开一个写接口（否则有两条写画布的路径）。"""
     text = (BACKEND / "app" / "routers" / "canvas.py").read_text(encoding="utf-8")

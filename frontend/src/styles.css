@@ -468,6 +468,8 @@ input, textarea, select { font-family: inherit; }
 .tpl-desc { color: var(--text-2); font-size: 12.5px; }
 .tpl-inputs { display: flex; gap: 10px; flex-wrap: wrap; }
 .tpl-inputs label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-3); flex: 1; min-width: 200px; }
+.tpl-input-error { font-style: normal; color: var(--danger); font-size: 11px; }
+.input.input-invalid { border-color: var(--danger); }
 .tpl-check { font-size: 12px; border-radius: 8px; padding: 6px 9px; }
 .tpl-check.ok { background: var(--success-soft); color: var(--success); }
 .tpl-check.warn { background: var(--warning-soft); color: var(--warning); }

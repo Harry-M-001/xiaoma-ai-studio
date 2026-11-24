@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import subprocess
 import sys
 import uuid
@@ -82,6 +83,25 @@ def save_bytes(data: bytes, content_type: str, preferred_ext: str | None = None)
     name = f"{uuid.uuid4().hex}.{ext}"
     (folder / name).write_bytes(data)
     return f"{month}/{name}"
+
+
+def new_stream_path(content_type: str, preferred_ext: str | None = None) -> tuple[Path, str]:
+    """给「边收边写」的大文件分配临时路径，返回 (临时文件, 最终相对路径)。
+
+    写的时候落到 `.part`，收完用 `os.replace` 换到最终名——中途超限 / 断网 / 磁盘满
+    删掉临时文件就行，`/media/` 里不会出现半个视频。
+    """
+    month = datetime.now().strftime("%Y-%m")
+    folder = settings.storage_dir / month
+    folder.mkdir(parents=True, exist_ok=True)
+    ext = preferred_ext or _ext(content_type)
+    name = f"{uuid.uuid4().hex}.{ext}"
+    return folder / f"{name}.part", f"{month}/{name}"
+
+
+def is_no_space(err: OSError) -> bool:
+    """磁盘满：Linux 是 ENOSPC，Windows 是 winerror 112。"""
+    return getattr(err, "errno", None) == errno.ENOSPC or getattr(err, "winerror", None) == 112
 
 
 def abs_path(rel_path: str) -> Path:

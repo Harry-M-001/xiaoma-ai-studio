@@ -175,28 +175,46 @@ async def warm_subtitle_filter() -> bool:
     return _SUBTITLE_FILTER
 
 
+# ffmpeg / ffprobe 共用的并发闸门。不设上限时，资产页一屏图会同时拉起几十个 ffmpeg，
+# CPU 打满、缩略图反而更慢；导演台的合并也被挤在一起。按事件循环懒建：
+# 测试里每个用例各跑一个 loop，模块级的锁不能跨 loop 复用。
+_FFMPEG_LIMIT = 2
+_FFMPEG_SEM: asyncio.Semaphore | None = None
+_FFMPEG_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _ffmpeg_gate() -> asyncio.Semaphore:
+    global _FFMPEG_SEM, _FFMPEG_LOOP
+    loop = asyncio.get_running_loop()
+    if _FFMPEG_SEM is None or _FFMPEG_LOOP is not loop:
+        _FFMPEG_SEM = asyncio.Semaphore(max(1, _FFMPEG_LIMIT))
+        _FFMPEG_LOOP = loop
+    return _FFMPEG_SEM
+
+
 async def _run(cmd: list[str], timeout: int) -> tuple[bool, str]:
     """运行外部命令，返回 (成功, stderr 尾部)。"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        return False, "系统未安装 ffmpeg / ffprobe"
-    except OSError as e:
-        return False, f"命令启动失败：{e}"
-    try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return False, "处理超时，已终止"
-    if proc.returncode != 0:
-        tail = (stderr or b"")[-500:].decode("utf-8", "replace").strip()
-        return False, tail or f"退出码 {proc.returncode}"
-    return True, ""
+    async with _ffmpeg_gate():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return False, "系统未安装 ffmpeg / ffprobe"
+        except OSError as e:
+            return False, f"命令启动失败：{e}"
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return False, "处理超时，已终止"
+        if proc.returncode != 0:
+            tail = (stderr or b"")[-500:].decode("utf-8", "replace").strip()
+            return False, tail or f"退出码 {proc.returncode}"
+        return True, ""
 
 
 async def ffmpeg_available() -> tuple[bool, str | None]:
@@ -963,7 +981,9 @@ async def make_thumbnail(src: Path, dst: Path, width: int = 320) -> bool:
     if not ffmpeg:
         return False
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(dst.name + ".tmp.jpg")
+    # 临时文件名必须唯一：同一张图的两个并发请求以前会写同一个 `.tmp.jpg`，
+    # 一个刚写完、另一个正准备替换，结果可能是一张截了一半的 JPEG。
+    tmp = dst.with_name(f"{dst.name}.{uuid.uuid4().hex}.tmp.jpg")
     size = max(64, min(width, 1024))
     video = src.suffix.lower() in {".mp4", ".webm", ".mov", ".m4v", ".mkv"}
     # 视频取第 1 秒的一帧（片头常是黑场）；太短就退回第 0 帧
@@ -988,25 +1008,26 @@ async def _run_in(cmd: list[str], timeout: int, *, cwd: Path) -> tuple[bool, str
     参数会让每处都得想一下「我该不该传 cwd」，而字幕（还有它的预览）是唯一需要限定
     相对路径基准的场景。
     """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=str(cwd),
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        return False, "系统未安装 ffmpeg / ffprobe"
-    except OSError as e:
-        return False, f"命令启动失败：{e}"
-    try:
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.communicate()
-        return False, "处理超时，已终止"
-    if proc.returncode != 0:
-        tail = (stderr or b"")[-600:].decode("utf-8", "replace").strip()
-        return False, tail or f"退出码 {proc.returncode}"
-    return True, ""
+    async with _ffmpeg_gate():
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(cwd),
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            return False, "系统未安装 ffmpeg / ffprobe"
+        except OSError as e:
+            return False, f"命令启动失败：{e}"
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.communicate()
+            return False, "处理超时，已终止"
+        if proc.returncode != 0:
+            tail = (stderr or b"")[-600:].decode("utf-8", "replace").strip()
+            return False, tail or f"退出码 {proc.returncode}"
+        return True, ""
 
 
 # ---------------------------------------------------------------- 音频

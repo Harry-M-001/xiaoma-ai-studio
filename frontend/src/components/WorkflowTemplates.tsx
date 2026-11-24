@@ -18,6 +18,9 @@ const MODALITY_LABEL: Record<string, string> = {
   audio: "音频",
 };
 
+/** 模板输入的长度上限：和提示词一样，过长没有意义，只会在插入时被截断或撑爆节点。 */
+const INPUT_MAX = 2000;
+
 /**
  * 工作流模板。
  *
@@ -46,6 +49,7 @@ export default function WorkflowTemplates({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [values, setValues] = useState<Record<string, Record<string, string>>>({});
+  const [errors, setErrors] = useState<Record<string, Record<string, string>>>({});
   const [checked, setChecked] = useState<Record<string, TemplatePreflight>>({});
   const [saveName, setSaveName] = useState("");
 
@@ -83,15 +87,38 @@ export default function WorkflowTemplates({
     }
   };
 
+  /**
+   * 插入前的表单校验：必填 + 长度。
+   *
+   * 模板的输入就是这次运行的参数，空着插进去只会得到一张跑不动的画布，
+   * 用户还得自己回头找哪个节点少了提示词——不如在这里就问清楚。
+   */
+  const validate = (tpl: WorkflowTemplateMeta) => {
+    const next: Record<string, string> = {};
+    for (const inp of tpl.inputs) {
+      const value = (values[tpl.id]?.[inp.key] ?? "").trim();
+      if (!value) {
+        next[inp.key] = `请填写「${inp.label}」`;
+      } else if (value.length > INPUT_MAX) {
+        next[inp.key] = `最多 ${INPUT_MAX} 字（当前 ${value.length}）`;
+      }
+    }
+    setErrors((prev) => ({ ...prev, [tpl.id]: next }));
+    return Object.keys(next).length === 0;
+  };
+
   const insert = async (tpl: WorkflowTemplateMeta) => {
+    if (!validate(tpl)) {
+      toast.info("还有输入没填完，补齐后再插入");
+      return;
+    }
     setBusy(tpl.id);
     try {
-      const r = await api.insertWorkflowTemplate(
-        projectId,
-        tpl.id,
-        values[tpl.id] ?? {},
-        revision,
+      // 提交前统一去掉首尾空白：用户复制粘贴时很常见，留着会原样写进节点提示词
+      const filled = Object.fromEntries(
+        tpl.inputs.map((inp) => [inp.key, (values[tpl.id]?.[inp.key] ?? "").trim()])
       );
+      const r = await api.insertWorkflowTemplate(projectId, tpl.id, filled, revision);
       toast.success(`已插入「${tpl.name}」（${r.nodeIds.length} 个节点）`);
       onInserted(r.revision);
     } catch (e) {
@@ -199,22 +226,35 @@ export default function WorkflowTemplates({
 
                 {tpl.inputs.length > 0 && (
                   <div className="tpl-inputs">
-                    {tpl.inputs.map((inp) => (
-                      <label key={inp.key}>
-                        <span>{inp.label}</span>
-                        <input
-                          className="input"
-                          placeholder={inp.hint || ""}
-                          value={values[tpl.id]?.[inp.key] ?? ""}
-                          onChange={(e) =>
-                            setValues((prev) => ({
-                              ...prev,
-                              [tpl.id]: { ...(prev[tpl.id] ?? {}), [inp.key]: e.target.value },
-                            }))
-                          }
-                        />
-                      </label>
-                    ))}
+                    {tpl.inputs.map((inp) => {
+                      const msg = errors[tpl.id]?.[inp.key];
+                      return (
+                        <label key={inp.key}>
+                          <span>{inp.label}</span>
+                          <input
+                            className={`input ${msg ? "input-invalid" : ""}`}
+                            placeholder={inp.hint || ""}
+                            aria-invalid={Boolean(msg)}
+                            value={values[tpl.id]?.[inp.key] ?? ""}
+                            onChange={(e) => {
+                              const text = e.target.value;
+                              setValues((prev) => ({
+                                ...prev,
+                                [tpl.id]: { ...(prev[tpl.id] ?? {}), [inp.key]: text },
+                              }));
+                              if (msg) {
+                                setErrors((prev) => {
+                                  const cur = { ...(prev[tpl.id] ?? {}) };
+                                  delete cur[inp.key];
+                                  return { ...prev, [tpl.id]: cur };
+                                });
+                              }
+                            }}
+                          />
+                          {msg && <em className="tpl-input-error">{msg}</em>}
+                        </label>
+                      );
+                    })}
                   </div>
                 )}
 

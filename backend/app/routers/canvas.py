@@ -391,9 +391,11 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
         .limit(_MAX_STATUS_TASKS)
     )
     tasks_by_node: dict[str, list[Task]] = {}
+    task_ids: list[int] = []
     for t in rows.scalars().all():
         if t.canvas_node_id:
             tasks_by_node.setdefault(t.canvas_node_id, []).append(t)
+            task_ids.append(t.id)
 
     node_status: dict[str, dict] = {}
     node_batch: dict[str, list[Task]] = {}
@@ -417,13 +419,14 @@ async def canvas_status(project_id: int, db: AsyncSession = Depends(get_db)) -> 
             "versionLatest": bool(chosen and chosen["latest"]),
         }
 
-    asset_rows = await db.execute(
-        select(Asset).where(Asset.kind.in_(["image", "video", "document"]))
-    )
+    # 只查这一张画布的任务产物。以前这里查「全库所有图片/视频/文档」，
+    # 每 2 秒一次的状态轮询会把别的项目几十万个资产也扫一遍——画布一大就越来越慢。
     asset_by_task: dict[int, list[Asset]] = {}
-    for a in asset_rows.scalars().all():
-        if a.task_id is not None:
-            asset_by_task.setdefault(a.task_id, []).append(a)
+    if task_ids:
+        asset_rows = await db.execute(select(Asset).where(Asset.task_id.in_(task_ids)))
+        for a in asset_rows.scalars().all():
+            if a.task_id is not None:
+                asset_by_task.setdefault(a.task_id, []).append(a)
 
     for nid, st in node_status.items():
         # 按任务顺序铺平产物（同一批任务是按资产表行序 / 镜号建的），

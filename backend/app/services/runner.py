@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -118,6 +119,43 @@ class _ConcurrencyGate:
             # 而这里每次释放只腾出一个名额
             self._cond.notify(1)
         return False
+
+
+async def _download_video(url: str) -> tuple[str, int]:
+    """把上游视频边下边写进 storage，返回 (相对路径, 字节数)。
+
+    **不再整段读进内存**：几段 20–50 MB 的成片同时回来时，`resp.content` 会让内存
+    峰值跟着翻几倍。中途失败或磁盘满就删掉 `.part`，`/media/` 里不会出现半个视频。
+    """
+    import httpx
+
+    tmp, rel = storage.new_stream_path("video/mp4", preferred_ext="mp4")
+    size = 0
+    try:
+        async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as dl:
+            async with dl.stream("GET", url) as resp:
+                if resp.status_code != 200:
+                    raise AdapterError(f"下载视频失败：HTTP {resp.status_code}")
+                with tmp.open("wb") as fh:
+                    async for chunk in resp.aiter_bytes(1024 * 1024):
+                        if chunk:
+                            fh.write(chunk)
+                            size += len(chunk)
+        if size == 0:
+            raise AdapterError("下载视频失败：文件是空的")
+        os.replace(tmp, storage.abs_path(rel))
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        if storage.is_no_space(e):
+            raise AdapterError("磁盘空间不足，视频下载失败。清理磁盘后可在任务中心重跑") from e
+        raise AdapterError(f"保存下载的视频失败：{e}") from e
+    except AdapterError:
+        tmp.unlink(missing_ok=True)
+        raise
+    except Exception as e:  # noqa: BLE001 - 网络库的异常种类太多，统一成任务失败文案
+        tmp.unlink(missing_ok=True)
+        raise AdapterError(f"下载视频失败：{e}") from e
+    return rel, size
 
 
 def _asset_url(rel: str) -> str:
@@ -492,18 +530,22 @@ class TaskRunner:
                 await resolved.adapter.close()
 
                 if status.status == "succeeded" and status.video_url:
-                    import httpx
-
-                    async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as dl:
-                        resp = await dl.get(status.video_url)
-                        if resp.status_code != 200:
-                            task.error = f"下载视频失败：HTTP {resp.status_code}"
+                    try:
+                        rel, size = await _download_video(status.video_url)
+                    except AdapterError as e:
+                        msg = str(e)
+                        if "磁盘空间不足" in msg:
+                            task.status = "failed"
+                            task.error = msg
+                            task.completed_at = utcnow()
                             await db.commit()
-                            await asyncio.sleep(interval)
-                            waited += interval
-                            continue
-                        blob = resp.content
-                    rel = storage.save_bytes(blob, "video/mp4", preferred_ext="mp4")
+                            return
+                        # 下载失败多半是 CDN 抖了一下：保留任务，下一轮再试
+                        task.error = msg
+                        await db.commit()
+                        await asyncio.sleep(interval)
+                        waited += interval
+                        continue
                     # 时长/宽高以**文件实际值**为准：ComfyUI 工作流是按固定帧数出的片，
                     # 节点上写的「6 秒」只是请求值（实测 33 帧 @16fps 实际 2.06 秒）。
                     # 记成请求值会让导演台合并、成片时长和「这一跑出了多少秒」全部算错。
@@ -514,7 +556,7 @@ class TaskRunner:
                             filename=rel,
                             original_name=rel.split("/")[-1],
                             content_type="video/mp4",
-                            size=len(blob),
+                            size=size,
                             source="generated",
                             task_id=task_id,
                             prompt=task.prompt,
