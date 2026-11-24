@@ -2428,19 +2428,18 @@ input, textarea, select { font-family: inherit; }
 /* ============ Agent 工作台（2.0） ============ */
 /* 项目/任务的树在左侧「工作区」，这一页只剩对话：时间线是主体，输入框吸在底部。 */
 /* Agent 页是**固定窗口**：页面本身不滚，只有中间的上下文区内部滚。
-   不固定的话，聊到几十步之后整页会被越顶越长，输入框被推到屏外。 */
-.page.agent-page { display: flex; flex-direction: column; overflow: hidden; padding-top: 18px; }
-.agent-page .page-header,
+   不固定的话，聊到几十步之后整页会被越顶越长，输入框被推到屏外。
+   整页给白底、不再套「灰底 + 白卡」：对话本身就该是页面主体。 */
+.page.agent-page {
+  display: flex; flex-direction: column; overflow: hidden;
+  padding: var(--space-4) var(--space-5) 0;
+  background: var(--surface);
+}
 .agent-page .studio-note { flex-shrink: 0; }
-/* 顶部只留标题与项目/画布选择：说明文案去掉后，把省下的高度让给对话区 */
-.agent-page .page-header { margin-bottom: 10px; align-items: center; }
-.agent-page .page-title { font-size: 20px; }
 .agent-grid {
   display: grid; grid-template-columns: minmax(0, 1fr);
-  gap: 14px; align-items: stretch; min-height: 0; flex: 1;
+  gap: 0; align-items: stretch; min-height: 0; flex: 1;
 }
-.agent-head-row { flex-wrap: wrap; gap: 8px; }
-.agent-context-hint { font-size: 12px; color: var(--text-3); }
 /* 审批方式：手动（默认）/ 自动。自动用警示色——它是「花钱不再问你」的那个开关 */
 .agent-approval {
   display: inline-flex; align-items: center; gap: 2px; padding: 2px;
@@ -2460,7 +2459,6 @@ input, textarea, select { font-family: inherit; }
   font-size: 11px; padding: 1px 8px; border-radius: 999px;
   background: var(--warning-soft); color: var(--warning); border: 1px solid rgba(217, 119, 6, .3);
 }
-.agent-project-select { max-width: 220px; }
 
 .agent-side { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
 .agent-session-list { display: flex; flex-direction: column; gap: 4px; max-height: 60vh; overflow-y: auto; }
@@ -2484,39 +2482,63 @@ input, textarea, select { font-family: inherit; }
 .agent-session-empty { font-size: 12px; color: var(--text-3); line-height: 1.6; padding: 4px 2px; }
 
 .agent-main { display: flex; flex-direction: column; min-height: 0; height: 100%; min-width: 0; }
-.agent-timeline { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
-.agent-row { display: flex; gap: 8px; align-items: flex-start; }
+.agent-timeline {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: var(--space-4) var(--space-1) var(--space-2);
+  display: flex; flex-direction: column; gap: var(--space-4);
+}
+.agent-row { display: flex; gap: var(--space-2-5); align-items: flex-start; }
 .agent-row-user { justify-content: flex-end; }
 .agent-avatar {
-  flex-shrink: 0; width: 24px; height: 24px; border-radius: 999px; display: flex;
-  align-items: center; justify-content: center; background: var(--primary-soft); color: var(--primary);
+  flex-shrink: 0; width: 22px; height: 22px; border-radius: 999px; display: flex;
+  align-items: center; justify-content: center; background: transparent; color: var(--text-3);
   margin-top: 2px;
 }
+/* 助手的话就是正文：不铺灰底、不套气泡；只有用户自己说的话留一个小灰块区分谁在说 */
 .agent-bubble {
-  max-width: 78%; padding: 9px 12px; border-radius: 12px; font-size: 13px; line-height: 1.7;
-  background: var(--surface-2); white-space: pre-wrap; word-break: break-word;
+  max-width: 100%; padding: 0; border-radius: 0; font-size: var(--font-size-sm); line-height: 1.75;
+  background: transparent; white-space: pre-wrap; word-break: break-word;
 }
-.agent-bubble-user { background: var(--primary); color: #fff; }
+.agent-bubble-user {
+  max-width: 78%; padding: var(--space-2) var(--space-3); border-radius: 12px;
+  background: var(--surface-2); color: var(--text);
+}
 
 /* 思考模式：思维链单独一块、默认收起——它是「为什么这么答」，不是答案本身 */
-.agent-assistant-block { display: flex; flex-direction: column; gap: 6px; min-width: 0; max-width: 78%; }
+.agent-assistant-block { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; max-width: 100%; }
 .agent-think {
-  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
-  background: var(--surface); font-size: 12px; color: var(--text-3);
+  border: 0; background: transparent; font-size: var(--font-size-xs); color: var(--text-3);
 }
 .agent-think > summary {
-  display: flex; align-items: center; gap: 6px; cursor: pointer;
-  padding: 6px 10px; list-style: none; user-select: none;
+  display: flex; align-items: center; gap: var(--space-1-5); cursor: pointer;
+  padding: 2px 0; list-style: none; user-select: none;
 }
 .agent-think > summary::-webkit-details-marker { display: none; }
-.agent-think[open] > summary { border-bottom: 1px dashed var(--border); }
+.agent-think[open] > summary { border-bottom: 0; }
 .agent-think pre {
-  margin: 0; padding: 8px 10px; max-height: 260px; overflow: auto;
+  margin: 2px 0 0 var(--space-1); padding: 2px 0 2px var(--space-3-5); max-height: 260px; overflow: auto;
+  border-left: 1px solid var(--border);
   white-space: pre-wrap; word-break: break-word; font-family: inherit; line-height: 1.7;
   color: var(--text-2);
 }
 .agent-thinking button { display: inline-flex; align-items: center; gap: 5px; }
 .agent-thinking button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* 「整体思考过程」：一段连续的思考/工具调用收成一行，点开才铺开 */
+.agent-process > summary {
+  display: flex; align-items: center; gap: var(--space-1-5); padding: 2px 0;
+  list-style: none; cursor: pointer; user-select: none;
+  font-size: var(--font-size-xs); color: var(--text-3);
+}
+.agent-process > summary::-webkit-details-marker { display: none; }
+.agent-process > summary:hover { color: var(--text-2); }
+.agent-process[open] > summary { margin-bottom: var(--space-2); }
+.agent-process-summary { font-size: var(--font-size-xs); color: var(--text-3); }
+.agent-process-body {
+  display: flex; flex-direction: column; gap: var(--space-2);
+  margin-left: var(--space-1); padding-left: var(--space-3-5);
+  border-left: 1px solid var(--border);
+}
 
 /* draft_canvas 的草稿摘要：先看「铺了什么」，再看下面的原始 JSON */
 .agent-draft {
@@ -2538,17 +2560,17 @@ input, textarea, select { font-family: inherit; }
 .agent-draft-nodes li > em { font-style: normal; color: var(--text-2); }
 
 .agent-tool {
-  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
-  font-size: 12px;
+  border: 0; border-radius: 0; background: transparent;
+  font-size: var(--font-size-xs);
 }
-.agent-tool.bad { border-color: var(--danger); }
+.agent-tool.bad { border-color: transparent; }
 .agent-tool-auto {
   font-size: 10.5px; padding: 0 6px; border-radius: 999px;
   background: var(--warning-soft); color: var(--warning);
 }
 .agent-tool > summary {
-  display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer;
-  list-style: none; min-width: 0;
+  display: flex; align-items: center; gap: var(--space-2); padding: 2px 0; cursor: pointer;
+  list-style: none; min-width: 0; color: var(--text-3);
 }
 .agent-tool > summary::-webkit-details-marker { display: none; }
 .agent-tool code { font-size: 11.5px; color: var(--text); }
@@ -2564,11 +2586,15 @@ input, textarea, select { font-family: inherit; }
 .agent-tool-ms { color: var(--text-3); }
 .agent-tool-hint { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-tool-error { color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-tool-body { padding: 0 10px 10px; }
+.agent-tool-chevron { margin-left: auto; flex-shrink: 0; }
+.agent-tool-body {
+  margin-left: var(--space-1); padding: 2px 0 2px var(--space-3-5);
+  border-left: 1px solid var(--border);
+}
 .agent-tool-label { font-size: 11px; color: var(--text-3); margin: 6px 0 3px; }
 .agent-tool-body pre {
   margin: 0; max-height: 220px; overflow: auto; padding: 8px 10px;
-  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
   font-family: var(--font-mono); font-size: 11px; line-height: 1.6; white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2579,31 +2605,17 @@ input, textarea, select { font-family: inherit; }
 .agent-rendered-video { display: grid; gap: 6px; justify-items: start; }
 .agent-rendered-video video { display: block; width: min(100%, 420px); max-height: 360px; border-radius: 8px; }
 
-.agent-canvas-monitor {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 7px 16px; border-bottom: 1px solid var(--border); background: var(--surface-2);
-  flex-shrink: 0;
-}
-.agent-canvas-monitor-main {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;
-  font-size: 11.5px; color: var(--text-3);
-}
-.agent-canvas-monitor-main b { font-size: 12px; font-weight: 600; color: var(--text); }
-.agent-canvas-monitor-icon { color: var(--primary); flex-shrink: 0; }
-.agent-canvas-monitor-meta { color: var(--text-3); }
-.agent-canvas-monitor-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .agent-canvas-live { display: inline-flex; align-items: center; gap: 5px; color: var(--primary); }
 .agent-canvas-live i {
   width: 6px; height: 6px; border-radius: 999px; background: var(--primary);
   animation: blink 1.2s infinite;
 }
-.agent-canvas-idle { color: var(--text-3); }
 .agent-canvas-poll { font-size: 10.5px; color: var(--text-3); }
 
 .agent-canvas-card {
   margin: 0 10px 2px 10px; padding: 8px 10px;
   border: 1px solid var(--border); border-left: 3px solid var(--primary-border);
-  border-radius: var(--radius-sm); background: var(--surface);
+  border-radius: var(--radius-sm); background: transparent;
   display: flex; flex-direction: column; gap: 7px; font-size: 12px;
 }
 .agent-canvas-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -2679,7 +2691,7 @@ input, textarea, select { font-family: inherit; }
 
 .agent-composer {
   position: relative;
-  padding: 10px 16px 12px;
+  padding: var(--space-3) var(--space-1) var(--space-4);
   border-top: 1px solid var(--border);
 }
 /* 输入区是一整张卡：上面写话，下面一排是「怎么发」。 */
@@ -2687,12 +2699,12 @@ input, textarea, select { font-family: inherit; }
   display: flex; flex-direction: column; gap: 6px;
   background: var(--surface); border: 1px solid var(--border-strong);
   border-radius: 16px; padding: 10px 12px 8px;
-  box-shadow: 0 10px 28px rgba(15, 23, 42, .06);
+  box-shadow: var(--shadow-sm);
   transition: border-color .15s, box-shadow .15s;
 }
 .agent-composer-box:focus-within {
   border-color: var(--primary);
-  box-shadow: 0 12px 32px rgba(124, 58, 237, .14);
+  box-shadow: 0 6px 18px rgba(124, 58, 237, .12);
 }
 /* 拖文件进输入框：整张卡亮起来，松手就上传 */
 .agent-composer.dragging .agent-composer-box {
@@ -2803,10 +2815,18 @@ input, textarea, select { font-family: inherit; }
   margin-top: 2px; padding: 4px 10px 2px; border-top: 1px dashed var(--border);
   font-size: 10.5px; color: var(--text-3);
 }
-.agent-toolbar { padding: 0 16px 10px; }
-.agent-chevron { transition: transform .15s ease; }
-.agent-chevron.open { transform: rotate(90deg); }
-.agent-tools { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 12px; max-height: 38vh; overflow-y: auto; }
+/* 折叠箭头：<details> 展开时转 90°（思考过程 / 工具步骤共用） */
+.agent-chevron { transition: transform .15s ease; flex-shrink: 0; }
+details[open] > summary .agent-chevron { transform: rotate(90deg); }
+
+/* 右上角「?」的帮助弹窗：能力清单从页底搬进来，不占对话区高度 */
+.agent-help {
+  display: flex; flex-direction: column; gap: var(--space-3);
+  max-height: 58vh; overflow-y: auto; padding-right: var(--space-1);
+}
+.agent-help-intro { margin: 0; font-size: var(--font-size-sm); line-height: 1.8; color: var(--text-2); }
+.agent-help-empty { font-size: var(--font-size-xs); color: var(--text-3); }
+.agent-tools-group { display: flex; flex-direction: column; gap: 2px; }
 .agent-tools-title { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 .agent-tool-row {
   display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; padding: 3px 0;
@@ -2846,7 +2866,7 @@ input, textarea, select { font-family: inherit; }
 
 .agent-context {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 8px 16px; border-bottom: 1px solid var(--border);
+  padding: var(--space-2) var(--space-1); border-bottom: 1px solid var(--border);
   font-size: 12px; color: var(--text-2);
 }
 .agent-context-task { color: var(--text-3); }

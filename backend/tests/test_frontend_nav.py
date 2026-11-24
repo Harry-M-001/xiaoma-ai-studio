@@ -171,23 +171,27 @@ def test_workspace_tree_carries_tasks_and_canvas():
     assert "onOpenCanvas" in sidebar, "点画布不能直接打开"
 
 
-def test_the_group_sits_right_under_home_and_is_collapsed_by_default():
-    """折叠组固定在**首页下面**（用户 2026-09-25 指定），且**默认收起**。
+def test_agent_sits_between_home_and_the_collapsed_group():
+    """Agent 紧跟首页、位于「创作台」折叠组上面（用户 2026-11-24 指定）。
 
-    结构断言：渲染折叠组那一段必须夹在「首页」与「其余项」之间——用「主分组拆成
-    `headItem` / `tailItems`」来表达，而不是给 `home` 这个 key 写死一个特例，
-    这样首页被关掉时它自然上移到第一位。
+    结构断言：主分组拆成「首页 / 钉住项 / 其余」，渲染顺序是
+    首页 → Agent → 折叠组 → 其余项。用「钉住项」表达而不是给 Agent 改 sort_order：
+    导航由配置表驱动，老库里已有的排序不该被一次升级悄悄改掉。
 
     「默认收起」靠 `?? false`：去掉它，侧边栏一进来又是十几行，这一组就白做了。
     """
     sidebar = _text(SRC / "components" / "Sidebar.tsx")
-    assert "const [headItem, ...tailItems] = mainItems;" in sidebar, (
+    assert "const [headItem, ...restItems] = mainItems;" in sidebar, (
         "没有把主分组拆成「首页」与「其余」"
     )
+    assert 'const pinnedItems = restItems.filter((item) => item.route === "agent");' in sidebar, (
+        "Agent 没有钉在首页下面"
+    )
     head_at = sidebar.index("{headItem &&")
+    pinned_at = sidebar.index("{pinnedItems.map(")
     group_at = sidebar.index('groupKey="create"')
     tail_at = sidebar.index("{tailItems.map(")
-    assert head_at < group_at < tail_at, "折叠组没有排在首页下面"
+    assert head_at < pinned_at < group_at < tail_at, "渲染顺序不是「首页 → Agent → 创作台 → 其余」"
     assert "prefs.navGroupOpen.get(groupKey) ?? false" in sidebar, "折叠组默认不是收起"
 
 

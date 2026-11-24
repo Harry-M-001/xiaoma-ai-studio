@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronRight,
   FolderOpen,
+  HelpCircle,
   Image as ImageIcon,
   ListTree,
   Loader2,
@@ -19,8 +20,6 @@ import {
   Target,
   FileText,
   Trash2,
-  Workflow,
-  Wrench,
   X,
 } from "lucide-react";
 import { api } from "../api";
@@ -37,7 +36,7 @@ import type {
   Project,
   PromptItem,
 } from "../types";
-import { Empty, Spinner, ModelSelect, formatSize } from "../components/common";
+import { Empty, Spinner, ModelSelect, Modal, formatSize } from "../components/common";
 import { useToast } from "../components/Toast";
 
 /**
@@ -122,7 +121,7 @@ export default function AgentPage({
   const [ctxPrompts, setCtxPrompts] = useState<PromptItem[]>([]);
   const [ctxLoading, setCtxLoading] = useState(false);
   const [ctxLoaded, setCtxLoaded] = useState(false);
-  const [showTools, setShowTools] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [autoApprove, setAutoApprove] = useState(false);
   const [thinking, setThinkingState] = useState(true);
   const [schemas, setSchemas] = useState<Record<string, CanvasNodeSchema>>({});
@@ -499,22 +498,7 @@ export default function AgentPage({
     }
   };
 
-  const setProjectCanvas = async (canvasProjectId: number | null) => {
-    if (!agentProject) return;
-    try {
-      const p = await api.patchAgentProject(agentProject.id, { canvas_project_id: canvasProjectId });
-      setAgentProject(p);
-      await refreshMeta();
-    } catch (e) {
-      toast.error((e as Error).message);
-    }
-  };
-
   const canvasId = session?.canvasId ?? agentProject?.canvasProjectId ?? null;
-  const boundProject = useMemo(
-    () => projects.find((p) => p.id === canvasId) || null,
-    [projects, canvasId]
-  );
   const canvasSnap = useCanvasSnapshot(canvasId, steps.length);
   const openCanvas = useCallback(
     (id: number) => {
@@ -553,38 +537,143 @@ export default function AgentPage({
 
   const currentProject = meta?.projects?.find((p) => p.id === projectId) || null;
 
+  /** 工具名 → 人话标签：过程摘要与帮助清单共用一份口径 */
+  const toolLabel = (name: string) =>
+    (meta?.tools || []).find((t) => t.name === name)?.label || name;
+
+  /**
+   * 时间线：每一轮（一条用户消息之后、下一条之前）的思考与工具调用，
+   * 收进一个「任务耗时 X」的可折叠块，**最后再出答复（总结）**。
+   *
+   * 收起时只剩一行「任务耗时 24s」；展开后先是这一轮做了什么，再是每一步的明细。
+   * 跑着的这一轮默认展开（能看见它在干什么），跑完的默认收起（与 Trae 一致）。
+   */
+  const renderTimeline = (): ReactNode[] => {
+    const nodes: ReactNode[] = [];
+    const running = busy || goalRunning;
+
+    /** 一段过程 → 一行摘要：思考 N 次 · 读画布 1 次 · 落定到画布 1 次 */
+    const summarize = (items: AgentStepInfo[], extraThinks = 0) => {
+      const parts: string[] = [];
+      const thinks = items.filter((s) => s.role === "assistant").length + extraThinks;
+      if (thinks > 0) parts.push(`思考 ${thinks} 次`);
+      const counts = new Map<string, number>();
+      for (const s of items) {
+        if (s.role !== "tool") continue;
+        const label = toolLabel(s.toolName);
+        counts.set(label, (counts.get(label) || 0) + 1);
+      }
+      const toolTotal = [...counts.values()].reduce((a, b) => a + b, 0);
+      if (toolTotal > 0) {
+        const named = [...counts.entries()].slice(0, 3).map(([label, n]) => `${label} ${n} 次`);
+        if (counts.size > 3) named.push(`等 ${toolTotal} 次`);
+        parts.push(named.join(" · "));
+      }
+      return parts.join(" · ");
+    };
+
+    /** 这一轮花了多久：取首尾步骤的时间差；时间戳缺失时退回各步耗时之和 */
+    const durationOf = (items: AgentStepInfo[], live: boolean) => {
+      const first = Date.parse(items[0].createdAt || "");
+      const last = items[items.length - 1];
+      const lastAt = Date.parse(last.createdAt || "");
+      let ms = (live ? Date.now() : lastAt) - first;
+      if (!Number.isFinite(ms) || ms <= 0) {
+        ms = items.reduce((sum, s) => sum + (s.durationMs || 0), 0);
+      }
+      const sec = Math.max(1, Math.ceil(ms / 1000));
+      if (sec < 60) return `${sec}s`;
+      if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+      return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+    };
+
+    const isVisibleAnswer = (s: AgentStepInfo) =>
+      s.role === "assistant" &&
+      s.content.trim() !== "" &&
+      !/^（调用工具 .+）$/.test(s.content.trim());
+    // 有正文的模型步骤是「答复」，不算过程步骤；它的思维链单独按 ThinkingRow 收进过程块
+    const isProcessStep = (s: AgentStepInfo) =>
+      s.role === "tool" ||
+      (s.role === "assistant" && !isVisibleAnswer(s) && s.reasoning.trim() !== "");
+
+    let i = 0;
+    while (i < steps.length) {
+      const step = steps[i];
+      if (step.role === "user") {
+        nodes.push(
+          <StepRow
+            key={step.id}
+            step={step}
+            schemas={schemas}
+            liveCanvasId={canvasId}
+            snap={canvasSnap.snap}
+            polling={canvasSnap.live}
+            onOpenCanvas={openCanvas}
+          />
+        );
+        i += 1;
+        continue;
+      }
+
+      // 这一轮：从当前步到下一条用户消息之前
+      const turn: AgentStepInfo[] = [];
+      while (i < steps.length && steps[i].role !== "user") {
+        turn.push(steps[i]);
+        i += 1;
+      }
+      const processSteps = turn.filter(isProcessStep);
+      const answers = turn.filter(isVisibleAnswer);
+      // 答复自带的思维链也属于「过程」：收进任务耗时块，答复只留正文
+      const answerThinks = answers.filter((a) => a.reasoning.trim() !== "");
+      const processItems = [...processSteps, ...answerThinks].sort((a, b) => a.seq - b.seq);
+      const isLastTurn = i >= steps.length;
+
+      if (processItems.length > 0) {
+        nodes.push(
+          <ProcessGroup
+            key={`process-${processItems[0]?.id ?? turn[0]?.id}`}
+            duration={durationOf(turn, running && isLastTurn)}
+            summary={summarize(processSteps, answerThinks.length)}
+            defaultOpen={(running && isLastTurn) || answers.length === 0}
+          >
+            {processItems.map((s) =>
+              s.role === "assistant" ? (
+                <ThinkingRow key={`think-${s.id}`} reasoning={s.reasoning} />
+              ) : (
+                <StepRow
+                  key={s.id}
+                  step={s}
+                  schemas={schemas}
+                  liveCanvasId={canvasId}
+                  snap={canvasSnap.snap}
+                  polling={canvasSnap.live}
+                  onOpenCanvas={openCanvas}
+                />
+              )
+            )}
+          </ProcessGroup>
+        );
+      }
+      answers.forEach((s) => {
+        nodes.push(
+          <StepRow
+            key={s.id}
+            step={s}
+            schemas={schemas}
+            liveCanvasId={canvasId}
+            snap={canvasSnap.snap}
+            polling={canvasSnap.live}
+            onOpenCanvas={openCanvas}
+            hideReasoning
+          />
+        );
+      });
+    }
+    return nodes;
+  };
+
   return (
     <div className="page agent-page">
-      <div className="page-header">
-        <div>
-          <div className="page-title">Agent</div>
-        </div>
-        <div className="row agent-head-row">
-          {agentProject ? (
-            <select
-              className="select agent-project-select"
-              value={agentProject.canvasProjectId ?? ""}
-              onChange={(e) => void setProjectCanvas(e.target.value ? Number(e.target.value) : null)}
-              title="这个项目绑定哪张自由画布（项目里所有任务共用）"
-            >
-              <option value="">未绑定画布</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}（#{p.id}）
-                </option>
-              ))}
-            </select>
-          ) : (
-            <span className="agent-context-hint">项目就在左侧「工作区」里；点 + 新建</span>
-          )}
-          {boundProject && onOpenCanvas && (
-            <button className="btn btn-ghost btn-sm" onClick={() => onOpenCanvas(boundProject)}>
-              <FolderOpen size={14} /> 打开画布
-            </button>
-          )}
-        </div>
-      </div>
-
       {meta && !meta.ready && (
         <div className="studio-note">
           <AlertTriangle size={15} />
@@ -598,7 +687,7 @@ export default function AgentPage({
       )}
 
       <div className="agent-grid">
-        <section className="card agent-main">
+        <section className="agent-main">
           <div className="agent-context">
             <span>{currentProject ? currentProject.name : "未归档"}</span>
             {session && <span className="agent-context-task">· {session.title}</span>}
@@ -608,6 +697,24 @@ export default function AgentPage({
               </span>
             )}
             <div className="agent-context-actions">
+              {canvasId && (
+                <button
+                  className="icon-btn"
+                  onClick={canvasSnap.refresh}
+                  title="刷新画布状态"
+                  aria-label="刷新画布状态"
+                >
+                  <RefreshCw size={14} />
+                </button>
+              )}
+              <button
+                className="icon-btn"
+                onClick={() => setHelpOpen(true)}
+                title="Agent 能做什么"
+                aria-label="Agent 能做什么"
+              >
+                <HelpCircle size={15} />
+              </button>
               <button className="btn btn-ghost btn-xs" onClick={() => void newSession()} disabled={busy}>
                 <Plus size={12} /> 新任务
               </button>
@@ -624,16 +731,6 @@ export default function AgentPage({
               )}
             </div>
           </div>
-          {canvasId && (
-            <CanvasMonitor
-              canvasId={canvasId}
-              name={boundProject?.name || `画布 #${canvasId}`}
-              snap={canvasSnap.snap}
-              live={canvasSnap.live}
-              onRefresh={canvasSnap.refresh}
-              onOpen={() => openCanvas(canvasId)}
-            />
-          )}
           <div className="agent-timeline">
             {steps.length === 0 && !busy ? (
               <Empty
@@ -642,17 +739,7 @@ export default function AgentPage({
                 desc="例如：「看看这张画布现在的流程」「搭一条从创意到分镜图的链」「跑一次要花多少次调用？」"
               />
             ) : (
-              steps.map((s) => (
-                <StepRow
-                  key={s.id}
-                  step={s}
-                  schemas={schemas}
-                  liveCanvasId={canvasId}
-                  snap={canvasSnap.snap}
-                  polling={canvasSnap.live}
-                  onOpenCanvas={openCanvas}
-                />
-              ))
+              renderTimeline()
             )}
 
             {pending && (
@@ -987,65 +1074,109 @@ export default function AgentPage({
             )}
           </div>
 
-          <div className="agent-toolbar">
-            <button className="btn btn-ghost btn-xs" onClick={() => setShowTools((v) => !v)}>
-              <Wrench size={13} /> 它能做什么（{groups.read.length} 只读 / {groups.write.length} 可撤销 /{" "}
-              {groups.irreversible.length} 要确认）
-              <ChevronRight size={13} className={showTools ? "agent-chevron open" : "agent-chevron"} />
-            </button>
-          </div>
-          {showTools && (
-            <div className="agent-tools">
-              {(meta?.skills || []).length > 0 && (
-                <div className="agent-tools-group">
-                  <div className="agent-tools-title">技能（按需加载，{meta?.skills.length}）</div>
-                  {(meta?.skills || []).map((s) => (
-                    <div key={s.key} className="agent-tool-row">
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-xs"
-                        aria-label={`使用${s.name}技能`}
-                        disabled={busy || goalRunning}
-                        onClick={() => {
-                          const instruction = `请先加载并使用 ${s.key} 技能。`;
-                          setInput((draft) => {
-                            const text = draft.trimEnd();
-                            if (!text) return `${instruction}任务：`;
-                            if (SLASH_ITEMS.some(({ key }) => text === `/${key}`)) {
-                              return `${text} ${instruction}任务：`;
-                            }
-                            return `${text}\n\n${instruction}`;
-                          });
-                          inputRef.current?.focus();
-                        }}
-                      >
-                        使用
-                      </button>
-                      <span>{s.name}</span>
-                      <span className="agent-tool-desc">{s.description}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {(["read", "write", "irreversible"] as const).map((tier) => (
-                <div key={tier} className="agent-tools-group">
-                  <div className="agent-tools-title">
-                    {meta?.tiers?.[tier] || tier}（{groups[tier].length}）
-                  </div>
-                  {groups[tier].map((t) => (
-                    <div key={t.name} className="agent-tool-row">
-                      <code>{t.name}</code>
-                      <span>{t.label}</span>
-                      <span className="agent-tool-desc">{t.description}</span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
+          {helpOpen && (
+            <Modal title="Agent 能做什么" onClose={() => setHelpOpen(false)} wide>
+              <div className="agent-help">
+                <p className="agent-help-intro">
+                  它能读画布、搭节点、跑整图、查任务与资产。只读的事直接做；会改画布的事可以撤销；
+                  花钱的生成默认先停下来，把代价写给你看，点确认才执行。
+                </p>
+                {meta ? (
+                  <>
+                    {(meta.skills || []).length > 0 && (
+                      <div className="agent-tools-group">
+                        <div className="agent-tools-title">技能（按需加载，{meta.skills.length}）</div>
+                        {meta.skills.map((s) => (
+                          <div key={s.key} className="agent-tool-row">
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-xs"
+                              aria-label={`使用${s.name}技能`}
+                              disabled={busy || goalRunning}
+                              onClick={() => {
+                                const instruction = `请先加载并使用 ${s.key} 技能。`;
+                                setInput((draft) => {
+                                  const text = draft.trimEnd();
+                                  if (!text) return `${instruction}任务：`;
+                                  if (SLASH_ITEMS.some(({ key }) => text === `/${key}`)) {
+                                    return `${text} ${instruction}任务：`;
+                                  }
+                                  return `${text}\n\n${instruction}`;
+                                });
+                                setHelpOpen(false);
+                                inputRef.current?.focus();
+                              }}
+                            >
+                              使用
+                            </button>
+                            <span>{s.name}</span>
+                            <span className="agent-tool-desc">{s.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {(["read", "write", "irreversible"] as const).map((tier) => (
+                      <div key={tier} className="agent-tools-group">
+                        <div className="agent-tools-title">
+                          {meta.tiers?.[tier] || tier}（{groups[tier].length}）
+                        </div>
+                        {groups[tier].map((t) => (
+                          <div key={t.name} className="agent-tool-row">
+                            <code>{t.name}</code>
+                            <span>{t.label}</span>
+                            <span className="agent-tool-desc">{t.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <div className="agent-help-empty">正在读取能力清单…</div>
+                )}
+              </div>
+            </Modal>
           )}
         </section>
       </div>
     </div>
+  );
+}
+
+/**
+ * 一轮任务的过程（思考 / 工具调用）收在「任务耗时」下面，点开才铺开。
+ *
+ * 收起时只留一行「任务耗时 24s」——这是「这一轮花了多久」这个最常被问的问题；
+ * 展开后先是一行「思考 1 次 · 读画布 1 次」，再是每一步的明细。
+ * 答复（总结）不在这里面：收起过程不该把结论也收掉。
+ */
+function ProcessGroup({
+  duration,
+  summary,
+  defaultOpen,
+  children,
+}: {
+  duration: string;
+  summary: string;
+  defaultOpen: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <details
+      className="agent-process"
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
+    >
+      <summary>
+        <Bot size={13} />
+        <span>任务耗时 {duration}</span>
+        <ChevronRight size={12} className="agent-chevron" />
+      </summary>
+      <div className="agent-process-body">
+        {summary && <div className="agent-process-summary">{summary}</div>}
+        {children}
+      </div>
+    </details>
   );
 }
 
@@ -1096,6 +1227,7 @@ function StepRow({
   snap,
   polling,
   onOpenCanvas,
+  hideReasoning = false,
 }: {
   step: AgentStepInfo;
   schemas: Record<string, CanvasNodeSchema>;
@@ -1103,6 +1235,8 @@ function StepRow({
   snap: CanvasSnapshot | null;
   polling: boolean;
   onOpenCanvas: (id: number) => void;
+  /** 思维链已经收进「任务耗时」那一块时，答复这里不再重复一次 */
+  hideReasoning?: boolean;
 }) {
   if (step.role === "user") {
     return (
@@ -1125,14 +1259,7 @@ function StepRow({
           <Bot size={14} />
         </div>
         <div className="agent-assistant-block">
-          {reasoning && (
-            <details className="agent-think">
-              <summary>
-                <Brain size={12} /> 思考过程 · {reasoning.length} 字
-              </summary>
-              <pre>{reasoning}</pre>
-            </details>
-          )}
+          {reasoning && !hideReasoning && <ThinkingDetails reasoning={reasoning} />}
           {content && !onlyCallNote && <div className="agent-bubble">{content}</div>}
         </div>
       </div>
@@ -1147,6 +1274,33 @@ function StepRow({
       polling={polling}
       onOpenCanvas={onOpenCanvas}
     />
+  );
+}
+
+/** 思维链：默认收起，展开看「为什么这么答」 */
+function ThinkingDetails({ reasoning }: { reasoning: string }) {
+  return (
+    <details className="agent-think">
+      <summary>
+        <Brain size={12} /> 思考过程 · {reasoning.length} 字
+        <ChevronRight size={12} className="agent-chevron" />
+      </summary>
+      <pre>{reasoning}</pre>
+    </details>
+  );
+}
+
+/** 只含思维链的一行（收进「任务耗时」块里时用） */
+function ThinkingRow({ reasoning }: { reasoning: string }) {
+  return (
+    <div className="agent-row">
+      <div className="agent-avatar">
+        <Bot size={14} />
+      </div>
+      <div className="agent-assistant-block">
+        <ThinkingDetails reasoning={reasoning} />
+      </div>
+    </div>
   );
 }
 
@@ -1195,6 +1349,7 @@ function ToolRow({
           {step.durationMs > 0 && <span className="agent-tool-ms">{step.durationMs} ms</span>}
           {hint && <span className="agent-tool-hint">{hint}</span>}
           {error && <span className="agent-tool-error">{error}</span>}
+          <ChevronRight size={12} className="agent-chevron agent-tool-chevron" />
         </summary>
         <div className="agent-tool-body">
           <div className="agent-tool-label">参数</div>
@@ -1359,62 +1514,6 @@ function useCanvasSnapshot(canvasId: number | null, watchKey: number) {
     live: matched && live,
     refresh: () => setTick((v) => v + 1),
   };
-}
-
-function CanvasMonitor({
-  canvasId,
-  name,
-  snap,
-  live,
-  onRefresh,
-  onOpen,
-}: {
-  canvasId: number;
-  name: string;
-  snap: CanvasSnapshot | null;
-  live: boolean;
-  onRefresh: () => void;
-  onOpen: () => void;
-}) {
-  const statuses = snap ? Object.values(snap.status) : [];
-  const running = statuses.filter((n) => RUNNING_STATUS.has(String(n.status))).length;
-  const done = statuses.filter((n) => n.status === "completed").length;
-  const failed = statuses.filter((n) => n.status === "failed").length;
-  return (
-    <div className="agent-canvas-monitor">
-      <div className="agent-canvas-monitor-main">
-        <Workflow size={14} className="agent-canvas-monitor-icon" />
-        <b>{name}</b>
-        <span className="agent-canvas-id">#{canvasId}</span>
-        <span className="agent-canvas-monitor-meta">
-          {snap ? `${snap.nodes.length} 节点 · ${snap.edges.length} 连线` : "读取画布…"}
-        </span>
-        {snap &&
-          (running > 0 ? (
-            <span className="agent-canvas-live">
-              <i /> 运行中 {running}
-            </span>
-          ) : (
-            <span className="agent-canvas-idle">空闲</span>
-          ))}
-        {snap && (done > 0 || failed > 0) && (
-          <span className="agent-canvas-monitor-meta">
-            完成 {done}
-            {failed > 0 ? ` · 失败 ${failed}` : ""}
-          </span>
-        )}
-        {live && <span className="agent-canvas-poll">每 2 秒自动刷新</span>}
-      </div>
-      <div className="agent-canvas-monitor-actions">
-        <button className="icon-btn" onClick={onRefresh} title="刷新画布状态">
-          <RefreshCw size={13} />
-        </button>
-        <button className="btn btn-ghost btn-xs" onClick={onOpen}>
-          <FolderOpen size={13} /> 打开
-        </button>
-      </div>
-    </div>
-  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

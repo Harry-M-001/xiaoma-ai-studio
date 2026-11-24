@@ -93,13 +93,15 @@ def test_the_shared_landing_helper_is_still_used_by_import():
 def test_the_agent_timeline_shows_what_it_did_to_the_canvas():
     """Agent 读/改/跑画布时，对话里要看得见对象与结果，而不是一坨 JSON。
 
-    守三件事：画布工具有一张人话卡片、页顶有条监视条、卡片能直接打开画布。
+    守三件事：画布工具有一张人话卡片、有一个手动刷新入口、卡片能直接打开画布。
+    页顶那条画布监视条已按用户要求撤掉（2026-11-24），刷新按钮移到会话行里，
+    所以这里只钉「刷新还在」，不再要求 `CanvasMonitor` 这个组件。
     """
     src = _text(AGENT_PAGE)
     for needed in (
         "function CanvasActivityCard",
-        "function CanvasMonitor",
         '"agent-canvas-card"',
+        "刷新画布状态",
         "get_canvas",
         "apply_canvas_draft",
         "run_canvas",

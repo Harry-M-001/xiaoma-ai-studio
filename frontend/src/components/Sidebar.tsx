@@ -76,7 +76,11 @@ export default function Sidebar({
   const mainItems = nav.filter((item) => item.group !== "settings" && item.group !== "create");
   const createItems = nav.filter((item) => item.group === "create");
   const settingItems = nav.filter((item) => item.group === "settings");
-  const [headItem, ...tailItems] = mainItems;
+  // 首页固定第一位；Agent 紧跟首页、排在「创作台」折叠组上面（用户 2026-11-24 指定）。
+  // 用 route 钉位置而不是改 sort_order：导航是配置表驱动的，老库里已有的排序不该被一次升级悄悄改掉。
+  const [headItem, ...restItems] = mainItems;
+  const pinnedItems = restItems.filter((item) => item.route === "agent");
+  const tailItems = restItems.filter((item) => item.route !== "agent");
 
   // 工作区：Agent 项目 → 任务；项目绑定的画布一并显示
   const [wsProjects, setWsProjects] = useState<AgentProjectInfo[]>([]);
@@ -183,6 +187,17 @@ export default function Sidebar({
             badgeRoutes={badgeRoutes}
           />
         )}
+
+        {pinnedItems.map((item) => (
+          <NavRow
+            key={item.key || item.route}
+            item={item}
+            route={route}
+            collapsed={collapsed}
+            onNavigate={onNavigate}
+            badgeRoutes={badgeRoutes}
+          />
+        ))}
 
         {createItems.length > 0 && (
           <CollapsibleGroup
