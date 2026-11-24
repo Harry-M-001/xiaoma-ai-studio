@@ -44,7 +44,7 @@ class _FakeResolved:
     model_name = "fake-model"
 
 
-def _run(fn):  # noqa: ANN001
+def _run(fn, *, auto_complete: bool = True, timeout: float = 2):  # noqa: ANN001
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     real_session = canvas_runner.SessionLocal
@@ -58,8 +58,14 @@ def _run(fn):  # noqa: ANN001
         return _FakeResolved()
 
     async def fake_start(kind, task_id):  # noqa: ANN001
-        """把任务当成「上游秒回」：直接完成并产出一条产物，省掉真调用。"""
+        """把任务当成「上游秒回」：直接完成并产出一条产物，省掉真调用。
+
+        `auto_complete=False` 时只记录派发、把任务留在 pending——用来演练
+        「节点等到预算耗尽仍未完成」那一路。
+        """
         started.append((kind, task_id))
+        if not auto_complete:
+            return True
         async with maker() as db:
             t = await db.get(Task, task_id)
             if t is not None and t.status == "pending":
@@ -84,8 +90,8 @@ def _run(fn):  # noqa: ANN001
         canvas_runner.SessionLocal = maker
         provider_store.resolve_model = fake_resolve
         canvas_runner.runner.start_or_fail = fake_start
-        # 让等待循环至少转一圈（fake_start 已经把任务标完成，第一圈就会退出）
-        canvas_runner._NODE_WAIT_TIMEOUT = 2
+        # 默认 2 秒：fake_start 完成的任务第一圈就会退出；演练超时时由调用方显式压小
+        canvas_runner._NODE_WAIT_TIMEOUT = timeout
         canvas_runner._POLL_INTERVAL = 0.01
         try:
             await fn(maker, started)
@@ -296,6 +302,36 @@ def test_pending_tasks_are_requeued_not_recreated():
         assert [t.id for t in await _tasks_of(maker, pid, "n1")] == [task_id], "任务被重造了一份"
 
     _run(scenario)
+
+
+def test_node_wait_timeout_fails_step_and_blocks_downstream():
+    """演练：上游迟迟不完成（节点等待预算耗尽）→ 检查点标失败并写明原因，下游一个任务都不派。
+
+    真实环境里这是「供应商卡住」的样子。不把这一跑明确收口的话，下游拿不到产物
+    却会继续往下派，白白花钱。这里把等待预算压到 0.2 秒复现，不必真等 15 分钟。
+    """
+    async def scenario(maker, started):  # noqa: ANN001
+        doc = _doc(
+            [_image_node("n1"), _image_node("n2")],
+            [{"id": "e1", "source": "n1", "target": "n2"}],
+        )
+        pid = await _seed_project(maker, doc)
+
+        await canvas_runner._run_full_graph(pid, "r1", expected=2)
+
+        async with maker() as db:
+            steps = {
+                s.node_id: s
+                for s in (
+                    await db.execute(select(RunStep).where(RunStep.run_id == "r1"))
+                ).scalars().all()
+            }
+        assert steps["n1"].status == "failed"
+        assert steps["n1"].error == "等待任务完成超时"
+        assert "n2" not in steps, "上游超时之后下游仍被派了任务"
+        assert await _tasks_of(maker, pid, "n2") == []
+
+    _run(scenario, auto_complete=False, timeout=0.2)
 
 
 def test_reconcile_marks_unconfirmable_tasks_unknown():

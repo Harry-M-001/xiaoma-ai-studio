@@ -110,6 +110,9 @@ def test_full_backup_refuses_when_disk_is_too_full(data_dir, monkeypatch):
     with pytest.raises(RuntimeError) as e:
         backup_service.create_full_backup()
     assert "磁盘余量不足" in str(e.value)
+    # 拒绝要在动手之前：既不产出半截 zip，也不在 backups 目录留下垃圾
+    backups = data_dir / "backups"
+    assert not backups.exists() or not list(backups.glob("full-*.zip"))
 
 
 def test_inspect_accepts_a_backup_from_an_older_revision(tmp_path, monkeypatch):
