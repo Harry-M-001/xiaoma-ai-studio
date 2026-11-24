@@ -97,6 +97,12 @@ def build_launcher(console: bool) -> Path:
         "--hidden-import", "webview.platforms.winforms",
         "--collect-all", "clr_loader",
         "--collect-all", "pythonnet",
+        # 启动器只负责起服务 + 开窗口，后端那些重依赖由 runtime/ 里的解释器自己用。
+        # 不排除的话 PyInstaller 会把 numpy / Pillow / cryptography 一起打进 _internal，
+        # 桌面包凭空多出 20 MB（Gitee 单附件上限 100 MB，v2.2.5 就卡在这里）。
+        "--exclude-module", "numpy",
+        "--exclude-module", "PIL",
+        "--exclude-module", "cryptography",
     ]
     cmd.append("--console" if console else "--windowed")
     run(cmd)
