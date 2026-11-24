@@ -139,7 +139,8 @@ def list_dirs(path: str) -> dict:
     这是只读操作；能不能选来当工作区仍由 `validate_workspace` 说了算。
     """
     raw = (path or "").strip().strip('"')
-    if not raw:
+    roots_requested = not raw
+    if roots_requested:
         if os.name == "nt":
             entries = [
                 {"name": f"{ch}:", "path": f"{ch}:\\"}
@@ -174,7 +175,12 @@ def list_dirs(path: str) -> dict:
         raise ValueError("没有权限读取这个目录。") from None
     entries.sort(key=lambda e: e["name"].lower())
     parent = str(target.parent) if target.parent != target else ""
-    return {"path": str(target), "parent": parent, "entries": entries, "roots": False}
+    return {
+        "path": str(target),
+        "parent": parent,
+        "entries": entries,
+        "roots": roots_requested,
+    }
 
 
 # 后台安装任务的状态（单进程；UI 轮询它）

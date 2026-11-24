@@ -226,7 +226,15 @@ def looks_like_custom_nodes(path: Path) -> bool:
     更常见的是把 ComfyUI 那套「嵌入式 Python」误当成系统 Python 来用，
     于是 `python -m venv` 根本没法工作。
     """
-    return any(part.lower() == "custom_nodes" for part in path.resolve().parts)
+    # 两种分隔符都拆：Linux 上 `Path(r"D:\\ComfyUI\\custom_nodes\\x")` 只有一段，
+    # 光看 `.parts` 会把 custom_nodes 漏掉（用户在 Linux / Docker 里粘贴 Windows 路径）。
+    raw = str(path).replace("\\", "/")
+    parts = {p.lower() for p in raw.split("/") if p}
+    try:
+        parts |= {p.lower() for p in path.resolve().parts if p}
+    except OSError:
+        pass
+    return "custom_nodes" in parts
 
 
 def venv_dir(root: Path) -> Path:

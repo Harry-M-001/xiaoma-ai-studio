@@ -38,6 +38,11 @@ jobs:
           python -c "import asyncio; from app.migrations import run_migrations; asyncio.run(run_migrations())"
           python -c "import sqlite3, os; c = sqlite3.connect(os.path.join(os.environ['DATA_DIR'], 'xiaoma.db')); print(sorted(r[0] for r in c.execute(\"select name from sqlite_master where type='table'\")))"
 
+      # 字幕 / 补帧 / 超分这些用例会真跑 ffmpeg；Ubuntu 镜像默认不带，
+      # 不装的话它们会整体失败（不是用例写错）。Ubuntu 的 ffmpeg 带 libass。
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Tests
         run: pytest tests -q
 
