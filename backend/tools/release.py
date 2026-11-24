@@ -28,9 +28,11 @@ import json
 import mimetypes
 import os
 import re
+import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +59,32 @@ PACKAGE_SUFFIXES = ("win64-portable.zip", "win64-desktop.zip")
 # 配额不足时一次清几个：太少要反复试，太多会白删还能用的旧包
 PRUNE_BATCH = 5
 MAX_PRUNE = 15
+
+# Gitee 单个附件的硬上限：超了会在「tag 已推、Release 已建」之后才失败，把一次发版留在半路。
+# 所以要在动手之前就查，宁可提前退出。
+GITEE_MAX_ATTACHMENT = 100 * 1024 * 1024
+# 上传走公网，偶发连接重置 / SSL EOF / 写超时；这些重试有意义，HTTP 4xx 不重试
+RETRY_ATTEMPTS = 3
+RETRY_DELAY = 8
+_NETWORK_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError, OSError)
+
+
+def attachment_too_big(size: int, limit: int = GITEE_MAX_ATTACHMENT) -> bool:
+    return int(size) > int(limit)
+
+
+def retry_call(fn, *, what: str, attempts: int = RETRY_ATTEMPTS, delay: int = RETRY_DELAY):
+    """网络抖动（重置 / 超时 / SSL EOF）重试；HTTP 状态码由调用方判断。"""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except _NETWORK_ERRORS as e:  # noqa: PERF203 - 重试就是要逐次捕获
+            last = e
+            if i + 1 < attempts:
+                print(f"{what} 失败（{type(e).__name__}: {e}），{delay}s 后重试 {i + 2}/{attempts} …")
+                time.sleep(delay)
+    raise SystemExit(f"{what} 连续 {attempts} 次失败：{type(last).__name__}: {last}")
 
 
 # --------------------------------------------------------------------------
@@ -211,6 +239,16 @@ def pick_prune_candidates(releases: list[dict], keep_tag: str) -> list[dict]:
     return sorted(out, key=lambda r: int(r.get("id") or 0))
 
 
+def all_packages_backed_up(release: dict, backed: set[str]) -> bool:
+    """这个 Release 的包是不是**全都在 GitHub 上还有一份**。
+
+    清理 Gitee 旧包会连 Release 一起重建，删掉就没了；只有「GitHub 上同 tag、
+    同文件名、已上传」才算可再生。少一个都不动——手工删掉的旧包找不回来。
+    """
+    names = [str(a.get("name") or "") for a in package_assets(release)]
+    return bool(names) and all(n in backed for n in names)
+
+
 # --------------------------------------------------------------------------
 # Gitee
 # --------------------------------------------------------------------------
@@ -254,8 +292,9 @@ class Gitee:
         if asset_named(rel, path.name) is not None:
             print(f"Gitee 已有 {path.name}，跳过上传")
             return
-        status, raw = upload_multipart(
-            self._url(f"/releases/{rel['id']}/attach_files"), path
+        status, raw = retry_call(
+            lambda: upload_multipart(self._url(f"/releases/{rel['id']}/attach_files"), path),
+            what=f"Gitee 上传 {path.name}",
         )
         if status in (200, 201):
             # 把新附件记回内存里的 rel，同一个 Release 传第二个包时不会重复上传
@@ -284,7 +323,7 @@ class Gitee:
             "target_commitish": tag,
         })
         ok = isinstance(new, dict) and new.get("id")
-        print(f"  已清理 {tag} 的便携包（Release 重建 {'成功' if ok else '失败'}）")
+        print(f"  已清理 {tag} 的包附件（Release 重建 {'成功' if ok else '失败'}）")
 
     def ensure_latest(self, tag: str, name: str, body: str, paths: list[Path]) -> None:
         """重建旧 Release 会把它顶到「最新」，这里把本次 Release 重建回来。"""
@@ -317,6 +356,7 @@ def publish_gitee(tag: str, name: str, body: str, paths: list[Path]) -> dict:
     rel = gt.ensure_release(tag, name, body)
     pending = list(paths)
     pruned = 0
+    skipped: set[str] = set()
     while pending:
         path = pending[0]
         try:
@@ -328,10 +368,30 @@ def publish_gitee(tag: str, name: str, body: str, paths: list[Path]) -> dict:
             if pruned >= MAX_PRUNE:
                 raise SystemExit("清理到上限仍上传失败，请手工检查 Gitee 配额")
             print(f"Gitee 附件配额不足（还剩 {len(pending)} 个包没传），开始清理最老的旧包 …")
-            candidates = pick_prune_candidates(gt.releases(), tag)
-            batch = candidates[:PRUNE_BATCH]
+            batch: list[dict] = []
+            for old in pick_prune_candidates(gt.releases(), tag):
+                old_tag = str(old.get("tag_name") or "")
+                if old_tag in skipped:
+                    continue
+                # 只有 GitHub 上同 tag、同文件名的包都还在，才允许删 Gitee 这一份
+                backed = github_asset_names(old_tag) or set()
+                if not all_packages_backed_up(old, backed):
+                    missing = [
+                        str(a.get("name") or "")
+                        for a in package_assets(old)
+                        if str(a.get("name") or "") not in backed
+                    ]
+                    print(f"  跳过 {old_tag}：{len(missing)} 个包在 GitHub 上没有备份，删了找不回来")
+                    skipped.add(old_tag)
+                    continue
+                batch.append(old)
+                if len(batch) >= PRUNE_BATCH:
+                    break
             if not batch:
-                raise SystemExit("没有可清理的旧包了，但配额仍不足")
+                raise SystemExit(
+                    "Gitee 配额不足，且没有「GitHub 上仍有备份」的旧包可清理；"
+                    "请先补齐备份，或手工处理 Gitee 配额"
+                )
             for old in batch:
                 gt.prune_one(old)
                 pruned += 1
@@ -344,6 +404,24 @@ def publish_gitee(tag: str, name: str, body: str, paths: list[Path]) -> dict:
 # --------------------------------------------------------------------------
 # GitHub
 # --------------------------------------------------------------------------
+
+
+def github_asset_names(tag: str) -> set[str] | None:
+    """GitHub 上这个 tag 的已上传包名；取不到（没 token / 无此 Release）返回 None。"""
+    token = os.environ.get("GH_TOKEN", "")
+    if not token:
+        return None
+    status, rel = json_call(
+        f"{GH_BASE}/releases/tags/{tag}", "GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+    )
+    if status != 200 or not isinstance(rel, dict):
+        return None
+    return {
+        str(a.get("name") or "")
+        for a in rel.get("assets") or []
+        if a.get("state") == "uploaded"
+    }
 
 
 def publish_github(tag: str, name: str, body: str, paths: list[Path]) -> dict:
@@ -364,19 +442,39 @@ def publish_github(tag: str, name: str, body: str, paths: list[Path]) -> dict:
         print("GitHub Release 已存在，复用")
 
     for path in paths:
+        size = path.stat().st_size
         old = asset_named(rel, path.name)
+        if old is not None and int(old.get("size") or 0) == size:
+            # 上一次其实传成功了（或重跑）：同大小就当同一份，别为它再传一次 80 MB
+            print(f"GitHub 已有 {path.name}（{size} 字节），跳过上传")
+            continue
         if old is not None:
             json_call(f"{GH_BASE}/releases/assets/{old['id']}", "DELETE", headers=headers)
             print(f"GitHub 旧同名资产已删除：{path.name}")
 
         upload_base = rel["upload_url"].split("{", 1)[0]
-        status, raw = call(urllib.request.Request(
-            f"{upload_base}?name={urllib.parse.quote(path.name)}",
-            data=path.read_bytes(),
-            headers={**headers, "Content-Type": "application/zip"},
-            method="POST",
-        ))
+        blob = path.read_bytes()
+        status, raw = retry_call(
+            lambda: call(urllib.request.Request(
+                f"{upload_base}?name={urllib.parse.quote(path.name)}",
+                data=blob,
+                headers={**headers, "Content-Type": "application/zip"},
+                method="POST",
+            )),
+            what=f"GitHub 上传 {path.name}",
+        )
         if status not in (200, 201):
+            # 有可能是上一次其实落库了、只是响应没回来：按名字与大小再核对一次
+            _, fresh = json_call(f"{GH_BASE}/releases/tags/{tag}", "GET", headers=headers)
+            cur = asset_named(fresh if isinstance(fresh, dict) else {}, path.name)
+            if (
+                cur is not None
+                and int(cur.get("size") or 0) == size
+                and cur.get("state") == "uploaded"
+            ):
+                rel = fresh
+                print(f"GitHub {path.name} 已在服务端（{size} 字节），按成功处理")
+                continue
             raise SystemExit(f"GitHub 上传 {path.name} 失败 {status}: {raw[:300]}")
         print(f"GitHub 已上传 {path.name}")
     return rel
@@ -498,7 +596,14 @@ def main() -> None:
     for path in paths:
         if not path.is_file():
             raise SystemExit(f"找不到 {path.name}，先打包或加 --build")
-        print(f"附件：{path.name}（{path.stat().st_size / 1048576:.1f} MB）")
+        size = path.stat().st_size
+        print(f"附件：{path.name}（{size / 1048576:.1f} MB）")
+        if attachment_too_big(size):
+            raise SystemExit(
+                f"{path.name} 有 {size / 1048576:.1f} MB，超过 Gitee 单附件上限 "
+                f"{GITEE_MAX_ATTACHMENT // 1048576} MB。先给桌面包瘦身"
+                "（desktop/build_exe.py 里排除启动器用不到的依赖），或加 --skip-desktop。"
+            )
     if args.dry_run:
         print("dry-run：预检完成，未做任何推送")
         return

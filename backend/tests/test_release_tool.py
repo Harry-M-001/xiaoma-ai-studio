@@ -52,3 +52,51 @@ def test_package_asset_matches_only_our_builds():
     assert not rel.is_package_asset("")
     assert rel.asset_named({"assets": [{"name": "a.zip", "id": 1}]}, "a.zip")
     assert rel.asset_named({"assets": [{"name": "b.zip", "id": 1}]}, "a.zip") is None
+
+
+def test_gitee_attachment_limit_is_checked_before_publishing():
+    """100 MB 上限要在推 tag / 建 Release 之前就查出来，否则一次发版会卡在半路。"""
+    rel = _load()
+    limit = rel.GITEE_MAX_ATTACHMENT
+    assert not rel.attachment_too_big(limit), "刚好等于上限应当放行"
+    assert rel.attachment_too_big(limit + 1)
+
+
+def test_prune_only_when_every_package_is_backed_up_on_github():
+    """清理 Gitee 旧包前，同 tag 的每个包都必须在 GitHub 上还有一份。"""
+    rel = _load()
+    both = {
+        "assets": [
+            {"name": "a-win64-portable.zip"},
+            {"name": "a-win64-desktop.zip"},
+        ]
+    }
+    assert rel.all_packages_backed_up(
+        both, {"a-win64-portable.zip", "a-win64-desktop.zip"}
+    )
+    assert not rel.all_packages_backed_up(both, {"a-win64-portable.zip"}), "少一个备份也不能删"
+    assert not rel.all_packages_backed_up({"assets": [{"name": "v1.0.0.zip"}]}, set())
+
+
+def test_network_errors_are_retried_but_not_forever():
+    rel = _load()
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TimeoutError("write timed out")
+        return "ok"
+
+    assert rel.retry_call(flaky, what="测试上传", delay=0) == "ok"
+    assert calls["n"] == 3
+
+    def always_fail():
+        raise TimeoutError("still down")
+
+    try:
+        rel.retry_call(always_fail, what="测试上传", attempts=2, delay=0)
+    except SystemExit as e:
+        assert "连续 2 次失败" in str(e)
+    else:
+        raise AssertionError("连续失败后应当退出，而不是无限重试")
