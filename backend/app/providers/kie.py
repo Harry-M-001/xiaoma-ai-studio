@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import time
 from typing import AsyncIterator
 
@@ -47,15 +48,26 @@ from app.providers.base import (
     BaseAdapter,
     SpeechResult,
     VideoStatus,
+    is_transient_network_error,
     network_error_detail,
     network_error_message,
     unsupported,
     url_host,
 )
 
+logger = logging.getLogger("xiaoma.kie")
+
 _POLL_INTERVAL = 3.0
-_POLL_MAX_WAIT = 300.0
+#: 图片任务最多等 10 分钟。实测 KIE 偶尔会把一张图排到 5 分钟以上，
+#: 等得久一点不花钱，提前放弃才白费一次已受理的请求。
+_POLL_MAX_WAIT = 600.0
 _DOWNLOAD_TIMEOUT = 120.0
+
+#: 提交任务时断网最多重试几次（每次之间线性退避）。
+#: 重试有重复计费的风险，但连续失败说明请求大概率没送达；5 次是「够穿一次抖动、
+#: 又不至于把同一笔费用重复扣很多次」的折中。
+_SUBMIT_ATTEMPTS = 5
+_SUBMIT_BACKOFF = 1.5
 
 #: 参考图必须先换成 URL 才能喂给 KIE 的模型；这是它自己的上传服务（与 api.kie.ai 不同域）
 UPLOAD_URL = "https://kieai.redpandaai.co/api/file-base64-upload"
@@ -488,14 +500,52 @@ class KieAdapter(BaseAdapter):
             )
         return data.get("data") or {}
 
+    async def _submit(self, client: httpx.AsyncClient, payload: dict) -> dict:
+        """提交任务：断网就重连，最多 5 次。
+
+        为什么只对网络错误重试：业务错误（402 余额不足、参数不认）重发一百次也一样。
+        为什么敢重试：请求在传输层就断了，上游大概率没收到；真收到了也只是多出一条
+        结果，比「钱扣了、任务没留下」更可控。
+
+        5 次都失败时，如实告诉用户「上游可能已经受理」并给出核对入口——
+        KIE 没有公开的「任务列表」接口，唯一能查到任务号的地方是控制台的 Logs。
+        """
+        last: AdapterError | None = None
+        for attempt in range(1, _SUBMIT_ATTEMPTS + 1):
+            try:
+                return await self._call(
+                    client, "POST", "/api/v1/jobs/createTask", json=payload
+                )
+            except AdapterError as e:
+                if not is_transient_network_error(e):
+                    raise
+                last = e
+                logger.warning(
+                    "KIE 提交第 %s/%s 次失败（网络）：%s", attempt, _SUBMIT_ATTEMPTS, e
+                )
+                if attempt < _SUBMIT_ATTEMPTS:
+                    await asyncio.sleep(_SUBMIT_BACKOFF * attempt)
+        raise AdapterError(
+            f"提交任务时网络连续 {_SUBMIT_ATTEMPTS} 次中断（{last}）。"
+            "上游可能已经受理并计费：请到 KIE 控制台 → Logs 按时间核对任务号与结果，"
+            "确认没有这一笔再重试。",
+            log_detail="kie_submit_network_exhausted",
+        )
+
     async def _poll(self, client: httpx.AsyncClient, task_id: str) -> dict:
         waited = 0.0
         while waited < _POLL_MAX_WAIT:
             await asyncio.sleep(_POLL_INTERVAL)
             waited += _POLL_INTERVAL
-            data = await self._call(
-                client, "GET", "/api/v1/jobs/recordInfo", params={"taskId": task_id}
-            )
+            try:
+                data = await self._call(
+                    client, "GET", "/api/v1/jobs/recordInfo", params={"taskId": task_id}
+                )
+            except AdapterError as e:
+                # 查询结果时断一下网，不代表任务失败：睡一个周期再问。
+                if not is_transient_network_error(e):
+                    raise
+                continue
             state = str(data.get("state") or "")
             if state == "success":
                 return data
@@ -687,9 +737,7 @@ class KieAdapter(BaseAdapter):
                         model, prompt, size, count if legacy else 1, urls
                     ),
                 }
-                created = await self._call(
-                    client, "POST", "/api/v1/jobs/createTask", json=payload
-                )
+                created = await self._submit(client, payload)
                 task_id = str(created.get("taskId") or "")
                 if not task_id:
                     raise AdapterError("KIE 没有返回任务 id", log_detail="kie_no_task_id")
@@ -776,7 +824,7 @@ class KieAdapter(BaseAdapter):
             ),
         }
         async with httpx.AsyncClient(timeout=60.0) as client:
-            created = await self._call(client, "POST", "/api/v1/jobs/createTask", json=payload)
+            created = await self._submit(client, payload)
         task_id = str(created.get("taskId") or "")
         if not task_id:
             raise AdapterError("KIE 没有返回任务 id", log_detail="kie_no_task_id")

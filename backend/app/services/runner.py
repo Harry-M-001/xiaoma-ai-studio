@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.clock import utcnow
 from app.database import SessionLocal
 from app.models import AgentPrompt, Asset, ComfyWorkflow, ProviderService, Task
-from app.providers.base import AdapterError, AudioRef
+from app.providers.base import AdapterError, AudioRef, is_transient_network_error
 from app.providers.comfyui import ComfyUIAdapter, ComfyOutputFile
 from app.services import doc_service, ffmpeg_service, log_service, patrol, provider_store, storage, style_service
 from app.services.comfy_workflow_service import apply_params
@@ -526,8 +526,21 @@ class TaskRunner:
                     await db.commit()
                     return
                 resolved = await provider_store.resolve_model(db, task.model, "video")
-                status = await resolved.adapter.poll_video(task.remote_job_id)
-                await resolved.adapter.close()
+                try:
+                    status = await resolved.adapter.poll_video(task.remote_job_id)
+                except AdapterError as e:
+                    if not is_transient_network_error(e):
+                        raise
+                    # 上游已经受理、正在出片，只是这一下没连上：继续等，绝不在这里判死。
+                    # 一旦判失败，上游照样会出片并计费，用户拿到的却是「失败」和一堆白花的钱。
+                    task.error = str(e)[:200]
+                    task.updated_at = utcnow()
+                    await db.commit()
+                    await asyncio.sleep(interval)
+                    waited += interval
+                    continue
+                finally:
+                    await resolved.adapter.close()
 
                 if status.status == "succeeded" and status.video_url:
                     try:

@@ -347,6 +347,31 @@ def network_error_message(exc: Exception) -> str:
     return f"{hint}（{name}）"
 
 
+#: 网络类错误的特征词。轮询上游结果时遇到这些应当**继续等**，而不是把任务判死：
+#: 视频一旦被上游受理就会出片并计费，我们这边一次抖动就标失败，等于把用户已经
+#: 付过钱的产物扔掉（2.2.6 实测踩过：KIE 出片成功、本地却显示失败）。
+_TRANSIENT_NETWORK_MARKERS = (
+    "连接超时",
+    "请求超时",
+    "连不上这个地址",
+    "网络层出错",
+    "代理出错",
+    "ConnectTimeout",
+    "ConnectError",
+    "ReadTimeout",
+    "WriteTimeout",
+    "PoolTimeout",
+    "RemoteProtocolError",
+    "RemoteDisconnected",
+)
+
+
+def is_transient_network_error(exc: BaseException | str) -> bool:
+    """这个错误是不是「只是这一下没连上」——可以等一会儿再问一次。"""
+    text = exc if isinstance(exc, str) else f"{type(exc).__name__}: {exc}"
+    return any(marker in text for marker in _TRANSIENT_NETWORK_MARKERS)
+
+
 def unsupported(modality: str) -> AdapterError:
     return AdapterError(
         f"该类型的模型服务不支持{modality}能力，请检查模型服务类型与模型配置",
