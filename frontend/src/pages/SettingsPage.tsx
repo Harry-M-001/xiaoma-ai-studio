@@ -1007,10 +1007,25 @@ function AboutPanel() {
     setUpdating(true);
     setResult(null);
     try {
-      const r = await api.runUpdate();
-      setResult(r);
-      if (r.ok) toast.success("更新完成，请重启服务");
-      else toast.error(r.message);
+      if (status?.canSelfUpdate) {
+        // 打包版：下载新包 → 只覆盖代码 → 提示重启。数据、密钥、运行时都不动。
+        const r = await api.applyPackagedUpdate();
+        setResult({
+          ok: true,
+          needsRestart: Boolean(r.restartRequired),
+          steps: [],
+          message: r.updated
+            ? `已更新到 v${r.toVersion}。请关闭应用后重新打开以加载新版本；` +
+              "数据库、素材与密钥都已保留，旧版程序已备份到数据目录的 updates/backups。"
+            : r.message,
+        });
+        toast.success(r.updated ? "程序已更新，请重启应用" : r.message);
+      } else {
+        const r = await api.runUpdate();
+        setResult(r);
+        if (r.ok) toast.success("更新完成，请重启服务");
+        else toast.error(r.message);
+      }
       await load(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "更新失败");
@@ -1028,8 +1043,9 @@ function AboutPanel() {
   }
   if (!status) return null;
 
-  // 一键更新只在「git 克隆 + 工作区干净 + 配了仓库」时才允许，其余情况给出替代做法
-  const canUpdate = status.installKind === "git" && status.dirty !== true;
+  // 一键更新：git 克隆要求工作区干净；Windows 的桌面版 / 便携版走「下载新包只换代码」
+  const canUpdate =
+    status.canSelfUpdate === true || (status.installKind === "git" && status.dirty !== true);
 
   return (
     <>
@@ -1128,9 +1144,12 @@ function AboutPanel() {
               <div className="about-note" style={{ marginTop: 10 }}>
                 {status.installKind === "docker"
                   ? "当前跑在容器里，容器内不自我更新。请在宿主机执行：docker compose pull && docker compose up -d"
-                  : status.dirty
-                    ? "本地有未提交的改动，为避免覆盖你的修改已停用自动更新。请先 git commit 或 git stash。"
-                    : "当前不是 git 克隆安装，无法自动更新。请下载新版本解压覆盖（data/ 目录可以直接保留）。"}
+                  : status.installKind === "archive"
+                    ? "当前安装方式暂不支持一键更新（仅 Windows 桌面版 / 便携版可用）。"
+                      + "请下载新版本解压覆盖，data/ 与密钥会保留。"
+                    : status.dirty
+                      ? "本地有未提交的改动，为避免覆盖你的修改已停用自动更新。请先 git commit 或 git stash。"
+                      : "当前不是 git 克隆安装，无法自动更新。请下载新版本解压覆盖（data/ 目录可以直接保留）。"}
               </div>
             )}
           </div>
@@ -1139,6 +1158,11 @@ function AboutPanel() {
         {result && (
           <div className="update-steps">
             <div className={`about-state ${result.ok ? "has-update" : ""}`}>{result.message}</div>
+            {result.needsRestart && (
+              <div className="about-note">
+                关闭应用窗口后重新打开即可生效；本次没有改动 data/、密钥与运行时。
+              </div>
+            )}
             {result.steps.map((s, i) => (
               <details key={i} className="update-step">
                 <summary>
@@ -1250,18 +1274,38 @@ function AboutPanel() {
           }
         >
           <div style={{ fontSize: 13.5, lineHeight: 1.8 }}>
-            将要执行：
-            <ol style={{ margin: "8px 0 0 18px" }}>
-              <li>
-                <code>git pull --ff-only</code> 拉取最新代码
-              </li>
-              <li>后端依赖清单有变化时才重装依赖</li>
-              <li>前端有改动时才重新构建界面</li>
-            </ol>
-            <div className="about-note" style={{ marginTop: 12 }}>
-              更新只改代码，不会动你的 <code>data/</code>（数据库、生成的图片视频都在那里）。
-              完成后需要手动重启服务。
-            </div>
+            {status.canSelfUpdate ? (
+              <>
+                将要执行：
+                <ol style={{ margin: "8px 0 0 18px" }}>
+                  <li>
+                    从最新 Release 下载
+                    {status.packageKind === "desktop" ? "桌面版" : "便携版"}安装包（数十 MB）
+                  </li>
+                  <li>校验包内版本与结构，备份当前程序代码</li>
+                  <li>只替换 backend / frontend / docs 等代码，重启后生效</li>
+                </ol>
+                <div className="about-note" style={{ marginTop: 12 }}>
+                  不会改动 <code>data/</code>（数据库、素材、密钥）、运行时与启动器。
+                  更新期间请不要关闭应用窗口。
+                </div>
+              </>
+            ) : (
+              <>
+                将要执行：
+                <ol style={{ margin: "8px 0 0 18px" }}>
+                  <li>
+                    <code>git pull --ff-only</code> 拉取最新代码
+                  </li>
+                  <li>后端依赖清单有变化时才重装依赖</li>
+                  <li>前端有改动时才重新构建界面</li>
+                </ol>
+                <div className="about-note" style={{ marginTop: 12 }}>
+                  更新只改代码，不会动你的 <code>data/</code>（数据库、生成的图片视频都在那里）。
+                  完成后需要手动重启服务。
+                </div>
+              </>
+            )}
           </div>
         </Modal>
       )}

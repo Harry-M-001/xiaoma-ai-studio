@@ -73,6 +73,7 @@ import type {
   Task,
   TaskLogs,
   TaskRetryIn,
+  PackagedUpdateResult,
   UpdateRunResult,
   UpdateStatus,
   UpscaleOptions,
@@ -666,6 +667,8 @@ export const api = {
   getUpdateStatus: () => request<UpdateStatus>("/api/update/status"),
   checkUpdate: () => request<UpdateStatus>("/api/update/check", { method: "POST" }),
   runUpdate: () => request<UpdateRunResult>("/api/update/run", { method: "POST" }),
+  applyPackagedUpdate: () =>
+    request<PackagedUpdateResult>("/api/admin/update/apply", { method: "POST" }),
 
   // ---- 备份与恢复 ----
   listBackups: () => request<BackupItem[]>("/api/admin/backup/list"),

@@ -22,15 +22,19 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import os
 import re
 import shutil
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from app import __version__
+from app.config import settings
 from app.services.config_center_service import runtime_value
 
 logger = logging.getLogger("xiaoma.update")
@@ -335,6 +339,8 @@ async def check_update(force: bool = False) -> dict[str, Any]:
     state.update(result)
     if not result.get("error"):
         _cache.update({"key": cache_key, "at": now, "data": dict(result)})
+    state["canSelfUpdate"] = can_self_update()
+    state["packageKind"] = package_kind()
     return state
 
 
@@ -365,8 +371,8 @@ async def run_update() -> dict[str, Any]:
             "ok": False,
             "needsRestart": False,
             "steps": [],
-            "message": "当前不是 git 克隆安装（未检测到 .git 目录），无法自动更新。"
-            "请到 Releases 下载新版本解压覆盖；你的 data/ 目录可直接保留。",
+            "message": "当前是压缩包安装：可用「一键更新」只替换程序代码（保留数据），"
+            "也可以到 Releases 下载新版本解压覆盖。",
         }
     if state.get("dirty"):
         return {
@@ -476,3 +482,339 @@ async def run_update() -> dict[str, Any]:
         "changed": changed,
         "message": "更新完成。请重启服务（关闭窗口后重新运行 start.bat / start.sh）以加载新版本",
     }
+
+
+# ============================================================
+# 打包版（桌面版 / 便携版）一键更新
+# ============================================================
+
+# 更新时只覆盖「纯代码与界面」。runtime / _internal / 启动器 exe 正在被当前进程使用，
+# Windows 上根本覆盖不了；data / .env / secret.key 属于用户，任何情况下都不碰。
+_CODE_DIRS = ("backend/app", "backend/alembic", "backend/assets", "frontend", "docs", "assets")
+_CODE_FILES = ("CHANGELOG.md", "README.md", "LICENSE", "README-PORTABLE.txt")
+
+_MAX_PACKAGE_BYTES = 600 * 1024 * 1024
+_TRUSTED_HOSTS = (
+    "github.com",
+    "gitee.com",
+    "githubusercontent.com",
+    "release-assets.githubusercontent.com",
+)
+
+_apply_lock = asyncio.Lock()
+
+
+class UpdateError(Exception):
+    """一键更新失败：消息直接展示给用户，不需要再翻译一层。"""
+
+
+def package_kind() -> str:
+    """desktop | portable。
+
+    桌面版的包根有启动器 `XiaomaAIStudio.exe` 与 `_internal`；便携版只有 `start.bat`。
+    """
+    if (REPO_ROOT / "XiaomaAIStudio.exe").is_file() or (REPO_ROOT / "_internal").is_dir():
+        return "desktop"
+    return "portable"
+
+
+def can_self_update() -> bool:
+    """只有 Windows 的压缩包安装才支持「一键更新」。
+
+    git 克隆有自己的更新路径（run_update）；Docker / Linux 不在这里做——
+    替换正在运行的进程文件在不同平台上风险差别太大，不做比做错好。
+    """
+    return (
+        os.name == "nt"
+        and install_kind() == "archive"
+        and (REPO_ROOT / "backend" / "app" / "main.py").is_file()
+    )
+
+
+def pick_asset(release: dict[str, Any], kind: str) -> dict[str, Any] | None:
+    """从 Release 资产里挑出当前安装方式对应的包（`…-desktop.zip` / `…-portable.zip`）。"""
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        return None
+    suffix = f"-{kind}.zip"
+    for item in assets:
+        if isinstance(item, dict) and str(item.get("name") or "").endswith(suffix):
+            return item
+    return None
+
+
+async def _release_with_assets() -> tuple[str, str, dict[str, Any]]:
+    """按配置的源顺序取最新 Release（保留 assets，check_update 只留下展示字段）。"""
+    source = str(runtime_value("update.source", "github") or "github").strip()
+    github_repo = str(runtime_value("update.repo", "") or "").strip()
+    gitee_repo = str(runtime_value("update.repo_gitee", "") or "").strip()
+    repos = {"github": github_repo, "gitee": gitee_repo or github_repo}
+
+    errors: list[str] = []
+    order = [source, *[s for s in _SOURCES if s != source]]
+    for candidate in order:
+        repo = repos.get(candidate, "")
+        if not repo:
+            continue
+        data, err = await _fetch_release(candidate, repo)
+        if data is not None:
+            return candidate, repo, data
+        errors.append(err)
+    raise UpdateError("检查更新失败：" + ("；".join(errors) or "没有可用的更新源"))
+
+
+async def _download_asset(url: str, dest: Path) -> int:
+    """下载安装包到本机（先直连、失败再走系统代理），返回字节数。
+
+    与检查更新一样区分直连 / 代理：机场共享 IP 被限流时直连往往更稳，
+    而 GitHub 本身被墙时又只能走代理。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    headers = {"User-Agent": "xiaoma-ai-studio"}
+    last = ""
+    for direct in (True, False):
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, read=300.0),
+                follow_redirects=True,
+                trust_env=not direct,
+            ) as client:
+                async with client.stream("GET", url, headers=headers) as resp:
+                    if resp.status_code != 200:
+                        last = f"HTTP {resp.status_code}"
+                        continue
+                    total = int(resp.headers.get("content-length") or 0)
+                    if total > _MAX_PACKAGE_BYTES:
+                        raise UpdateError("安装包异常大，已拒绝下载")
+                    size = 0
+                    with tmp.open("wb") as fh:
+                        async for chunk in resp.aiter_bytes(1024 * 1024):
+                            if not chunk:
+                                continue
+                            size += len(chunk)
+                            if size > _MAX_PACKAGE_BYTES:
+                                raise UpdateError("安装包异常大，已拒绝下载")
+                            fh.write(chunk)
+            if size == 0:
+                raise UpdateError("下载到的安装包是空的")
+            os.replace(tmp, dest)
+            return size
+        except UpdateError:
+            tmp.unlink(missing_ok=True)
+            raise
+        except (httpx.HTTPError, OSError) as e:
+            tmp.unlink(missing_ok=True)
+            last = f"{e.__class__.__name__}：{e}"[:200]
+    raise UpdateError(f"下载安装包失败：{last}")
+
+
+def _safe_extract(zip_path: Path, dest: Path) -> None:
+    """解压并挡住 zip slip（绝对路径 / `..`），不依赖 zipfile 的默认行为。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    base = dest.resolve()
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or re.match(r"^[a-zA-Z]:", name):
+                raise UpdateError("安装包里有绝对路径，已拒绝解压")
+            if ".." in Path(name).parts:
+                raise UpdateError("安装包里有 ../ 路径，已拒绝解压")
+            target = (dest / name).resolve()
+            if not target.is_relative_to(base):
+                raise UpdateError("安装包试图写到目标目录之外，已拒绝解压")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, target.open("wb") as out:
+                shutil.copyfileobj(src, out)
+
+
+def _package_root(staging: Path) -> Path:
+    """压缩包的根可能是包目录本身，也可能多套一层（GitHub 桌面版是 `app/`）。"""
+    if (staging / "backend" / "app" / "main.py").is_file():
+        return staging
+    for child in staging.iterdir():
+        if child.is_dir() and (child / "backend" / "app" / "main.py").is_file():
+            return child
+    raise UpdateError("安装包里没有 backend/app/main.py，不是小马的安装包")
+
+
+def _package_version(root: Path) -> str:
+    text = (root / "backend" / "app" / "__init__.py").read_text(encoding="utf-8", errors="replace")
+    m = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+    if not m:
+        raise UpdateError("安装包里读不到版本号")
+    return m.group(1)
+
+
+def _sync_tree(src: Path, dst: Path) -> None:
+    """把 src 覆盖到 dst：新文件写过去，旧版本留下的文件删掉。
+
+    只对代码目录调用，删除范围因此是可控的；`backend/data`、`.env` 都不在这里面。
+    """
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in src.rglob("*"):
+        rel = path.relative_to(src)
+        target = dst / rel
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+
+    extras = [p for p in dst.rglob("*") if not (src / p.relative_to(dst)).exists()]
+    for path in sorted(extras, key=lambda p: len(p.parts), reverse=True):
+        if path.is_dir():
+            path.rmdir()
+        else:
+            path.unlink()
+
+
+def _zip_tree(zip_path: Path, root: Path, rels: tuple[str, ...]) -> None:
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel in rels:
+            path = root / rel
+            if path.is_file():
+                zf.write(path, rel)
+                continue
+            if not path.is_dir():
+                continue
+            for item in path.rglob("*"):
+                if item.is_file():
+                    zf.write(item, item.relative_to(root).as_posix())
+
+
+def _restore(backup: Path, root: Path) -> None:
+    tmp = backup.parent / "restore-tmp"
+    if tmp.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+    _safe_extract(backup, tmp)
+    for rel in _CODE_DIRS:
+        if (tmp / rel).is_dir():
+            _sync_tree(tmp / rel, root / rel)
+    for rel in _CODE_FILES:
+        if (tmp / rel).is_file():
+            shutil.copy2(tmp / rel, root / rel)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def install_from_zip(zip_path: Path, latest: str, root: Path | None = None) -> dict[str, Any]:
+    """把安装包里的代码覆盖到当前安装（同步函数，调用方放线程里跑）。
+
+    顺序是「先备份、再覆盖、失败回滚」：
+    - 备份放在数据目录 `updates/backups/`，出问题可手工解压恢复；
+    - 包内版本必须与 Release 标签一致，防止拿错包；
+    - 覆盖失败会立刻从备份还原，避免留下半新半旧的程序目录。
+    """
+    target = root or REPO_ROOT
+    staging = zip_path.parent / f"staging-{zip_path.stem}"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    _safe_extract(zip_path, staging)
+    try:
+        pkg = _package_root(staging)
+        pkg_version = _package_version(pkg)
+        if _parse_version(pkg_version) != _parse_version(latest):
+            raise UpdateError(
+                f"包内版本 {pkg_version} 与 Release 标签 {latest} 不一致，已拒绝安装"
+            )
+
+        # 依赖变了就不能只换代码：嵌入式运行时不会自己装新包，硬换会得到一个起不来的程序。
+        req_new = pkg / "backend" / "requirements.txt"
+        req_old = target / "backend" / "requirements.txt"
+        if req_new.is_file() and req_old.is_file():
+
+            def _deps(path: Path) -> set[str]:
+                return {
+                    ln.strip()
+                    for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if ln.strip() and not ln.strip().startswith("#")
+                }
+
+            if _deps(req_new) != _deps(req_old):
+                raise UpdateError(
+                    "新版本的依赖有变化，一键更新只换代码会启动失败。"
+                    "请下载完整安装包解压覆盖（data/ 会保留），或先在设置里导出配置再重装"
+                )
+
+        backups = zip_path.parent / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup = backups / f"backup-{__version__}-{stamp}.zip"
+        _zip_tree(backup, target, _CODE_DIRS + _CODE_FILES)
+
+        applied: list[str] = []
+        try:
+            for rel in _CODE_DIRS:
+                src = pkg / rel
+                if src.is_dir():
+                    _sync_tree(src, target / rel)
+                    applied.append(rel)
+            for rel in _CODE_FILES:
+                src = pkg / rel
+                if src.is_file():
+                    shutil.copy2(src, target / rel)
+        except OSError as e:
+            try:
+                _restore(backup, target)
+            except OSError as e2:
+                raise UpdateError(
+                    f"覆盖文件失败（{e}），自动回滚也失败（{e2}）。备份在 {backup}"
+                ) from e2
+            raise UpdateError(f"覆盖文件失败（{e}），已回滚到更新前") from e
+        return {
+            "updated": True,
+            "fromVersion": __version__,
+            "toVersion": pkg_version,
+            "backup": str(backup),
+            "applied": applied,
+        }
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+async def apply_packaged_update() -> dict[str, Any]:
+    """打包版一键更新：下载 → 校验 → 备份 → 覆盖代码（不碰数据与运行时）。"""
+    if not can_self_update():
+        raise UpdateError(
+            "一键更新只支持 Windows 的桌面版 / 便携版压缩包安装；"
+            "git 安装请用普通更新，Docker 请在宿主机更新镜像"
+        )
+
+    async with _apply_lock:
+        _, _, release = await _release_with_assets()
+        latest = str(release.get("tag_name") or release.get("name") or "").strip()
+        if not latest:
+            raise UpdateError("最新 Release 没有版本标签")
+        if not _is_newer(latest, __version__):
+            return {
+                "updated": False,
+                "version": __version__,
+                "latest": latest,
+                "message": f"当前已是最新版本（{__version__}）",
+            }
+
+        kind = package_kind()
+        asset = pick_asset(release, kind)
+        if asset is None:
+            names = "、".join(
+                str(a.get("name")) for a in release.get("assets") or [] if isinstance(a, dict)
+            )
+            raise UpdateError(
+                f"最新版本里没有「{kind}」安装包（Release 现有资产：{names or '空'}）"
+            )
+
+        url = str(asset.get("browser_download_url") or "").strip()
+        if not url:
+            raise UpdateError("安装包没有下载地址")
+        host = urlparse(url).hostname or ""
+        if not any(host == h or host.endswith("." + h) for h in _TRUSTED_HOSTS):
+            raise UpdateError(f"安装包地址不在信任的发布源里：{host}")
+
+        dest = settings.data_dir / "updates" / f"{latest}-{kind}.zip"
+        size = await _download_asset(url, dest)
+        result = await asyncio.to_thread(install_from_zip, dest, latest)
+        result.update({"size": size, "restartRequired": True})
+        return result

@@ -36,6 +36,16 @@ const EMPTY_EDITOR: EditorState = {
   content: "",
 };
 
+/** 提示词里的 {占位符}：使用时先问清楚，再带进对话 / 图片 / 视频页。 */
+function variablesOf(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\{([^{}\n]{1,30})\}/g)) {
+    const name = m[1].trim();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
 export default function PromptsPage({ onNavigate }: { onNavigate: (route: string) => void }) {
   const toast = useToast();
   const [items, setItems] = useState<PromptItem[]>([]);
@@ -44,6 +54,9 @@ export default function PromptsPage({ onNavigate }: { onNavigate: (route: string
   const [q, setQ] = useState("");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [fill, setFill] = useState<{ prompt: PromptItem; action: "use" | "copy" } | null>(null);
+  const [fillValues, setFillValues] = useState<Record<string, string>>({});
+  const [fillMissing, setFillMissing] = useState<string[]>([]);
 
   const load = async () => {
     try {
@@ -87,6 +100,55 @@ export default function PromptsPage({ onNavigate }: { onNavigate: (route: string
     if (!target) return;
     setDraftPrompt(target, p.content);
     onNavigate(target);
+  };
+
+  /**
+   * 带占位符的模板先弹窗收集填写值。
+   *
+   * 以前是直接把带 `{主体}` 的原文送进生成页，用户到了那边才发现还要自己找、
+   * 自己替换——而模板的价值恰恰是「不用想怎么写」。这里把这一步提前问清楚。
+   */
+  const startWith = (p: PromptItem, action: "use" | "copy") => {
+    const vars = variablesOf(p.content);
+    if (vars.length === 0) {
+      if (action === "use") useIn(p);
+      else void copy(p);
+      return;
+    }
+    setFillValues(Object.fromEntries(vars.map((v) => [v, ""])));
+    setFillMissing([]);
+    setFill({ prompt: p, action });
+  };
+
+  const applyFill = async () => {
+    if (!fill) return;
+    const vars = variablesOf(fill.prompt.content);
+    const missing = vars.filter((v) => !(fillValues[v] ?? "").trim());
+    if (missing.length) {
+      setFillMissing(missing);
+      return;
+    }
+    let text = fill.prompt.content;
+    for (const v of vars) {
+      text = text.split(`{${v}}`).join((fillValues[v] ?? "").trim());
+    }
+    setFill(null);
+    if (fill.action === "use") {
+      const target = MODALITY_ROUTE[fill.prompt.modality];
+      if (!target) return;
+      setDraftPrompt(target, text);
+      onNavigate(target);
+    } else {
+      await copy({ ...fill.prompt, content: text });
+    }
+  };
+
+  const useRaw = () => {
+    if (!fill) return;
+    const p = fill.prompt;
+    setFill(null);
+    if (fill.action === "use") useIn(p);
+    else void copy(p);
   };
 
   const openCreate = () => setEditor({ ...EMPTY_EDITOR, modality: filter === "all" ? "image" : filter });
@@ -146,6 +208,8 @@ export default function PromptsPage({ onNavigate }: { onNavigate: (route: string
       setSaving(false);
     }
   };
+
+  const fillVars = fill ? variablesOf(fill.prompt.content) : [];
 
   return (
     <div className="page">
@@ -216,18 +280,24 @@ export default function PromptsPage({ onNavigate }: { onNavigate: (route: string
                     .map((t) => t.trim())
                     .filter(Boolean)
                     .map((t) => (
-                      <span key={t} className="prompt-tag">
+                      <button
+                        key={t}
+                        type="button"
+                        className="prompt-tag"
+                        title="按这个标签筛选"
+                        onClick={() => setQ(t)}
+                      >
                         {t}
-                      </span>
+                      </button>
                     ))}
                 </div>
               )}
               <div className="prompt-actions">
-                <button className="btn btn-primary btn-sm" onClick={() => useIn(p)}>
+                <button className="btn btn-primary btn-sm" onClick={() => startWith(p, "use")}>
                   {MODALITY_USE_LABEL[p.modality] ?? "去使用"}
                   <ArrowRight size={14} />
                 </button>
-                <button className="btn btn-ghost btn-sm" onClick={() => copy(p)}>
+                <button className="btn btn-ghost btn-sm" onClick={() => startWith(p, "copy")}>
                   <Copy size={14} />
                   复制
                 </button>
@@ -241,6 +311,53 @@ export default function PromptsPage({ onNavigate }: { onNavigate: (route: string
             </div>
           ))}
         </div>
+      )}
+
+      {fill && (
+        <Modal
+          title={fill.action === "use" ? "填写后去使用" : "填写后复制"}
+          onClose={() => setFill(null)}
+          footer={
+            <>
+              <button className="btn btn-ghost" onClick={useRaw}>
+                不填，用原文
+              </button>
+              <button className="btn btn-ghost" onClick={() => setFill(null)}>
+                取消
+              </button>
+              <button className="btn btn-primary" onClick={() => void applyFill()}>
+                {fill.action === "use" ? "填入并使用" : "填入并复制"}
+              </button>
+            </>
+          }
+        >
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 12 }}>
+            「{fill.prompt.title}」里有 {fillVars.length} 个占位符，填完再继续；
+            不知道填什么时，可以先「不填，用原文」到生成页边写边改。
+          </div>
+          {fillVars.map((v) => (
+            <div className="field" key={v}>
+              <label className="field-label">
+                {v}
+                {fillMissing.includes(v) && (
+                  <span style={{ color: "var(--danger)", fontWeight: 500 }}> · 必填</span>
+                )}
+              </label>
+              <textarea
+                className="textarea"
+                rows={2}
+                value={fillValues[v] ?? ""}
+                placeholder={`填写「${v}」的具体内容`}
+                onChange={(e) => {
+                  setFillValues((prev) => ({ ...prev, [v]: e.target.value }));
+                  if (fillMissing.includes(v)) {
+                    setFillMissing((prev) => prev.filter((x) => x !== v));
+                  }
+                }}
+              />
+            </div>
+          ))}
+        </Modal>
       )}
 
       {editor && (

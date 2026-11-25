@@ -34,6 +34,7 @@ from app.registry.schema_registry import SCHEMA_REGISTRY, TableSpec
 from app.services import backup_service
 from app.services import config_center_service as config_center
 from app.services import config_transfer_service as config_transfer
+from app.services import update_service
 
 router = APIRouter(
     prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_auth)]
@@ -227,3 +228,17 @@ async def delete_row(
     except config_center.ConfigError as e:
         raise _fail(e) from e
     return {"ok": True}
+
+
+# ============================================================
+# 打包版一键更新（桌面版 / 便携版）
+# ============================================================
+
+
+@router.post("/update/apply")
+async def apply_packaged_update() -> dict[str, Any]:
+    """下载最新 Release 并只替换程序代码；数据、密钥、运行时都不动。"""
+    try:
+        return await update_service.apply_packaged_update()
+    except update_service.UpdateError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e

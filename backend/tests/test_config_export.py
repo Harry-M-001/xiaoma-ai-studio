@@ -33,6 +33,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # no
 from app.database import Base  # noqa: E402
 from app.models import ConfigAuditLog, DirectorStyle, Prompt, ProviderService  # noqa: E402
 from app.registry.schema_registry import SCHEMA_REGISTRY  # noqa: E402
+
+# 提示词库的种子条数不写死：库里加模板是常态，测试关心的是「导入前后差几条」
+SEED_PROMPTS = len(SCHEMA_REGISTRY["prompts"].seed or [])
 from app.schemas import ModelSpec, ProviderIn  # noqa: E402
 from app.services import config_center_service as cc  # noqa: E402
 from app.services import config_transfer_service as ct  # noqa: E402
@@ -499,18 +502,18 @@ def test_dry_run_then_confirm_then_reimport_is_idempotent():
 
         preview = await ct.import_snapshot(db, snapshot, dry_run=True)
         assert preview["totals"]["created"] == 1, preview["totals"]
-        assert await _count(db, Prompt) == 10, "dry-run 之后提示词数量不该变"
+        assert await _count(db, Prompt) == SEED_PROMPTS, "dry-run 之后提示词数量不该变"
 
         first = await ct.import_snapshot(db, snapshot, dry_run=False)
         assert first["totals"]["created"] == 1, first["totals"]
-        assert await _count(db, Prompt) == 11, "确认写入后应当多一行"
+        assert await _count(db, Prompt) == SEED_PROMPTS + 1, "确认写入后应当多一行"
 
         audits_after_first = await _audit_count(db, "prompts")
 
         second = await ct.import_snapshot(db, snapshot, dry_run=False)
         assert second["totals"]["created"] == 0, "重复导入竟然又新增了行"
         assert second["totals"]["updated"] == 0, "内容没变却报了更新"
-        assert await _count(db, Prompt) == 11, "重复导入产生了重复行"
+        assert await _count(db, Prompt) == SEED_PROMPTS + 1, "重复导入产生了重复行"
         assert await _audit_count(db, "prompts") == audits_after_first, "没改动却还在刷审计"
 
         third = await ct.import_snapshot(db, snapshot, dry_run=True)
@@ -560,7 +563,7 @@ def test_roundtrip_between_two_installs():
             assert preview["totals"]["created"] == 3, preview["totals"]
             assert preview["totals"]["updated"] == 0, preview["totals"]
             assert preview["totals"]["skipped"] == total_rows - 3, preview["totals"]
-            assert await _count(db, Prompt) == 10, "预览阶段不该写库"
+            assert await _count(db, Prompt) == SEED_PROMPTS, "预览阶段不该写库"
 
             done = await ct.import_snapshot(db, payload, dry_run=False)
             assert done["totals"]["created"] == 3, done["totals"]
@@ -642,7 +645,7 @@ def test_dirty_rows_are_rejected_one_by_one():
         assert done["ok"] is True
 
         db.expire_all()
-        assert await _count(db, Prompt) == 10, "脏行被写进库了"
+        assert await _count(db, Prompt) == SEED_PROMPTS, "脏行被写进库了"
         row = (await db.execute(select(Prompt).where(Prompt.key == good_key))).scalars().one()
         assert row.title == "被改过的标题", row.title
 
@@ -726,7 +729,7 @@ def test_audit_trail_can_be_rolled_back():
         assert json.loads(log.after_json or "{}").get("key") == "rollback-me", log.after_json
 
         await cc.rollback_row(db, SCHEMA_REGISTRY["prompts"], log.id)
-        assert await _count(db, Prompt) == 10, "回滚没有把导入新增的行删掉"
+        assert await _count(db, Prompt) == SEED_PROMPTS, "回滚没有把导入新增的行删掉"
 
     _run(case)
 

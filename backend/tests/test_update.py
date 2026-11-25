@@ -133,9 +133,9 @@ def test_run_update_refuses_archive():
     out = _refuse_with("archive")
     assert out["ok"] is False
     assert out["steps"] == []
-    assert "git" in out["message"]
-    # 压缩包用户必须被告知 data/ 目录可以保留
-    assert "data/" in out["message"]
+    # 压缩包安装不再走 git pull；提示改用「一键更新」（只替换代码）
+    assert "一键更新" in out["message"]
+    assert out["message"].endswith("。")
 
 
 def test_check_update_without_repo_returns_hint():

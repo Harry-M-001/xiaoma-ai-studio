@@ -1644,6 +1644,23 @@ export interface UpdateStatus {
   usedSource: string;
   usedRepo: string;
   error?: string;
+  /** 打包版（Windows 桌面版 / 便携版）能否在这里一键更新 */
+  canSelfUpdate?: boolean;
+  /** desktop：带启动器 exe；portable：只有 start.bat */
+  packageKind?: "desktop" | "portable" | "";
+}
+
+export interface PackagedUpdateResult {
+  updated: boolean;
+  fromVersion?: string;
+  toVersion?: string;
+  version?: string;
+  latest?: string;
+  backup?: string;
+  applied?: string[];
+  size?: number;
+  restartRequired?: boolean;
+  message: string;
 }
 
 export interface UpdateStep {

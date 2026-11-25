@@ -2085,8 +2085,9 @@ input, textarea, select { font-family: inherit; }
 .prompt-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .prompt-tag {
   font-size: 11.5px; color: var(--text-3); background: var(--surface-3);
-  border-radius: 999px; padding: 2px 9px;
+  border-radius: 999px; padding: 2px 9px; border: none; cursor: pointer;
 }
+.prompt-tag:hover { color: var(--primary); background: var(--primary-soft, var(--surface-3)); }
 .prompt-actions {
   display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 4px;
 }
